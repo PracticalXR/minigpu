@@ -1,6 +1,7 @@
 # gpu_tensor
 
-## 1.0.1-WIP
+## 1.0.1
+- Fix: pub.dev needs flutter dependency in pubspec.yaml
 
 ## 1.0.0
 

@@ -27,7 +27,17 @@ public:
   void readSync(void *outputData, size_t size, size_t offset = 0);
   void readAsync(void *outputData, size_t size, size_t offset,
                  std::function<void()> callback);
+  void setData(const double *inputData, size_t byteSize);
   void setData(const float *inputData, size_t byteSize);
+  void setData(const half *inputData, size_t byteSize);
+  void setData(const uint8_t *inputData, size_t byteSize);
+  void setData(const uint16_t *inputData, size_t byteSize);
+  void setData(const uint32_t *inputData, size_t byteSize);
+  void setData(const uint64_t *inputData, size_t byteSize);
+  void setData(const int8_t *inputData, size_t byteSize);
+  void setData(const int16_t *inputData, size_t byteSize);
+  void setData(const int32_t *inputData, size_t byteSize);
+  void setData(const int64_t *inputData, size_t byteSize);
   void release();
 
   gpu::Array bufferData;

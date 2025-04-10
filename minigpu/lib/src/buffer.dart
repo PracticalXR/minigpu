@@ -10,15 +10,29 @@ final class Buffer {
 
   /// Reads data from the buffer synchronously.
   Future<void> read(
-    Float32List outputData,
+    TypedData outputData,
     int size, {
     int readOffset = 0,
+    BufferDataType dataType = BufferDataType.float,
   }) async =>
-      platformBuffer.read(outputData, size, elementOffset: readOffset);
+      platformBuffer.read(
+        outputData,
+        size,
+        elementOffset: readOffset,
+        dataType: dataType,
+      );
 
   /// Writes data to the buffer.
-  void setData(Float32List inputData, int size) =>
-      platformBuffer.setData(inputData, size);
+  void setData(
+    TypedData inputData,
+    int size, {
+    BufferDataType dataType = BufferDataType.float,
+  }) =>
+      platformBuffer.setData(
+        inputData,
+        size,
+        dataType: dataType,
+      );
 
   /// Destroys the buffer.
   void destroy() => platformBuffer.destroy();

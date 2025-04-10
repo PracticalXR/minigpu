@@ -69,11 +69,12 @@ void main() {
         //     [9, 10, 11] ]
         final originalData = Float32List.fromList(
             List<double>.generate(12, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([2, 2, 3], data: originalData);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 2, 3], data: originalData);
 
         // Slice: select the first "plane" (dimension 0 = 0) completely.
         // New shape will be [1, 2, 3] and expected data [0, 1, 2, 3, 4, 5].
-        Tensor sliced = await tensor.slice(
+        Tensor<Float32List> sliced = await tensor.slice(
           startIndices: [0, 0, 0],
           endIndices: [1, 2, 3],
         );
@@ -88,14 +89,15 @@ void main() {
         // Fill with values 0...15 in row-major order.
         final originalData = Float32List.fromList(
             List<double>.generate(16, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([2, 2, 2, 2], data: originalData);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 2, 2, 2], data: originalData);
 
         // select element at indices [0, 0, :, :].
         // for dimension 0 & 1 fixed at 0, and complete slice for dimensions 2 and 3.
         // New shape: [1, 1, 2, 2] (4 elements).
         // Expected data from the original tensor:
         // [ [ [ [0, 1], [2, 3] ] ] ]
-        Tensor sliced = await tensor.slice(
+        Tensor<Float32List> sliced = await tensor.slice(
           startIndices: [0, 0, 0, 0],
           endIndices: [1, 1, 2, 2],
         );
@@ -111,7 +113,7 @@ void main() {
         // [0, 1, 2]
         // [3, 4, 5]
         final data = Float32List.fromList([0, 1, 2, 3, 4, 5]);
-        Tensor tensor = await Tensor.create([2, 3], data: data);
+        Tensor<Float32List> tensor = await Tensor.create([2, 3], data: data);
         // Get element at row 1, col 1 -> Expected: 4.0
         double value = await tensor.getElement([1, 1]);
         expect(value, equals(4.0));
@@ -120,7 +122,8 @@ void main() {
       test('setElement updates the correct element in a 2D tensor', () async {
         // Create a 2D tensor with shape [2,3] with initial values 0...5.
         final initialData = Float32List.fromList([0, 1, 2, 3, 4, 5]);
-        Tensor tensor = await Tensor.create([2, 3], data: initialData);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 3], data: initialData);
 
         // Update the element at row 1, col 1 (flat index 4) to the value 99.0.
         await tensor.setElement([1, 1], 99.0);
@@ -140,7 +143,7 @@ void main() {
 
       test('getElement throws error on invalid indices', () async {
         final data = Float32List.fromList([0, 1, 2, 3, 4, 5]);
-        Tensor tensor = await Tensor.create([2, 3], data: data);
+        Tensor<Float32List> tensor = await Tensor.create([2, 3], data: data);
         // Out-of-bound index for row dimension.
         expect(() => tensor.getElement([2, 0]), throwsException);
       });
@@ -152,7 +155,7 @@ void main() {
         // [6, 7, 8]
         final data =
             Float32List.fromList(List<double>.generate(9, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([3, 3], data: data);
+        Tensor<Float32List> tensor = await Tensor.create([3, 3], data: data);
         // Get the first 2 rows and 2 columns.
         String headStr = await tensor.head([2, 2]);
         // Expected formatted string: "[[0.0, 1.0], [3.0, 4.0]]"
@@ -166,7 +169,7 @@ void main() {
         // [6, 7, 8]
         final data =
             Float32List.fromList(List<double>.generate(9, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([3, 3], data: data);
+        Tensor<Float32List> tensor = await Tensor.create([3, 3], data: data);
         // Get the last 2 rows and 2 columns.
         String tailStr = await tensor.tail([2, 2]);
         // Expected formatted string: "[[4.0, 5.0], [7.0, 8.0]]"
@@ -177,7 +180,8 @@ void main() {
         // 4D tensor with shape [2,2,2,2] with data 0..15.
         final data = Float32List.fromList(
             List<double>.generate(16, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([2, 2, 2, 2], data: data);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 2, 2, 2], data: data);
         // For indices [1, 0, 1, 1]: strides are [8,4,2,1] so flat index = 1*8+0*4+1*2+1 = 11.
         double element = await tensor.getElement([1, 0, 1, 1]);
         expect(element, equals(11.0));
@@ -187,7 +191,8 @@ void main() {
         // 4D tensor with shape [2,2,2,2] with data 0..15.
         final data = Float32List.fromList(
             List<double>.generate(16, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([2, 2, 2, 2], data: data);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 2, 2, 2], data: data);
         // Use head() with counts [1,1,2,2]. This extracts the sub-tensor at indices [0,0,:,:]:
         // Expected sub-tensor (shape [1,1,2,2]) from tensor[0,0,:,:]:
         // Element indices: [0,0,0,0]=0, [0,0,0,1]=1, [0,0,1,0]=2, [0,0,1,1]=3.
@@ -200,7 +205,8 @@ void main() {
         // 4D tensor with shape [2,2,2,2] with data 0..15.
         final data = Float32List.fromList(
             List<double>.generate(16, (i) => i.toDouble()));
-        Tensor tensor = await Tensor.create([2, 2, 2, 2], data: data);
+        Tensor<Float32List> tensor =
+            await Tensor.create([2, 2, 2, 2], data: data);
         // Use tail() with counts [1,1,2,2]. Fallback tail computes startIndices = [2-1, 2-1, 2-2, 2-2] = [1,1,0,0],
         // then slices to get sub-tensor of shape [1,1,2,2] from tensor[1,1,:,:]:
         // Elements at tensor[1,1,0,0]=12, [1,1,0,1]=13, [1,1,1,0]=14, [1,1,1,1]=15.

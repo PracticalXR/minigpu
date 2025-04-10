@@ -114,75 +114,374 @@ final class FfiBuffer implements PlatformBuffer {
 
   @override
   Future<void> read(
-    Float32List outputData,
+    TypedData outputData,
     int readElements, {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
+    BufferDataType dataType = BufferDataType.float,
   }) async {
-    // Determine how many elements to read.
-    final int totalElements = outputData.length;
+    // Determine element size based on data type.
+    final int elementSize;
+    switch (dataType) {
+      case BufferDataType.int8:
+        elementSize = sizeOf<Int8>();
+        break;
+      case BufferDataType.int16:
+        elementSize = sizeOf<Int16>();
+        break;
+      case BufferDataType.int32:
+        elementSize = sizeOf<Int32>();
+        break;
+      case BufferDataType.int64:
+        elementSize = sizeOf<Int64>();
+        break;
+      case BufferDataType.uint8:
+        elementSize = sizeOf<Uint8>();
+        break;
+      case BufferDataType.uint16:
+        elementSize = sizeOf<Uint16>();
+        break;
+      case BufferDataType.uint32:
+        elementSize = sizeOf<Uint32>();
+        break;
+      case BufferDataType.float:
+        elementSize = sizeOf<Float>();
+        break;
+      case BufferDataType.double:
+        elementSize = sizeOf<Double>();
+        break;
+    }
+
+    final int totalElements = outputData.elementSizeInBytes ~/ elementSize;
     final int sizeToRead = readElements != 0
         ? readElements
         : (readBytes != 0
-            ? readBytes ~/ sizeOf<Float>()
+            ? readBytes ~/ elementSize
             : totalElements - elementOffset);
-
-    // Calculate effective byte offset for the GPU.
     final int effectiveByteOffset =
-        readElements != 0 ? elementOffset * sizeOf<Float>() : byteOffset;
+        readElements != 0 ? elementOffset * elementSize : byteOffset;
+    final int byteSize = sizeToRead * elementSize;
 
-    // byteSize in bytes to pass to the native function.
-    final int byteSize = sizeToRead * sizeOf<Float>();
-
-    // Allocate a temporary native Float array to receive the data.
-    final Pointer<Float> outputPtr = malloc.allocate<Float>(byteSize);
-
-    // Create a completer that will be completed when the native callback fires.
     final completer = Completer<void>();
 
-    // This is the native callback, matching the MGPUCallback signature.
+    // Native callback; called when the async operation completes.
     void nativeCallback() {
-      // Signal that the asynchronous native operation completed.
       completer.complete();
     }
 
-    // Wrap the Dart function as a native callable.
     final nativeCallable =
         NativeCallable<Void Function()>.listener(nativeCallback);
 
-    // Call the asynchronous native function.
-    ffi.mgpuReadBufferAsync(
-      _self,
-      outputPtr,
-      byteSize,
-      effectiveByteOffset,
-      nativeCallable.nativeFunction,
-    );
+    // Switch to call the proper native function.
+    switch (dataType) {
+      case BufferDataType.int8:
+        {
+          final Pointer<Int8> nativePtr = malloc.allocate<Int8>(byteSize);
 
-    // Wait until the callback signals that the data is ready.
-    await completer.future;
-
-    // Convert the native memory to a Dart typed list.
-    final List<double> readData = outputPtr.asTypedList(sizeToRead);
-    // Write into the outputData starting at index zero.
-    outputData.setAll(0, readData);
-
-    // Free the allocated native memory and close the native callback.
-    malloc.free(outputPtr);
+          ffi.mgpuReadBufferAsyncInt8(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Int8List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asInt8List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int16:
+        {
+          final Pointer<Int16> nativePtr = malloc.allocate<Int16>(byteSize);
+          ffi.mgpuReadBufferAsyncInt16(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Int16List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asInt16List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int32:
+        {
+          final Pointer<Int32> nativePtr = malloc.allocate<Int32>(byteSize);
+          ffi.mgpuReadBufferAsyncInt32(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Int32List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asInt32List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int64:
+        {
+          final Pointer<Int64> nativePtr = malloc.allocate<Int64>(byteSize);
+          ffi.mgpuReadBufferAsyncInt64(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Int64List) {
+            outputData.setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint8:
+        {
+          final Pointer<Uint8> nativePtr = malloc.allocate<Uint8>(byteSize);
+          ffi.mgpuReadBufferAsyncUint8(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Uint8List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asUint8List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint16:
+        {
+          final Pointer<Uint16> nativePtr = malloc.allocate<Uint16>(byteSize);
+          ffi.mgpuReadBufferAsyncUint16(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Uint16List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asUint16List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint32:
+        {
+          final Pointer<Uint32> nativePtr = malloc.allocate<Uint32>(byteSize);
+          ffi.mgpuReadBufferAsyncUint32(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Uint32List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asUint32List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.float:
+        {
+          final Pointer<Float> nativePtr = malloc.allocate<Float>(byteSize);
+          ffi.mgpuReadBufferAsyncFloat(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<double> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Float32List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asFloat32List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.double:
+        {
+          final Pointer<Double> nativePtr = malloc.allocate<Double>(byteSize);
+          ffi.mgpuReadBufferAsyncDouble(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<double> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Float64List) {
+            outputData.setAll(0, data);
+          } else if (outputData is ByteData) {
+            outputData.buffer.asFloat64List().setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
+    }
     nativeCallable.close();
-
     return;
   }
 
   @override
-  void setData(Float32List inputData, int size) {
-    int elementCount = inputData.length;
-    final inputPtr = malloc.allocate<Float>(elementCount * sizeOf<Float>());
-    final inputTypedList = inputPtr.asTypedList(elementCount);
-    inputTypedList.setAll(0, inputData);
-    ffi.mgpuSetBufferData(_self, inputPtr, elementCount * sizeOf<Float>());
-    malloc.free(inputPtr);
+  void setData(
+    TypedData inputData,
+    int size, {
+    BufferDataType dataType = BufferDataType.float,
+  }) {
+    // Determine element size based on data type.
+    final int elementSize;
+    switch (dataType) {
+      case BufferDataType.int8:
+        elementSize = sizeOf<Int8>();
+        break;
+      case BufferDataType.int16:
+        elementSize = sizeOf<Int16>();
+        break;
+      case BufferDataType.int32:
+        elementSize = sizeOf<Int32>();
+        break;
+      case BufferDataType.int64:
+        elementSize = sizeOf<Int64>();
+        break;
+      case BufferDataType.uint8:
+        elementSize = sizeOf<Uint8>();
+        break;
+      case BufferDataType.uint16:
+        elementSize = sizeOf<Uint16>();
+        break;
+      case BufferDataType.uint32:
+        elementSize = sizeOf<Uint32>();
+        break;
+      case BufferDataType.float:
+        elementSize = sizeOf<Float>();
+        break;
+      case BufferDataType.double:
+        elementSize = sizeOf<Double>();
+        break;
+    }
+
+    final int byteSize = size * elementSize;
+
+    switch (dataType) {
+      case BufferDataType.int8:
+        {
+          final Pointer<Int8> nativePtr = malloc.allocate<Int8>(byteSize);
+          final List<int> data = (inputData as Int8List).toList();
+          nativePtr.asTypedList(byteSize).setAll(0, data);
+          ffi.mgpuSetBufferDataInt8(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int16:
+        {
+          final Pointer<Int16> nativePtr = malloc.allocate<Int16>(byteSize);
+          final List<int> data = (inputData as Int16List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataInt16(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int32:
+        {
+          final Pointer<Int32> nativePtr = malloc.allocate<Int32>(byteSize);
+          final List<int> data = (inputData as Int32List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataInt32(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.int64:
+        {
+          final Pointer<Int64> nativePtr = malloc.allocate<Int64>(byteSize);
+          final List<int> data = (inputData as Int64List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataInt64(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint8:
+        {
+          final Pointer<Uint8> nativePtr = malloc.allocate<Uint8>(byteSize);
+          final List<int> data = (inputData as Uint8List).toList();
+          nativePtr.asTypedList(byteSize).setAll(0, data);
+          ffi.mgpuSetBufferDataUint8(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint16:
+        {
+          final Pointer<Uint16> nativePtr = malloc.allocate<Uint16>(byteSize);
+          final List<int> data = (inputData as Uint16List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataUint16(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint32:
+        {
+          final Pointer<Uint32> nativePtr = malloc.allocate<Uint32>(byteSize);
+          final List<int> data = (inputData as Uint32List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataUint32(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.float:
+        {
+          final Pointer<Float> nativePtr = malloc.allocate<Float>(byteSize);
+          final List<double> data = (inputData as Float32List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataFloat(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.double:
+        {
+          final Pointer<Double> nativePtr = malloc.allocate<Double>(byteSize);
+          final List<double> data = (inputData as Float64List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataDouble(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+    }
   }
 
   @override

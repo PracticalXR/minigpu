@@ -33,6 +33,7 @@ ffigen:
     include-directives:
       - "src/include/*.h"
       - "/usr/lib/clang/18/include/stdbool.h"
+      - "/usr/lib/clang/18/include/stdint.h"
   preamble: |
     // ignore_for_file: camel_case_types
     // ignore_for_file: prefer_double_quotes
@@ -44,6 +45,6 @@ ffigen:
   llvm-path:
     - /usr/lib64/libclang.so
   compiler-opts:
-    - -I/usr/lib/clang/18/include/
+    - "-I/usr/lib/clang/18/include/"
   ffi-native:
 

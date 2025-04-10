@@ -4,6 +4,19 @@ import 'platform_stub/minigpu_platform_stub.dart'
     if (dart.library.ffi) 'package:minigpu_ffi/minigpu_ffi.dart'
     if (dart.library.js) 'package:minigpu_web/minigpu_web.dart';
 
+/// Enum representing supported buffer data types.
+enum BufferDataType {
+  int8,
+  int16,
+  int32,
+  int64,
+  uint8,
+  uint16,
+  uint32,
+  float,
+  double,
+}
+
 abstract class MinigpuPlatform {
   MinigpuPlatform();
 
@@ -34,13 +47,18 @@ abstract class PlatformComputeShader {
 
 abstract class PlatformBuffer {
   Future<void> read(
-    Float32List outputData,
+    TypedData outputData,
     int readElements, {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
+    BufferDataType dataType = BufferDataType.float,
   });
-  void setData(Float32List inputData, int size);
+  void setData(
+    TypedData inputData,
+    int size, {
+    BufferDataType dataType = BufferDataType.float,
+  });
   void destroy();
 }
 

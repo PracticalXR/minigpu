@@ -1,10 +1,12 @@
+import 'dart:typed_data';
+
 import 'package:minigpu/minigpu.dart';
 import '../gpu_tensor.dart';
 
-extension GpuActivation on Tensor {
+extension GpuActivation<T extends TypedData> on Tensor<T> {
   /// Applies the ReLU activation function elementwise.
-  Future<Tensor> relu() async {
-    Tensor result = await Tensor.create(shape);
+  Future<Tensor<T>> relu() async {
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -29,8 +31,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   /// Applies the Sigmoid activation function elementwise.
-  Future<Tensor> sigmoid() async {
-    Tensor result = await Tensor.create(shape);
+  Future<Tensor<T>> sigmoid() async {
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -58,8 +60,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   /// Computes the sine of each element.
-  Future<Tensor> sin() async {
-    Tensor result = await Tensor.create(shape);
+  Future<Tensor<T>> sin() async {
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
@@ -83,8 +85,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   /// Computes the cosine of each element.
-  Future<Tensor> cos() async {
-    Tensor result = await Tensor.create(shape);
+  Future<Tensor<T>> cos() async {
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
@@ -108,8 +110,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /// Applies the Tanh activation function elementwise.
-  Future<Tensor> tanh() async {
-    Tensor result = await Tensor.create(shape);
+  Future<Tensor<T>> tanh() async {
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -141,7 +143,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   /// Applies the Softmax activation function along the last dimension.
   /// For higher dimensional tensors, softmax is applied to each slice
   /// of size (last dimension) independently.
-  Future<Tensor> softmax({int axis = -1}) async {
+  Future<Tensor<T>> softmax({int axis = -1}) async {
     // For now, we only support softmax along the last dimension.
     int d = shape.last; // inner dimension size
     int total = size;
@@ -150,7 +152,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       throw Exception(
           "Currently only softmax along the last dimension is supported.");
     }
-    Tensor result = await Tensor.create(shape);
+    Tensor<T> result = await Tensor.create<T>(shape);
     final shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;

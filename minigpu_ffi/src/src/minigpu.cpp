@@ -102,7 +102,7 @@ void mgpuDispatchAsync(MGPUComputeShader *shader, int groupsX, int groupsY,
   }
 }
 
-void mgpuReadBufferSync(MGPUBuffer *buffer, float *outputData, size_t size,
+void mgpuReadBufferSync(MGPUBuffer *buffer, void *outputData, size_t size,
                         size_t offset) {
   if (buffer && outputData) {
     reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(outputData, size,
@@ -112,18 +112,194 @@ void mgpuReadBufferSync(MGPUBuffer *buffer, float *outputData, size_t size,
   }
 }
 
-void mgpuReadBufferAsync(MGPUBuffer *buffer, float *outputData, size_t size,
-                         size_t offset, MGPUCallback callback) {
+// Signed Integer Types
+void mgpuReadBufferAsyncInt8(MGPUBuffer *buffer, int8_t *outputData,
+                             size_t size, size_t offset,
+                             MGPUCallback callback) {
   if (buffer && outputData && callback) {
     reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, size,
                                                         offset, callback);
   } else {
-    LOG(kDefLog, kError, "Invalid buffer, outputData, or callback pointer");
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (int8)");
   }
 }
 
-void mgpuSetBufferData(MGPUBuffer *buffer, const float *inputData,
-                       size_t byteSize) {
+void mgpuReadBufferAsyncInt16(MGPUBuffer *buffer, int16_t *outputData,
+                              size_t size, size_t offset,
+                              MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (int16)");
+  }
+}
+
+void mgpuReadBufferAsyncInt32(MGPUBuffer *buffer, int32_t *outputData,
+                              size_t size, size_t offset,
+                              MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (int32)");
+  }
+}
+
+void mgpuReadBufferAsyncInt64(MGPUBuffer *buffer, int64_t *outputData,
+                              size_t size, size_t offset,
+                              MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (int64)");
+  }
+}
+
+// Unsigned Integer Types
+void mgpuReadBufferAsyncUint8(MGPUBuffer *buffer, uint8_t *outputData,
+                              size_t size, size_t offset,
+                              MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, size,
+                                                        offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (uint8)");
+  }
+}
+
+void mgpuReadBufferAsyncUint16(MGPUBuffer *buffer, uint16_t *outputData,
+                               size_t size, size_t offset,
+                               MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (uint16)");
+  }
+}
+
+void mgpuReadBufferAsyncUint32(MGPUBuffer *buffer, uint32_t *outputData,
+                               size_t size, size_t offset,
+                               MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (uint32)");
+  }
+}
+
+// Floating Point Number Types
+void mgpuReadBufferAsyncFloat(MGPUBuffer *buffer, float *outputData,
+                              size_t size, size_t offset,
+                              MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (float)");
+  }
+}
+
+void mgpuReadBufferAsyncDouble(MGPUBuffer *buffer, double *outputData,
+                               size_t size, size_t offset,
+                               MGPUCallback callback) {
+  if (buffer && outputData && callback) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+        static_cast<void *>(outputData), size, offset, callback);
+  } else {
+    LOG(kDefLog, kError,
+        "Invalid buffer, outputData, or callback pointer (double)");
+  }
+}
+
+// Signed Integer Types
+void mgpuSetBufferDataInt8(MGPUBuffer *buffer, const int8_t *inputData,
+                           size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataInt16(MGPUBuffer *buffer, const int16_t *inputData,
+                            size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataInt32(MGPUBuffer *buffer, const int32_t *inputData,
+                            size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataInt64(MGPUBuffer *buffer, const int64_t *inputData,
+                            size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+// Unsigned Integer Types
+void mgpuSetBufferDataUint8(MGPUBuffer *buffer, const uint8_t *inputData,
+                            size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataUint16(MGPUBuffer *buffer, const uint16_t *inputData,
+                             size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataUint32(MGPUBuffer *buffer, const uint32_t *inputData,
+                             size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+// Floating Point Number Types
+void mgpuSetBufferDataFloat(MGPUBuffer *buffer, const float *inputData,
+                            size_t byteSize) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
+  } else {
+    LOG(kDefLog, kError, "Invalid buffer or inputData pointer");
+  }
+}
+
+void mgpuSetBufferDataDouble(MGPUBuffer *buffer, const double *inputData,
+                             size_t byteSize) {
   if (buffer && inputData) {
     reinterpret_cast<mgpu::Buffer *>(buffer)->setData(inputData, byteSize);
   } else {

@@ -1,38 +1,37 @@
 import 'dart:typed_data';
 import 'package:gpu_tensor/gpu_tensor.dart';
+import 'package:minigpu/minigpu.dart';
 
 Future<void> main() async {
   // Create a 3x3 tensor (Tensor A) with values 1..9.
-  final a = await Tensor.create(
-    [3, 3],
-    data: Float32List.fromList([
-      1,
-      2,
-      3,
-      4,
-      5,
-      6,
-      7,
-      8,
-      9,
-    ]),
-  );
+  final a = await Tensor.create<Uint8List>([3, 3],
+      data: Uint8List.fromList([
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+      ]),
+      dataType: BufferDataType.uint8);
 
   // Create another 3x3 tensor (Tensor B) with values 9..1.
-  final b = await Tensor.create(
-    [3, 3],
-    data: Float32List.fromList([
-      9,
-      8,
-      7,
-      6,
-      5,
-      4,
-      3,
-      2,
-      1,
-    ]),
-  );
+  final b = await Tensor.create<Uint8List>([3, 3],
+      data: Uint8List.fromList([
+        9,
+        8,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2,
+        1,
+      ]),
+      dataType: BufferDataType.uint8);
 
   // Elementwise addition.
   final added = await (a + b);
