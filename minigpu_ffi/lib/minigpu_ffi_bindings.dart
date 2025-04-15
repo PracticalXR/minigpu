@@ -171,6 +171,17 @@ external void mgpuReadBufferAsyncUint32(
 );
 
 @ffi.Native<
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>,
+        ffi.Size, ffi.Size, MGPUCallback)>()
+external void mgpuReadBufferAsyncUint64(
+  ffi.Pointer<MGPUBuffer> buffer,
+  ffi.Pointer<ffi.Uint64> outputData,
+  int size,
+  int offset,
+  MGPUCallback callback,
+);
+
+@ffi.Native<
     ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size,
         ffi.Size, MGPUCallback)>()
 external void mgpuReadBufferAsyncFloat(
@@ -252,6 +263,15 @@ external void mgpuSetBufferDataUint16(
 external void mgpuSetBufferDataUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> inputData,
+  int byteSize,
+);
+
+@ffi.Native<
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size)>()
+external void mgpuSetBufferDataUint64(
+  ffi.Pointer<MGPUBuffer> buffer,
+  ffi.Pointer<ffi.Uint64> inputData,
   int byteSize,
 );
 

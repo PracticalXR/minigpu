@@ -7,16 +7,17 @@ extension GpuActivation<T extends TypedData> on Tensor<T> {
   /// Applies the ReLU activation function elementwise.
   Future<Tensor<T>> relu() async {
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i: u32 = gid.x;
   if (i < ${size}u) {
-    let v: f32 = input[i];
-    output[i] = select(v, 0.0, v < 0.0);
+    let v: $wgslType = input[i];
+    output[i] = select(v, ${wgslType == 'f32' ? '0.0' : '0'}, v < ${wgslType == 'f32' ? '0.0' : '0'});
   }
 }
 ''';
@@ -33,11 +34,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   /// Applies the Sigmoid activation function elementwise.
   Future<Tensor<T>> sigmoid() async {
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
-fn sigmoid(x: f32) -> f32 {
+fn sigmoid(x: $wgslType) -> $wgslType {
   return 1.0 / (1.0 + exp(-x));
 }
 
@@ -62,9 +64,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   /// Computes the sine of each element.
   Future<Tensor<T>> sin() async {
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> A: array<f32>;
-@group(0) @binding(1) var<storage, read_write> B: array<f32>;
+@group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> B: array<$wgslType>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -87,9 +90,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   /// Computes the cosine of each element.
   Future<Tensor<T>> cos() async {
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> A: array<f32>;
-@group(0) @binding(1) var<storage, read_write> B: array<f32>;
+@group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> B: array<$wgslType>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -112,11 +116,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   /// Applies the Tanh activation function elementwise.
   Future<Tensor<T>> tanh() async {
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
-fn tanh_func(x: f32) -> f32 {
+fn tanh_func(x: $wgslType) -> $wgslType {
   let expPos = exp(x);
   let expNeg = exp(-x);
   return (expPos - expNeg) / (expPos + expNeg);
@@ -147,15 +152,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     // For now, we only support softmax along the last dimension.
     int d = shape.last; // inner dimension size
     int total = size;
-    // Optionally, throw if axis is not last dimension:
     if (axis != -1 && axis != shape.length - 1) {
-      throw Exception(
-          "Currently only softmax along the last dimension is supported.");
+      throw Exception("Only softmax along the last dimension is supported.");
     }
     Tensor<T> result = await Tensor.create<T>(shape);
+    final wgslType = getWGSLType(result.dataType);
     final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -166,14 +170,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let offset: u32 = batchIndex * d;
     
     // Compute maximum value within this softmax group.
-    var max_val: f32 = input[offset];
+    var max_val: $wgslType = input[offset];
     for (var j: u32 = 1u; j < d; j = j + 1u) {
       max_val = max(max_val, input[offset + j]);
     }
     
-    let shifted: f32 = input[global] - max_val;
-    let exp_val: f32 = exp(shifted);
-    var sum_exp: f32 = 0.0;
+    let shifted: $wgslType = input[global] - max_val;
+    let exp_val: $wgslType = exp(shifted);
+    var sum_exp: $wgslType = ${wgslType == 'f32' ? '0.0' : '0'};
     for (var j: u32 = 0u; j < d; j = j + 1u) {
       sum_exp = sum_exp + exp(input[offset + j] - max_val);
     }

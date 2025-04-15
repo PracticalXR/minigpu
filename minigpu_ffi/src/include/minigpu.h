@@ -54,6 +54,9 @@ EXPORT void mgpuReadBufferAsyncUint16(MGPUBuffer *buffer, uint16_t *outputData,
 EXPORT void mgpuReadBufferAsyncUint32(MGPUBuffer *buffer, uint32_t *outputData,
                                       size_t size, size_t offset,
                                       MGPUCallback callback);
+EXPORT void mgpuReadBufferAsyncUint64(MGPUBuffer *buffer, uint64_t *outputData,
+                                      size_t size, size_t offset,
+                                      MGPUCallback callback);
 // Floating Point Number Types
 EXPORT void mgpuReadBufferAsyncFloat(MGPUBuffer *buffer, float *outputData,
                                      size_t size, size_t offset,
@@ -77,6 +80,8 @@ EXPORT void mgpuSetBufferDataUint16(MGPUBuffer *buffer,
                                     const uint16_t *inputData, size_t byteSize);
 EXPORT void mgpuSetBufferDataUint32(MGPUBuffer *buffer,
                                     const uint32_t *inputData, size_t byteSize);
+EXPORT void mgpuSetBufferDataUint64(MGPUBuffer *buffer,
+                                    const uint64_t *inputData, size_t byteSize);
 // Floating Point Number Types
 EXPORT void mgpuSetBufferDataFloat(MGPUBuffer *buffer, const float *inputData,
                                    size_t byteSize);

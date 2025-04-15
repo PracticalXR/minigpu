@@ -44,7 +44,9 @@ Buffer::Buffer(MGPU &mgpu) : mgpu(mgpu) {
   bufferData.size = 0;
 }
 void Buffer::createBuffer(int bufferSize) {
-  size_t paddedSize = ((bufferSize + 3) / 4) * 4;
+  bufferType = ki8;
+
+  size_t paddedSize = (bufferSize + 3) & ~3; // Pad to multiple of 4 bytes
   LOG(kDefLog, kInfo, "Creating buffer of size: %d bytes", paddedSize);
   WGPUBufferUsage usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst |
                           WGPUBufferUsage_CopySrc;
@@ -64,53 +66,41 @@ void Buffer::createBuffer(int bufferSize) {
   bufferData = gpu::Array{
       .buffer = buffer,
       .usage = usage,
-      .size = static_cast<size_t>(bufferSize),
+      .size = static_cast<size_t>(paddedSize),
   };
 }
 
-void Buffer::readSync(void *outputData, size_t size, size_t offset) {
-  size_t paddedSize = ((size + 3) / 4) * 4;
-  LOG(kDefLog, kInfo, "readSync (float*): Reading %zu bytes from buffer", size);
+void Buffer::readSync(void *outputData, NumType dType, size_t size,
+                      size_t offset) {
+  LOG(kDefLog, kInfo, "type to unpack %zu", dType);
+  size_t paddedSize = (size + 3) & ~3; // Pad to multiple of 4 bytes
 
-  gpu::toCPU(this->mgpu.getContext(), bufferData.buffer, outputData, paddedSize,
+  gpu::toCPU(this->mgpu.getContext(), bufferData.buffer, dType, outputData, size,
              offset);
-
-  size_t numFloats = size / sizeof(float);
-  if (numFloats > 0) {
-    std::string floatString = "readSync (float*): Floats: ";
-    for (size_t i = 0; i < numFloats; i++) {
-      floatString += std::to_string(static_cast<float *>(outputData)[i]);
-      if (i < numFloats - 1)
-        floatString += ", ";
-    }
-    LOG(kDefLog, kInfo, floatString.c_str());
-  } else {
-    LOG(kDefLog, kInfo,
-        "readSync (float*): Not enough data to display float values");
-  }
 }
 
-void Buffer::readAsync(void *outputData, size_t size, size_t offset,
-                       std::function<void()> callback) {
+void Buffer::readAsync(void *outputData, NumType dType, size_t size,
+                       size_t offset, std::function<void()> callback) {
   std::thread([=]() {
-    readSync(outputData, size, offset);
+    readSync(outputData, dType, size, offset);
     if (callback)
       callback();
   }).detach();
 }
 
 void Buffer::setData(const float *inputData, size_t byteSize) {
-  size_t paddedSize = ((byteSize + 3) / 4) * 4;
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
-    createBuffer(paddedSize);
+    createBuffer(byteSize);
   }
-  gpu::toGPU(this->mgpu.getContext(), inputData, bufferData.buffer, paddedSize);
+  bufferType = kf32;
+  gpu::toGPU(this->mgpu.getContext(), inputData, bufferData.buffer, byteSize);
 }
 
 void Buffer::setData(const double *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = kf64;
   std::string bufferString = "mgpuSetBufferData (double): ";
   size_t count = byteSize / sizeof(double);
   for (size_t i = 0; i < count; i++) {
@@ -123,12 +113,13 @@ void Buffer::setData(const double *inputData, size_t byteSize) {
 }
 
 void Buffer::setData(const uint8_t *inputData, size_t byteSize) {
-  size_t paddedSize = ((byteSize + 3) / 4) * 4;
+  size_t paddedSize = (byteSize + 3) & ~3; // Pad to multiple of 4 bytes
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
-    createBuffer(byteSize);
+    createBuffer(paddedSize);
   }
+  bufferType = ki8;
   std::string bufferString = "mgpuSetBufferData (uint8_t): ";
-  size_t count = byteSize;
+  size_t count = paddedSize;
   for (size_t i = 0; i < count; i++) {
     bufferString += std::to_string(inputData[i]);
     if (i < count - 1)
@@ -143,6 +134,7 @@ void Buffer::setData(const uint16_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ki16;
   std::string bufferString = "mgpuSetBufferData (uint16_t): ";
   size_t count = byteSize / sizeof(uint16_t);
   for (size_t i = 0; i < count; i++) {
@@ -158,6 +150,7 @@ void Buffer::setData(const uint32_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ki32;
   std::string bufferString = "mgpuSetBufferData (uint32_t): ";
   size_t count = byteSize / sizeof(uint32_t);
   for (size_t i = 0; i < count; i++) {
@@ -173,6 +166,7 @@ void Buffer::setData(const uint64_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ki64;
   std::string bufferString = "mgpuSetBufferData (uint64_t): ";
   size_t count = byteSize / sizeof(uint64_t);
   for (size_t i = 0; i < count; i++) {
@@ -185,26 +179,27 @@ void Buffer::setData(const uint64_t *inputData, size_t byteSize) {
 }
 
 void Buffer::setData(const int8_t *inputData, size_t byteSize) {
-  size_t paddedSize = ((byteSize + 3) / 4) * 4;
-
+  size_t paddedSize = (byteSize + 3) & ~3; // Pad to multiple of 4 bytes
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
-    createBuffer(byteSize);
+    createBuffer(paddedSize);
   }
+  bufferType = ku8;
   std::string bufferString = "mgpuSetBufferData (int8_t): ";
-  size_t count = byteSize / sizeof(int8_t);
+  size_t count = paddedSize / sizeof(int8_t);
   for (size_t i = 0; i < count; i++) {
     bufferString += std::to_string(inputData[i]);
     if (i < count - 1)
       bufferString += ", ";
   }
   LOG(kDefLog, kInfo, bufferString.c_str());
-  gpu::toGPU(this->mgpu.getContext(), inputData, bufferData.buffer, paddedSize);
+  gpu::toGPU(this->mgpu.getContext(), inputData, bufferData.buffer, byteSize);
 }
 
 void Buffer::setData(const int16_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ku16;
   std::string bufferString = "mgpuSetBufferData (int16_t): ";
   size_t count = byteSize / sizeof(int16_t);
   for (size_t i = 0; i < count; i++) {
@@ -220,6 +215,7 @@ void Buffer::setData(const int32_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ku32;
   std::string bufferString = "mgpuSetBufferData (int32_t): ";
   size_t count = byteSize / sizeof(int32_t);
   for (size_t i = 0; i < count; i++) {
@@ -235,6 +231,7 @@ void Buffer::setData(const int64_t *inputData, size_t byteSize) {
   if (bufferData.buffer == nullptr || byteSize > bufferData.size) {
     createBuffer(byteSize);
   }
+  bufferType = ku64;
   std::string bufferString = "mgpuSetBufferData (int64_t): ";
   size_t count = byteSize / sizeof(int64_t);
   for (size_t i = 0; i < count; i++) {

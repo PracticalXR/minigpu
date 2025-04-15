@@ -145,6 +145,9 @@ final class FfiBuffer implements PlatformBuffer {
       case BufferDataType.uint32:
         elementSize = sizeOf<Uint32>();
         break;
+      case BufferDataType.uint64:
+        elementSize = sizeOf<Uint64>();
+        break;
       case BufferDataType.float:
         elementSize = sizeOf<Float>();
         break;
@@ -314,6 +317,24 @@ final class FfiBuffer implements PlatformBuffer {
           malloc.free(nativePtr);
         }
         break;
+      case BufferDataType.uint64:
+        {
+          final Pointer<Uint64> nativePtr = malloc.allocate<Uint64>(byteSize);
+          ffi.mgpuReadBufferAsyncUint64(
+            _self,
+            nativePtr,
+            byteSize,
+            effectiveByteOffset,
+            nativeCallable.nativeFunction,
+          );
+          await completer.future;
+          final List<int> data = nativePtr.asTypedList(sizeToRead);
+          if (outputData is Uint64List) {
+            outputData.setAll(0, data);
+          }
+          malloc.free(nativePtr);
+        }
+        break;
       case BufferDataType.float:
         {
           final Pointer<Float> nativePtr = malloc.allocate<Float>(byteSize);
@@ -348,8 +369,6 @@ final class FfiBuffer implements PlatformBuffer {
           final List<double> data = nativePtr.asTypedList(sizeToRead);
           if (outputData is Float64List) {
             outputData.setAll(0, data);
-          } else if (outputData is ByteData) {
-            outputData.buffer.asFloat64List().setAll(0, data);
           }
           malloc.free(nativePtr);
         }
@@ -388,6 +407,9 @@ final class FfiBuffer implements PlatformBuffer {
         break;
       case BufferDataType.uint32:
         elementSize = sizeOf<Uint32>();
+        break;
+      case BufferDataType.uint64:
+        elementSize = sizeOf<Uint64>();
         break;
       case BufferDataType.float:
         elementSize = sizeOf<Float>();
@@ -460,6 +482,15 @@ final class FfiBuffer implements PlatformBuffer {
           final List<int> data = (inputData as Uint32List).toList();
           nativePtr.asTypedList(size).setAll(0, data);
           ffi.mgpuSetBufferDataUint32(_self, nativePtr, byteSize);
+          malloc.free(nativePtr);
+        }
+        break;
+      case BufferDataType.uint64:
+        {
+          final Pointer<Uint64> nativePtr = malloc.allocate<Uint64>(byteSize);
+          final List<int> data = (inputData as Uint64List).toList();
+          nativePtr.asTypedList(size).setAll(0, data);
+          ffi.mgpuSetBufferDataUint64(_self, nativePtr, byteSize);
           malloc.free(nativePtr);
         }
         break;

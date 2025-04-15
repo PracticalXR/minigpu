@@ -41,13 +41,13 @@ class _FFTDemoPageState extends State<FFTDemoPage> {
     for (int i = 0; i < n; i++) {
       realData[i] = i.toDouble();
     }
-    Tensor tensor = await Tensor.create([n], data: realData);
+    final tensor = await Tensor.create<Float32List>([n], data: realData);
 
     // Compute the FFT.
-    Tensor fftResult = await tensor.fft1d();
+    var fftResult = await tensor.fft();
 
     // Retrieve FFT output data.
-    Float32List resultData = await fftResult.getData();
+    var resultData = await fftResult.getData();
 
     setState(() {
       _isComputing = false;

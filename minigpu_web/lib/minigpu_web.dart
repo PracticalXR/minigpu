@@ -72,25 +72,157 @@ class WebBuffer implements PlatformBuffer {
 
   @override
   Future<void> read(
-    Float32List outputData,
+    TypedData outputData,
     int readElements, {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
+    BufferDataType dataType = BufferDataType.float,
   }) async {
-    await wasm.mgpuReadBufferSync(
-      _buffer,
-      outputData,
-      readElements: readElements,
-      elementOffset: elementOffset,
-      readBytes: readBytes,
-      byteOffset: byteOffset,
-    );
+    switch (dataType) {
+      case BufferDataType.int8:
+        await wasm.mgpuReadBufferAsyncInt8(
+          _buffer,
+          outputData as Int8List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.int16:
+        await wasm.mgpuReadBufferAsyncInt16(
+          _buffer,
+          outputData as Int16List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.int32:
+        await wasm.mgpuReadBufferAsyncInt32(
+          _buffer,
+          outputData as Int32List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.int64:
+        await wasm.mgpuReadBufferAsyncInt64(
+          _buffer,
+          outputData is ByteData
+              ? outputData
+              : (outputData.buffer.asByteData()),
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.uint8:
+        await wasm.mgpuReadBufferAsyncUint8(
+          _buffer,
+          outputData as Uint8List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.uint16:
+        await wasm.mgpuReadBufferAsyncUint16(
+          _buffer,
+          outputData as Uint16List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.uint32:
+        await wasm.mgpuReadBufferAsyncUint32(
+          _buffer,
+          outputData as Uint32List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.uint64:
+        await wasm.mgpuReadBufferAsyncUint64(
+          _buffer,
+          outputData as Uint64List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.float:
+        await wasm.mgpuReadBufferAsyncFloat(
+          _buffer,
+          outputData as Float32List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+      case BufferDataType.double:
+        await wasm.mgpuReadBufferAsyncDouble(
+          _buffer,
+          outputData as Float64List,
+          readElements: readElements,
+          elementOffset: elementOffset,
+          readBytes: readBytes,
+          byteOffset: byteOffset,
+        );
+        break;
+    }
   }
 
   @override
-  void setData(Float32List inputData, int size) {
-    wasm.mgpuSetBufferData(_buffer, inputData, size);
+  void setData(
+    TypedData inputData,
+    int size, {
+    BufferDataType dataType = BufferDataType.float,
+  }) {
+    switch (dataType) {
+      case BufferDataType.int8:
+        wasm.mgpuSetBufferDataInt8(_buffer, inputData as Int8List, size);
+        break;
+      case BufferDataType.int16:
+        wasm.mgpuSetBufferDataInt16(_buffer, inputData as Int16List, size);
+        break;
+      case BufferDataType.int32:
+        wasm.mgpuSetBufferDataInt32(_buffer, inputData as Int32List, size);
+        break;
+      case BufferDataType.int64:
+        wasm.mgpuSetBufferDataInt64(_buffer, inputData as Int64List, size);
+        break;
+      case BufferDataType.uint8:
+        wasm.mgpuSetBufferDataUint8(_buffer, inputData as Uint8List, size);
+        break;
+      case BufferDataType.uint16:
+        wasm.mgpuSetBufferDataUint16(_buffer, inputData as Uint16List, size);
+        break;
+      case BufferDataType.uint32:
+        wasm.mgpuSetBufferDataUint32(_buffer, inputData as Uint32List, size);
+        break;
+      case BufferDataType.uint64:
+        wasm.mgpuSetBufferDataUint64(_buffer, inputData as Uint64List, size);
+        break;
+      case BufferDataType.float:
+        wasm.mgpuSetBufferDataFloat(_buffer, inputData as Float32List, size);
+        break;
+      case BufferDataType.double:
+        wasm.mgpuSetBufferDataDouble(_buffer, inputData as Float64List, size);
+        break;
+    }
   }
 
   @override

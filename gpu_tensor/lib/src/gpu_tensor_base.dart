@@ -14,6 +14,7 @@ int _elementSize(BufferDataType type) {
     case BufferDataType.float:
       return 4;
     case BufferDataType.int64:
+    case BufferDataType.uint64:
     case BufferDataType.double:
       return 8;
   }

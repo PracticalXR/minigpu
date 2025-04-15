@@ -33,7 +33,7 @@ class _InteractiveShaderExampleState extends State<InteractiveShaderExample> {
   late ComputeShader _shader;
   late Buffer _inputBuffer;
   late Buffer _outputBuffer;
-  List<double> _result = [];
+  List<int> _result = [];
   final TextEditingController _shaderController = TextEditingController();
 
   int _bufferSize = 100; // current buffer size
@@ -54,15 +54,15 @@ class _InteractiveShaderExampleState extends State<InteractiveShaderExample> {
     // default WGSL kernel code (similar to a GELU operation)
     _shaderController.text = '''
 const GELU_SCALING_FACTOR: f32 = 0.7978845608028654; // sqrt(2.0 / PI)
-@group(0) @binding(0) var<storage, read_write> inp: array<f32>;
-@group(0) @binding(1) var<storage, read_write> out: array<f32>;
+@group(0) @binding(0) var<storage, read_write> inp: array<i32>;
+@group(0) @binding(1) var<storage, read_write> out: array<i32>;
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     let i: u32 = GlobalInvocationID.x;
     if (i < arrayLength(&inp)) {
-        let x: f32 = inp[i];
+        let x: i32 = inp[i];
         //out[i] = select(0.5 * x * (1.0 + tanh(GELU_SCALING_FACTOR * (x + .044715 * x * x * x))), x, x > 10.0);
-        out[i] = inp[i] + .2;
+        out[i] = inp[i] + 1;
     }
 }
 ''';
@@ -77,25 +77,26 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
   }
 
   void _createBuffers() {
-    int memSize = _bufferSize * floatSize;
+    int memSize = getBufferSizeForType(BufferDataType.int8, _bufferSize);
     _inputBuffer = _minigpu.createBuffer(memSize);
     _outputBuffer = _minigpu.createBuffer(memSize);
   }
 
   void _setBufferData() {
-    List<double> data = List.generate(_bufferSize, (i) => i / 10.0);
-    final Float32List floatData = Float32List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize);
+    List<int> data = List.generate(_bufferSize, (i) => i + 10);
+    final Int8List floatData = Int8List.fromList(data);
+    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
   }
 
   void _initializeBuffer() {
-    List<double> data = List.generate(_bufferSize, (i) => i / 10.0);
-    final Float32List floatData = Float32List.fromList(data);
+    List<int> data = List.generate(_bufferSize, (i) => i + 10);
+    final Int8List floatData = Int8List.fromList(data);
     if (_minigpu.isInitialized) {
-      _inputBuffer.setData(floatData, _bufferSize);
+      _inputBuffer.setData(floatData, _bufferSize,
+          dataType: BufferDataType.int8);
     }
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
@@ -103,19 +104,19 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
   }
 
   void _resetBuffer() {
-    List<double> data = List.filled(_bufferSize, 0.0);
-    final Float32List floatData = Float32List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize);
+    List<int> data = List.filled(_bufferSize, 0);
+    final Int8List floatData = Int8List.fromList(data);
+    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
   }
 
   void _randomizeBuffer() {
-    List<double> data =
-        List.generate(_bufferSize, (i) => -5 + _random.nextDouble() * 10);
-    final Float32List floatData = Float32List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize);
+    List<int> data =
+        List.generate(_bufferSize, (i) => -5 + _random.nextInt(10) * 10);
+    final Int8List floatData = Int8List.fromList(data);
+    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
@@ -129,14 +130,16 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     int workgroups = ((_bufferSize + 255) / 256).floor();
     await _shader.dispatch(workgroups, 1, 1);
 
-    final Float32List outputData = Float32List(_bufferSize);
-    await _outputBuffer.read(outputData, _bufferSize);
+    final Int8List outputData = Int8List(_bufferSize);
+    await _outputBuffer.read(outputData, _bufferSize,
+        dataType: BufferDataType.int8);
 
     setState(() {
-      List<double> data = outputData.map((v) => v.toDouble()).toList();
+      List<int> data = outputData.map((v) => v.toInt()).toList();
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
       // Feed output as the next input
-      _inputBuffer.setData(outputData, _bufferSize);
+      _inputBuffer.setData(outputData, _bufferSize,
+          dataType: BufferDataType.int8);
     });
 
     if (_loopMode && _isLoopRunning && mounted) {

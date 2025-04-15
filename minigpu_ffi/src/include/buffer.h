@@ -24,8 +24,8 @@ class Buffer {
 public:
   Buffer(MGPU &mgpu);
   void createBuffer(int bufferSize);
-  void readSync(void *outputData, size_t size, size_t offset = 0);
-  void readAsync(void *outputData, size_t size, size_t offset,
+  void readSync(void *outputData, gpu::NumType dType, size_t size, size_t offset = 0);
+  void readAsync(void *outputData, gpu::NumType dType, size_t size, size_t offset,
                  std::function<void()> callback);
   void setData(const double *inputData, size_t byteSize);
   void setData(const float *inputData, size_t byteSize);
@@ -41,6 +41,7 @@ public:
   void release();
 
   gpu::Array bufferData;
+  gpu::NumType bufferType;
 
 private:
   MGPU &mgpu;

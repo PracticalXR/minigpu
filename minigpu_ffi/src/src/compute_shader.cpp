@@ -34,7 +34,11 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
   // For output, if buffer.bufferData.size is zero, we use a fallback value.
   size_t numElements = 0;
   if (buffer.bufferData.buffer != nullptr && buffer.bufferData.size > 0) {
-    numElements = buffer.bufferData.size / sizeof(float);
+    // log buffer type
+    LOG(kDefLog, kInfo, "Buffer Type %zu",
+      buffer.bufferType);
+
+    numElements = buffer.bufferData.size / sizeBytes(buffer.bufferType);
   }
   Shape shape{numElements};
 
