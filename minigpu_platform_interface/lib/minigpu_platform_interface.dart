@@ -6,16 +6,17 @@ import 'platform_stub/minigpu_platform_stub.dart'
 
 /// Enum representing supported buffer data types.
 enum BufferDataType {
-  int8,
-  int16,
-  int32,
-  int64,
-  uint8,
-  uint16,
-  uint32,
-  uint64,
-  float,
-  double,
+  float16,
+  float32, // 0 (Renamed from float)
+  float64, // 1 (Renamed from double)
+  int8, // 2
+  int16, // 3
+  int32, // 4
+  int64, // 5
+  uint8, // 6
+  uint16, // 7
+  uint32, // 8
+  uint64, // 9
 }
 
 String getWGSLType(BufferDataType type) {
@@ -30,9 +31,11 @@ String getWGSLType(BufferDataType type) {
     case BufferDataType.uint32:
     case BufferDataType.uint64: // Packed as u32
       return 'u32';
-    case BufferDataType.float:
+    case BufferDataType.float16:
+      return 'f16';
+    case BufferDataType.float32:
       return 'f32';
-    case BufferDataType.double:
+    case BufferDataType.float64:
       // WGSL does not support 64-bit floats, so doubles are packed into two 32-bit ints.
       return 'i32';
   }
@@ -40,9 +43,11 @@ String getWGSLType(BufferDataType type) {
 
 int getBufferSizeForType(BufferDataType type, int count) {
   switch (type) {
-    case BufferDataType.float:
+    case BufferDataType.float16:
+      return count * (Float32List.bytesPerElement / 2).toInt();
+    case BufferDataType.float32:
       return count * Float32List.bytesPerElement;
-    case BufferDataType.double:
+    case BufferDataType.float64:
       // Even though doubles are packed internally, the API “appears” to use 8 bytes per element.
       return count * Float64List.bytesPerElement;
     case BufferDataType.int32:
@@ -81,7 +86,7 @@ abstract class MinigpuPlatform {
   Future<void> initializeContext();
   void destroyContext();
   PlatformComputeShader createComputeShader();
-  PlatformBuffer createBuffer(int bufferSize);
+  PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType);
 }
 
 abstract class PlatformComputeShader {
@@ -99,12 +104,12 @@ abstract class PlatformBuffer {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   });
   void setData(
     TypedData inputData,
     int size, {
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   });
   void destroy();
 }

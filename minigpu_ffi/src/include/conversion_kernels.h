@@ -3,117 +3,116 @@
 #include <string>
 
 namespace mgpu {
+// Forward declarations to avoid circular dependencies.
+class MGPU;
+class Buffer;
+
 namespace kernels {
 
-// Unpacks 4 x int8 stored in one i32 -> 4 x i32 (sign extended)
-const std::string kUnpackI32toI8 = R"(
-    @group(0) @binding(0) var<storage, read_write> packed_input: array<i32>;
-    @group(0) @binding(1) var<storage, read_write> unpacked_output: array<i32>;
-
-    @compute @workgroup_size(256)
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-        let packed_idx = gid.x;
-        let num_packed_elements = arrayLength(&packed_input);
-
-        if (packed_idx >= num_packed_elements) { return; }
-
-        let packed_val = packed_input[packed_idx];
-        let base_unpacked_idx = packed_idx * 4u;
-        let num_unpacked_elements = arrayLength(&unpacked_output);
-
-        // Byte 0
-        if (base_unpacked_idx < num_unpacked_elements) {
-            var val = i32(packed_val & 0xFF);
-            if ((val & 0x80) != 0) { val = val | 0xFFFFFF00; } // Sign extend
-            unpacked_output[base_unpacked_idx] = val;
-        }
-        // Byte 1
-        if (base_unpacked_idx + 1u < num_unpacked_elements) {
-            var val = i32((packed_val >> 8) & 0xFF);
-             if ((val & 0x80) != 0) { val = val | 0xFFFFFF00; }
-            unpacked_output[base_unpacked_idx + 1u] = val;
-        }
-        // Byte 2
-        if (base_unpacked_idx + 2u < num_unpacked_elements) {
-            var val = i32((packed_val >> 16) & 0xFF);
-             if ((val & 0x80) != 0) { val = val | 0xFFFFFF00; }
-            unpacked_output[base_unpacked_idx + 2u] = val;
-        }
-        // Byte 3
-        if (base_unpacked_idx + 3u < num_unpacked_elements) {
-            var val = i32((packed_val >> 24) & 0xFF);
-             if ((val & 0x80) != 0) { val = val | 0xFFFFFF00; }
-            unpacked_output[base_unpacked_idx + 3u] = val;
-        }
+// Kernel to unpack 4x int8 (packed in i32) to 4x int32
+const std::string kPackedInt8ToInt32Kernel = R"(
+  @group(0) @binding(0) var<storage, read_write> packed_input: array<i32>;
+  @group(0) @binding(1) var<storage, read_write> unpacked_output: array<i32>;
+  
+  // Function to sign-extend an 8-bit value (represented in the lower bits of an i32)
+  fn sign_extend_i8(val: i32) -> i32 {
+    return (val << 24) >> 24;
+  }
+  
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let packed_idx: u32 = gid.x;
+  
+    // Check bounds for the PACKED input array
+    if (packed_idx >= arrayLength(&packed_input)) {
+      return;
     }
-)";
-
-// Unpacks 4 x uint8 stored in one u32 -> 4 x u32
-const std::string kUnpackU32toU8 = R"(
-    @group(0) @binding(0) var<storage, read_write> packed_input: array<u32>;
-    @group(0) @binding(1) var<storage, read_write> unpacked_output: array<u32>;
-
-    @compute @workgroup_size(256)
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-        let packed_idx = gid.x;
-        let num_packed_elements = arrayLength(&packed_input);
-
-        if (packed_idx >= num_packed_elements) { return; }
-
-        let packed_val = packed_input[packed_idx];
-        let base_unpacked_idx = packed_idx * 4u;
-        let num_unpacked_elements = arrayLength(&unpacked_output);
-
-        if (base_unpacked_idx < num_unpacked_elements) {
-            unpacked_output[base_unpacked_idx] = packed_val & 0xFFu;
-        }
-        if (base_unpacked_idx + 1u < num_unpacked_elements) {
-            unpacked_output[base_unpacked_idx + 1u] = (packed_val >> 8u) & 0xFFu;
-        }
-        if (base_unpacked_idx + 2u < num_unpacked_elements) {
-            unpacked_output[base_unpacked_idx + 2u] = (packed_val >> 16u) & 0xFFu;
-        }
-        if (base_unpacked_idx + 3u < num_unpacked_elements) {
-            unpacked_output[base_unpacked_idx + 3u] = (packed_val >> 24u) & 0xFFu;
-        }
+  
+    let packed_val = packed_input[packed_idx];
+  
+    // Unpack and write 4 separate i32 values
+    // Ensure the output buffer is large enough (4x the packed size)
+    let base_output_idx = packed_idx * 4u;
+  
+    // Check bounds for the UNPACKED output array (optional but safer)
+    // This assumes arrayLength(&unpacked_output) is at least 4 * arrayLength(&packed_input)
+    if ((base_output_idx + 3u) >= arrayLength(&unpacked_output)) {
+        return; // Avoid out-of-bounds write if something is wrong
     }
-)";
+  
+    unpacked_output[base_output_idx + 0u] = sign_extend_i8((packed_val >> 0u) & 0xFF);
+    unpacked_output[base_output_idx + 1u] = sign_extend_i8((packed_val >> 8u) & 0xFF);
+    unpacked_output[base_output_idx + 2u] = sign_extend_i8((packed_val >> 16u) & 0xFF);
+    unpacked_output[base_output_idx + 3u] = sign_extend_i8((packed_val >> 24u) & 0xFF);
+  }
+  )";
 
-// Add kUnpackI32toI16, kUnpackU32toU16 similarly...
-
-// Packs 4 x i32 (representing i8) -> 1 x i32
-const std::string kPackI8toI32 = R"(
-    @group(0) @binding(0) var<storage, read_write> unpacked_input: array<i32>;
-    @group(0) @binding(1) var<storage, read_write> packed_output: array<i32>;
-
-    @compute @workgroup_size(256)
-    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-        let packed_idx = gid.x;
-        let num_packed_elements = arrayLength(&packed_output);
-
-        if (packed_idx >= num_packed_elements) { return; }
-
-        let base_unpacked_idx = packed_idx * 4u;
-        let num_unpacked_elements = arrayLength(&unpacked_input);
-
-        var packed_val: i32 = 0;
-
-        if (base_unpacked_idx < num_unpacked_elements) {
-            packed_val = packed_val | (unpacked_input[base_unpacked_idx] & 0xFF);
-        }
-        if (base_unpacked_idx + 1u < num_unpacked_elements) {
-             packed_val = packed_val | ((unpacked_input[base_unpacked_idx + 1u] & 0xFF) << 8);
-        }
-         if (base_unpacked_idx + 2u < num_unpacked_elements) {
-             packed_val = packed_val | ((unpacked_input[base_unpacked_idx + 2u] & 0xFF) << 16);
-        }
-         if (base_unpacked_idx + 3u < num_unpacked_elements) {
-             packed_val = packed_val | ((unpacked_input[base_unpacked_idx + 3u] & 0xFF) << 24);
-        }
-        packed_output[packed_idx] = packed_val;
+// Kernel to pack 4x int32 (using only lower 8 bits) into 1x int32.
+const std::string kInt32ToPackedInt8Kernel = R"(
+  @group(0) @binding(0) var<storage, read_write> unpacked_input: array<i32>;
+  @group(0) @binding(1) var<storage, read_write> packed_output: array<i32>;
+  
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let packed_idx: u32 = gid.x; // Index for the PACKED output array
+  
+    // Check bounds for the PACKED output array
+     if (packed_idx >= arrayLength(&packed_output)) {
+      return;
     }
-)";
-// Add kPackU8toU32, kPackI16toI32, kPackU16toU32 similarly...
+  
+    let base_input_idx = packed_idx * 4u;
+  
+    // Check bounds for the UNPACKED input array (optional but safer)
+    // Assumes arrayLength(&unpacked_input) is at least 4 * arrayLength(&packed_output)
+     if ((base_input_idx + 3u) >= arrayLength(&unpacked_input)) {
+        // Handle potential error or incomplete data - maybe write 0?
+        packed_output[packed_idx] = 0;
+        return;
+    }
+  
+    // Read 4 separate i32 values
+    let val0 = unpacked_input[base_input_idx + 0u];
+    let val1 = unpacked_input[base_input_idx + 1u];
+    let val2 = unpacked_input[base_input_idx + 2u];
+    let val3 = unpacked_input[base_input_idx + 3u];
+  
+    // Pack the lower 8 bits of each into one i32
+    var packed_result: i32 = 0;
+    packed_result = packed_result | ((val0 & 0xFF) << 0u);
+    packed_result = packed_result | ((val1 & 0xFF) << 8u);
+    packed_result = packed_result | ((val2 & 0xFF) << 16u);
+    packed_result = packed_result | ((val3 & 0xFF) << 24u);
+  
+    packed_output[packed_idx] = packed_result;
+  }
+  )";
+
+// Kernel to add 1 to each element of an int32 array.
+const std::string kAddOneToInt32Kernel = R"(
+  @group(0) @binding(0) var<storage, read_write> data: array<i32>;
+
+  @compute @workgroup_size(256)
+  fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx: u32 = gid.x;
+
+    // Check bounds
+    if (idx >= arrayLength(&data)) {
+      return;
+    }
+
+    data[idx] = data[idx] + 1;
+  }
+  )";
+
+// Helper function declarations using fully qualified types.
+void dispatchPackedI8toI32(::mgpu::MGPU &mgpu, ::mgpu::Buffer &packed,
+                           ::mgpu::Buffer &unpacked);
+
+void dispatchI32toPackedI8(::mgpu::MGPU &mgpu, ::mgpu::Buffer &packed,
+                           ::mgpu::Buffer &unpacked);
+
+void dispatchAddOneToInt32(::mgpu::MGPU &mgpu, ::mgpu::Buffer &buffer);
 
 } // namespace kernels
 } // namespace mgpu

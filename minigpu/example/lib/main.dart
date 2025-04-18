@@ -78,8 +78,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
 
   void _createBuffers() {
     int memSize = getBufferSizeForType(BufferDataType.int8, _bufferSize);
-    _inputBuffer = _minigpu.createBuffer(memSize);
-    _outputBuffer = _minigpu.createBuffer(memSize);
+    _inputBuffer = _minigpu.createBuffer(memSize, BufferDataType.int8);
+    _outputBuffer = _minigpu.createBuffer(memSize, BufferDataType.int8);
   }
 
   void _setBufferData() {

@@ -22,7 +22,7 @@ void main() {
       final int memorySize = bufferSize * 4; // 4 bytes per float
 
       // Create a buffer and set known data.
-      final buffer = minigpu.createBuffer(memorySize);
+      final buffer = minigpu.createBuffer(memorySize, BufferDataType.float32);
       final inputData =
           Float32List.fromList(List.generate(bufferSize, (i) => i.toDouble()));
       buffer.setData(inputData, bufferSize);
@@ -43,8 +43,10 @@ void main() {
       final int memorySize = numFloats * 4;
 
       // Create input and output buffers.
-      final inputBuffer = minigpu.createBuffer(memorySize);
-      final outputBuffer = minigpu.createBuffer(memorySize);
+      final inputBuffer =
+          minigpu.createBuffer(memorySize, BufferDataType.float32);
+      final outputBuffer =
+          minigpu.createBuffer(memorySize, BufferDataType.float32);
 
       // Initialize input data.
       final inputData =

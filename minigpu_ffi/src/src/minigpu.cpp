@@ -58,9 +58,60 @@ int mgpuHasKernel(MGPUComputeShader *shader) {
   }
 }
 
-MGPUBuffer *mgpuCreateBuffer(int bufferSize) {
+gpu::NumType mapIntToNumType(int dataType) {
+  switch (dataType) {
+  case 0:
+    return gpu::kf16;
+  case 1:
+    return gpu::kf32;
+  case 2:
+    return gpu::kf64;
+  case 3:
+    return gpu::ki8;
+  case 4:
+    return gpu::ki16;
+  case 5:
+    return gpu::ki32;
+  case 6:
+    return gpu::ki64;
+  case 7:
+    return gpu::ku8;
+  case 8:
+    return gpu::ku16;
+  case 9:
+    return gpu::ku32;
+  case 10:
+    return gpu::ku64;
+  default:
+    LOG(kDefLog, kError, "Invalid dataType integer: %d. Defaulting to kf32.",
+        dataType);
+    return gpu::kf32; // Or handle error more strictly
+  }
+}
+
+MGPUBuffer *mgpuCreateBuffer(int bufferSize, int dataType) {
+  if (bufferSize < 0) {
+    LOG(kDefLog, kError, "Invalid bufferSize: %d", bufferSize);
+    return nullptr;
+  }
+
+  // Map the integer dataType to gpu::NumType
+  gpu::NumType originalType = mapIntToNumType(dataType);
+
   auto *buf = new mgpu::Buffer(minigpu);
-  buf->createBuffer(bufferSize);
+  try {
+    // Call the C++ createBuffer with size and mapped type
+    buf->createBuffer(static_cast<size_t>(bufferSize), originalType);
+  } catch (const std::exception &e) {
+    LOG(kDefLog, kError, "Failed to create buffer: %s", e.what());
+    delete buf; // Clean up allocated buffer object
+    return nullptr;
+  } catch (...) {
+    LOG(kDefLog, kError, "Failed to create buffer due to unknown exception");
+    delete buf; // Clean up allocated buffer object
+    return nullptr;
+  }
+
   return reinterpret_cast<MGPUBuffer *>(buf);
 }
 

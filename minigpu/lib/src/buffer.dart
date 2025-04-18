@@ -13,7 +13,7 @@ final class Buffer {
     TypedData outputData,
     int size, {
     int readOffset = 0,
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) async =>
       platformBuffer.read(
         outputData,
@@ -26,7 +26,7 @@ final class Buffer {
   void setData(
     TypedData inputData,
     int size, {
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) =>
       platformBuffer.setData(
         inputData,

@@ -21,7 +21,7 @@ EXPORT MGPUComputeShader *mgpuCreateComputeShader();
 EXPORT void mgpuDestroyComputeShader(MGPUComputeShader *shader);
 EXPORT void mgpuLoadKernel(MGPUComputeShader *shader, const char *kernelString);
 EXPORT int mgpuHasKernel(MGPUComputeShader *shader);
-EXPORT MGPUBuffer *mgpuCreateBuffer(int bufferSize);
+EXPORT MGPUBuffer *mgpuCreateBuffer(int bufferSize, int dataType);
 EXPORT void mgpuDestroyBuffer(MGPUBuffer *buffer);
 EXPORT void mgpuSetBuffer(MGPUComputeShader *shader, int tag,
                           MGPUBuffer *buffer);

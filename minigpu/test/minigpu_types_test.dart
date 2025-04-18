@@ -15,7 +15,7 @@ void main() {
       // Allocate 16 floats.
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.float32);
 
       // Create known Float32List
       final Float32List input = Float32List.fromList(
@@ -24,7 +24,7 @@ void main() {
       buffer.setData(input, input.lengthInBytes);
 
       final Float32List output = Float32List(count);
-      await buffer.read(output, count, dataType: BufferDataType.float);
+      await buffer.read(output, count, dataType: BufferDataType.float32);
 
       expect(output, equals(input));
     });
@@ -34,16 +34,16 @@ void main() {
       final int count = 16;
       // Allocate based on the packed type (floats)
       final int bufferSize = count * Float64List.bytesPerElement;
-      final buffer = minigpu.createBuffer(bufferSize);
+      final buffer = minigpu.createBuffer(bufferSize, BufferDataType.float64);
 
       final Float64List input = Float64List.fromList(
         List<double>.generate(count, (i) => i.toDouble(), growable: false),
       );
       // Pass the element count (not the byte count)
-      buffer.setData(input, input.length, dataType: BufferDataType.double);
+      buffer.setData(input, input.length, dataType: BufferDataType.float64);
 
       final Float64List output = Float64List(count);
-      await buffer.read(output, count, dataType: BufferDataType.double);
+      await buffer.read(output, count, dataType: BufferDataType.float64);
 
       // Since the GPU packs doubles as floats, compare with a tolerance.
       for (int i = 0; i < count; i++) {
@@ -57,7 +57,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int8List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.int8);
 
       final Int8List input = Int8List.fromList(
         List.generate(count, (i) => i - 8),
@@ -74,7 +74,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int16List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.int16);
 
       final Int16List input = Int16List.fromList(
         List.generate(count, (i) => i * 10 - 50),
@@ -92,7 +92,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.int32);
 
       final Int32List input = Int32List.fromList(
         List.generate(count, (i) => i * 100 - 500),
@@ -110,7 +110,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.int64);
 
       // Use Int64List directly.
       final Int64List input = Int64List.fromList(
@@ -128,7 +128,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint8List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint8);
 
       final Uint8List input = Uint8List.fromList(
         List.generate(count, (i) => i),
@@ -146,7 +146,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint16List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint16);
 
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => i * 2),
@@ -164,7 +164,7 @@ void main() {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement;
-      final buffer = minigpu.createBuffer(byteSize);
+      final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint32);
 
       final Uint32List input = Uint32List.fromList(
         List.generate(count, (i) => (i + 1) * 100),
@@ -183,15 +183,16 @@ void main() {
     test('Float32 Roundtrip', () async {
       final minigpu = await _initMinigpu();
       final int count = 16;
-      final int bufSize = getBufferSizeForType(BufferDataType.float, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final int bufSize = getBufferSizeForType(BufferDataType.float32, count);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.float32);
+      final outputBuffer =
+          minigpu.createBuffer(bufSize, BufferDataType.float32);
 
       final Float32List input = Float32List.fromList(
           List.generate(count, (i) => i.toDouble(), growable: false));
       // No packing concerns at the test level.
       inputBuffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.float);
+          dataType: BufferDataType.float32);
 
       final String shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> inp: array<f32>;
@@ -213,7 +214,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       await shader.dispatch(workgroups, 1, 1);
 
       final Float32List output = Float32List(count);
-      await outputBuffer.read(output, count, dataType: BufferDataType.float);
+      await outputBuffer.read(output, count, dataType: BufferDataType.float32);
       expect(output, equals(input));
     });
 
@@ -221,13 +222,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final minigpu = await _initMinigpu();
       final int count = 16;
       // For doubles the API automatically packs/unpacks.
-      final int bufSize = getBufferSizeForType(BufferDataType.double, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final int bufSize = getBufferSizeForType(BufferDataType.float64, count);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.float64);
+      final outputBuffer =
+          minigpu.createBuffer(bufSize, BufferDataType.float64);
 
       final Float64List input = Float64List.fromList(
           List.generate(count, (i) => i.toDouble(), growable: false));
-      inputBuffer.setData(input, input.length, dataType: BufferDataType.double);
+      inputBuffer.setData(input, input.length,
+          dataType: BufferDataType.float64);
 
       // WGSL doesn’t support 64-bit floats so the shader sees them as i32 pairs.
       final String shaderCode = '''
@@ -250,7 +253,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       await shader.dispatch(workgroups, 1, 1);
 
       final Float64List output = Float64List(count);
-      await outputBuffer.read(output, count, dataType: BufferDataType.double);
+      await outputBuffer.read(output, count, dataType: BufferDataType.float64);
       for (int i = 0; i < count; i++) {
         expect(output[i], closeTo(input[i], 1e-12),
             reason: 'Double element \$i should match');
@@ -261,8 +264,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final minigpu = await _initMinigpu();
       final int count = 16;
       final int bufSize = getBufferSizeForType(BufferDataType.int32, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.int32);
+      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.int32);
 
       final Int32List input = Int32List.fromList(
           List.generate(count, (i) => i * 100 - 500, growable: false));
@@ -298,8 +301,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs Int64 into 2 Int32; the user simply passes Int64List.
       final int bufSize = getBufferSizeForType(BufferDataType.int64, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.int64);
+      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.int64);
 
       final Int64List input = Int64List.fromList(
           List.generate(count, (i) => i * 1000 - 5000, growable: false));
@@ -334,8 +337,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs 4 Uint8 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint8, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint8);
+      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint8);
 
       final Uint8List input =
           Uint8List.fromList(List.generate(count, (i) => i, growable: false));
@@ -372,8 +375,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs 2 Uint16 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint16, count);
-      final inputBuffer = minigpu.createBuffer(bufSize);
-      final outputBuffer = minigpu.createBuffer(bufSize);
+      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint16);
+      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint16);
 
       final Uint16List input = Uint16List.fromList(
           List.generate(count, (i) => i * 2, growable: false));

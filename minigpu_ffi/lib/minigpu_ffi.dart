@@ -47,8 +47,11 @@ class MinigpuFfi extends MinigpuPlatform {
   }
 
   @override
-  PlatformBuffer createBuffer(int bufferSize) {
-    final self = ffi.mgpuCreateBuffer(bufferSize);
+  PlatformBuffer createBuffer(
+    int bufferSize,
+    BufferDataType dataType,
+  ) {
+    final self = ffi.mgpuCreateBuffer(bufferSize, dataType.index);
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
     return FfiBuffer(self);
   }
@@ -119,7 +122,7 @@ final class FfiBuffer implements PlatformBuffer {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) async {
     // Determine element size based on data type.
     final int elementSize;
@@ -148,10 +151,14 @@ final class FfiBuffer implements PlatformBuffer {
       case BufferDataType.uint64:
         elementSize = sizeOf<Uint64>();
         break;
-      case BufferDataType.float:
+
+      case BufferDataType.float16:
+        elementSize = (sizeOf<Float>() / 2).toInt();
+        break;
+      case BufferDataType.float32:
         elementSize = sizeOf<Float>();
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         elementSize = sizeOf<Double>();
         break;
     }
@@ -335,7 +342,12 @@ final class FfiBuffer implements PlatformBuffer {
           malloc.free(nativePtr);
         }
         break;
-      case BufferDataType.float:
+      case BufferDataType.float16:
+        {
+          throw UnimplementedError(
+              'BufferDataType.float16 is not implemented yet.');
+        }
+      case BufferDataType.float32:
         {
           final Pointer<Float> nativePtr = malloc.allocate<Float>(byteSize);
           ffi.mgpuReadBufferAsyncFloat(
@@ -355,7 +367,7 @@ final class FfiBuffer implements PlatformBuffer {
           malloc.free(nativePtr);
         }
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         {
           final Pointer<Double> nativePtr = malloc.allocate<Double>(byteSize);
           ffi.mgpuReadBufferAsyncDouble(
@@ -382,7 +394,7 @@ final class FfiBuffer implements PlatformBuffer {
   void setData(
     TypedData inputData,
     int size, {
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) {
     // Determine element size based on data type.
     final int elementSize;
@@ -411,10 +423,13 @@ final class FfiBuffer implements PlatformBuffer {
       case BufferDataType.uint64:
         elementSize = sizeOf<Uint64>();
         break;
-      case BufferDataType.float:
+      case BufferDataType.float16:
+        elementSize = (sizeOf<Float>() / 2).toInt();
+        break;
+      case BufferDataType.float32:
         elementSize = sizeOf<Float>();
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         elementSize = sizeOf<Double>();
         break;
     }
@@ -494,7 +509,12 @@ final class FfiBuffer implements PlatformBuffer {
           malloc.free(nativePtr);
         }
         break;
-      case BufferDataType.float:
+      case BufferDataType.float16:
+        {
+          throw UnimplementedError(
+              'BufferDataType.float16 is not implemented yet.');
+        }
+      case BufferDataType.float32:
         {
           final Pointer<Float> nativePtr = malloc.allocate<Float>(byteSize);
           final List<double> data = (inputData as Float32List).toList();
@@ -503,7 +523,7 @@ final class FfiBuffer implements PlatformBuffer {
           malloc.free(nativePtr);
         }
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         {
           final Pointer<Double> nativePtr = malloc.allocate<Double>(byteSize);
           final List<double> data = (inputData as Float64List).toList();

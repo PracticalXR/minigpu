@@ -43,9 +43,10 @@ external int mgpuHasKernel(
   ffi.Pointer<MGPUComputeShader> shader,
 );
 
-@ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int)>()
+@ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int, ffi.Int)>()
 external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(
   int bufferSize,
+  int dataType,
 );
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUBuffer>)>()

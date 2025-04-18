@@ -10,7 +10,7 @@ void testCreateContext() {
 
 void testCreateBuffer() {
   std::cout << "Testing buffer creation (1024 bytes)..." << std::endl;
-  MGPUBuffer *buffer = mgpuCreateBuffer(1024);
+  MGPUBuffer *buffer = mgpuCreateBuffer(1024, gpu::kf32);
   if (buffer) {
     std::cout << "Buffer created successfully." << std::endl;
     mgpuDestroyBuffer(buffer);
@@ -47,8 +47,8 @@ void testComputeShader() {
 
   // Create buffers for 100 floats.
   const int numFloats = 100;
-  MGPUBuffer *inpBuffer = mgpuCreateBuffer(numFloats * sizeof(float));
-  MGPUBuffer *outBuffer = mgpuCreateBuffer(numFloats * sizeof(float));
+  MGPUBuffer *inpBuffer = mgpuCreateBuffer(numFloats * sizeof(float), gpu::kf32);
+  MGPUBuffer *outBuffer = mgpuCreateBuffer(numFloats * sizeof(float), gpu::kf32);
   if (!inpBuffer || !outBuffer) {
     std::cerr << "Failed to create one or more buffers." << std::endl;
     mgpuDestroyComputeShader(shader);
@@ -98,7 +98,7 @@ void testUint8() {
   std::cout << "Testing uint8 buffer..." << std::endl;
   const int numElements = 10;
   // Create a buffer with 10 bytes.
-  MGPUBuffer *buffer = mgpuCreateBuffer(numElements);
+  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, gpu::ku8);
   assert(buffer && "Failed to create uint8 buffer");
 
   // Create input data (uint8_t).
@@ -124,7 +124,7 @@ void testInt8() {
   std::cout << "Testing int8 buffer..." << std::endl;
   const int numElements = 10;
   // Create a buffer with 10 bytes.
-  MGPUBuffer *buffer = mgpuCreateBuffer(numElements);
+  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, gpu::ki8);
   assert(buffer && "Failed to create int8 buffer");
 
   // Create input data (int8_t).
