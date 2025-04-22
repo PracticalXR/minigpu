@@ -22,7 +22,7 @@ final class ComputeShader {
     } else {
       _kernelTags[tag] = _kernelTags[tag]!;
     }
-    _shader.setBuffer(_kernelTags[tag]!, buffer.platformBuffer);
+    _shader.setBuffer(_kernelTags[tag]!, buffer.platformBuffer!);
   }
 
   /// Dispatches the specified kernel with the given work group counts.

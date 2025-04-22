@@ -29,8 +29,7 @@ EXPORT void mgpuDispatch(MGPUComputeShader *shader, int groupsX, int groupsY,
                          int groupsZ);
 EXPORT void mgpuDispatchAsync(MGPUComputeShader *shader, int groupsX,
                               int groupsY, int groupsZ, MGPUCallback callback);
-EXPORT void mgpuReadBufferSync(MGPUBuffer *buffer, void *outputData,
-                               size_t size, size_t offset);
+
 // Signed Integer Types
 EXPORT void mgpuReadBufferAsyncInt8(MGPUBuffer *buffer, int8_t *outputData,
                                     size_t size, size_t offset,
@@ -64,6 +63,31 @@ EXPORT void mgpuReadBufferAsyncFloat(MGPUBuffer *buffer, float *outputData,
 EXPORT void mgpuReadBufferAsyncDouble(MGPUBuffer *buffer, double *outputData,
                                       size_t size, size_t offset,
                                       MGPUCallback callback);
+// Sync Read Methods
+EXPORT void mgpuReadBufferSync(MGPUBuffer *buffer, void *outputData,
+                               size_t size, size_t offset);
+EXPORT void mgpuReadBufferSyncInt8(MGPUBuffer *buffer, int8_t *outputData,
+                                   size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncUint8(MGPUBuffer *buffer, uint8_t *outputData,
+                                    size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncInt16(MGPUBuffer *buffer, int16_t *outputData,
+                                    size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncUint16(MGPUBuffer *buffer, uint16_t *outputData,
+                                     size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncInt32(MGPUBuffer *buffer, int32_t *outputData,
+                                    size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncUint32(MGPUBuffer *buffer, uint32_t *outputData,
+                                     size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncInt64(MGPUBuffer *buffer, int64_t *outputData,
+                                    size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncUint64(MGPUBuffer *buffer, uint64_t *outputData,
+                                     size_t elementCount, size_t elementOffset);
+EXPORT void mgpuReadBufferSyncFloat32(MGPUBuffer *buffer, float *outputData,
+                                      size_t elementCount,
+                                      size_t elementOffset);
+EXPORT void mgpuReadBufferSyncFloat64(MGPUBuffer *buffer, double *outputData,
+                                      size_t elementCount,
+                                      size_t elementOffset);
 // Signed Integer Types
 EXPORT void mgpuSetBufferDataInt8(MGPUBuffer *buffer, const int8_t *inputData,
                                   size_t byteSize);

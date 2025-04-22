@@ -27,8 +27,8 @@ class MinigpuWeb extends MinigpuPlatform {
   }
 
   @override
-  PlatformBuffer createBuffer(int bufferSize) {
-    final buff = wasm.mgpuCreateBuffer(bufferSize);
+  PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
+    final buff = wasm.mgpuCreateBuffer(bufferSize, dataType.index);
     return WebBuffer(buff);
   }
 }
@@ -77,7 +77,7 @@ class WebBuffer implements PlatformBuffer {
     int elementOffset = 0,
     int readBytes = 0,
     int byteOffset = 0,
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) async {
     switch (dataType) {
       case BufferDataType.int8:
@@ -86,8 +86,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Int8List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.int16:
@@ -96,8 +94,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Int16List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.int32:
@@ -106,8 +102,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Int32List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.int64:
@@ -118,8 +112,6 @@ class WebBuffer implements PlatformBuffer {
               : (outputData.buffer.asByteData()),
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.uint8:
@@ -128,8 +120,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Uint8List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.uint16:
@@ -138,8 +128,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Uint16List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.uint32:
@@ -148,8 +136,6 @@ class WebBuffer implements PlatformBuffer {
           outputData as Uint32List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
       case BufferDataType.uint64:
@@ -158,28 +144,26 @@ class WebBuffer implements PlatformBuffer {
           outputData as Uint64List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
-      case BufferDataType.float:
+      case BufferDataType.float16:
+        throw UnimplementedError(
+          'float16 is not supported in WebAssembly.',
+        );
+      case BufferDataType.float32:
         await wasm.mgpuReadBufferAsyncFloat(
           _buffer,
           outputData as Float32List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         await wasm.mgpuReadBufferAsyncDouble(
           _buffer,
           outputData as Float64List,
           readElements: readElements,
           elementOffset: elementOffset,
-          readBytes: readBytes,
-          byteOffset: byteOffset,
         );
         break;
     }
@@ -189,7 +173,7 @@ class WebBuffer implements PlatformBuffer {
   void setData(
     TypedData inputData,
     int size, {
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) {
     switch (dataType) {
       case BufferDataType.int8:
@@ -216,10 +200,14 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.uint64:
         wasm.mgpuSetBufferDataUint64(_buffer, inputData as Uint64List, size);
         break;
-      case BufferDataType.float:
+      case BufferDataType.float16:
+        throw UnimplementedError(
+          'float16 is not supported in WebAssembly.',
+        );
+      case BufferDataType.float32:
         wasm.mgpuSetBufferDataFloat(_buffer, inputData as Float32List, size);
         break;
-      case BufferDataType.double:
+      case BufferDataType.float64:
         wasm.mgpuSetBufferDataDouble(_buffer, inputData as Float64List, size);
         break;
     }

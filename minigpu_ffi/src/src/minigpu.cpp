@@ -168,8 +168,18 @@ void mgpuReadBufferAsyncInt8(MGPUBuffer *buffer, int8_t *outputData,
                              size_t size, size_t offset,
                              MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, ki8, size,
-                                                        offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, ki8, size,
+                                                          offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt8: Exception: %s", e.what());
+      // Optionally, you could try to invoke the callback here to signal an
+      // error state, but the current Buffer::readAsync doesn't have an error
+      // callback mechanism. The detached thread might finish without calling
+      // the success callback.
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt8: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (int8)");
@@ -180,8 +190,14 @@ void mgpuReadBufferAsyncInt16(MGPUBuffer *buffer, int16_t *outputData,
                               size_t size, size_t offset,
                               MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ki16, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ki16, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt16: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt16: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (int16)");
@@ -192,8 +208,14 @@ void mgpuReadBufferAsyncInt32(MGPUBuffer *buffer, int32_t *outputData,
                               size_t size, size_t offset,
                               MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ki32, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ki32, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt32: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt32: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (int32)");
@@ -204,8 +226,14 @@ void mgpuReadBufferAsyncInt64(MGPUBuffer *buffer, int64_t *outputData,
                               size_t size, size_t offset,
                               MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ki64, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ki64, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt64: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncInt64: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (int64)");
@@ -217,8 +245,14 @@ void mgpuReadBufferAsyncUint8(MGPUBuffer *buffer, uint8_t *outputData,
                               size_t size, size_t offset,
                               MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, ku8, size,
-                                                        offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(outputData, ku8, size,
+                                                          offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint8: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint8: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (uint8)");
@@ -229,8 +263,15 @@ void mgpuReadBufferAsyncUint16(MGPUBuffer *buffer, uint16_t *outputData,
                                size_t size, size_t offset,
                                MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ku16, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ku16, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint16: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint16: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (uint16)");
@@ -241,8 +282,15 @@ void mgpuReadBufferAsyncUint32(MGPUBuffer *buffer, uint32_t *outputData,
                                size_t size, size_t offset,
                                MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ku32, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ku32, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint32: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint32: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (uint32)");
@@ -253,11 +301,19 @@ void mgpuReadBufferAsyncUint64(MGPUBuffer *buffer, uint64_t *outputData,
                                size_t size, size_t offset,
                                MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), ku64, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), ku64, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint64: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncUint64: Unknown exception");
+    }
   } else {
+    // Note: Original log message said (uint32), corrected to (uint64)
     LOG(kDefLog, kError,
-        "Invalid buffer, outputData, or callback pointer (uint32)");
+        "Invalid buffer, outputData, or callback pointer (uint64)");
   }
 }
 
@@ -266,8 +322,14 @@ void mgpuReadBufferAsyncFloat(MGPUBuffer *buffer, float *outputData,
                               size_t size, size_t offset,
                               MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), kf32, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), kf32, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncFloat: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncFloat: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (float)");
@@ -278,11 +340,190 @@ void mgpuReadBufferAsyncDouble(MGPUBuffer *buffer, double *outputData,
                                size_t size, size_t offset,
                                MGPUCallback callback) {
   if (buffer && outputData && callback) {
-    reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
-        static_cast<void *>(outputData), kf64, size, offset, callback);
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readAsync(
+          static_cast<void *>(outputData), kf64, size, offset, callback);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncDouble: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferAsyncDouble: Unknown exception");
+    }
   } else {
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (double)");
+  }
+}
+
+void mgpuReadBufferSyncInt8(MGPUBuffer *buffer, int8_t *outputData,
+                            size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ki8, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt8: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt8: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncInt8: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncUint8(MGPUBuffer *buffer, uint8_t *outputData,
+                             size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ku8, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint8: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint8: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncUint8: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncInt16(MGPUBuffer *buffer, int16_t *outputData,
+                             size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ki16, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt16: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt16: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncInt16: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncUint16(MGPUBuffer *buffer, uint16_t *outputData,
+                              size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ku16, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint16: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint16: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncUint16: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncInt32(MGPUBuffer *buffer, int32_t *outputData,
+                             size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ki32, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt32: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt32: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncInt32: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncUint32(MGPUBuffer *buffer, uint32_t *outputData,
+                              size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ku32, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint32: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint32: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncUint32: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncInt64(MGPUBuffer *buffer, int64_t *outputData,
+                             size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ki64, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt64: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncInt64: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncInt64: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncUint64(MGPUBuffer *buffer, uint64_t *outputData,
+                              size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::ku64, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint64: Exception: %s", e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncUint64: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncUint64: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncFloat32(MGPUBuffer *buffer, float *outputData,
+                               size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::kf32, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncFloat32: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncFloat32: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncFloat32: Invalid buffer or outputData pointer");
+  }
+}
+
+void mgpuReadBufferSyncFloat64(MGPUBuffer *buffer, double *outputData,
+                               size_t elementCount, size_t elementOffset) {
+  if (buffer && outputData) {
+    try {
+      reinterpret_cast<mgpu::Buffer *>(buffer)->readSync(
+          outputData, gpu::kf64, elementCount, elementOffset);
+    } catch (const std::exception &e) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncFloat64: Exception: %s",
+          e.what());
+    } catch (...) {
+      LOG(kDefLog, kError, "mgpuReadBufferSyncFloat64: Unknown exception");
+    }
+  } else {
+    LOG(kDefLog, kError,
+        "mgpuReadBufferSyncFloat64: Invalid buffer or outputData pointer");
   }
 }
 

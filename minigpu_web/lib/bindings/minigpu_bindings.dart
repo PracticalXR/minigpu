@@ -117,10 +117,10 @@ bool mgpuHasKernel(MGPUComputeShader shader) {
 
 // Buffer functions
 @JS('_mgpuCreateBuffer')
-external MGPUBuffer _mgpuCreateBuffer(JSNumber bufferSize);
+external MGPUBuffer _mgpuCreateBuffer(JSNumber bufferSize, JSNumber dataType);
 
-MGPUBuffer mgpuCreateBuffer(int bufferSize) {
-  return _mgpuCreateBuffer(bufferSize.toJS);
+MGPUBuffer mgpuCreateBuffer(int bufferSize, int dataType) {
+  return _mgpuCreateBuffer(bufferSize.toJS, dataType.toJS);
 }
 
 @JS('_mgpuDestroyBuffer')
@@ -178,28 +178,36 @@ Future<void> mgpuReadBufferAsyncInt8(
   Int8List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int8List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
-  final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+  // Calculate element count based on outputData size if readElements is 0
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate =
+      elementsToRead * bytesPerElem; // Allocate based on elements
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length)
+    return; // Nothing to read or invalid offset
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
+  final int startIndex = ptr.toDartInt; // Byte index for heap copy
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncInt8".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncInt8".toJS, // Use sync C++ function
+      "void".toJS, // C++ function returns void
+      // Args: handle, pointer, element count, element offset
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
-      {"async": true}.toJSDeep,
+      // Pass ELEMENT count and offset
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      {"async": true}.toJSDeep, // Keep async: true
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
+    // Copy the data from WASM heap
+    // startIndex is the byte offset, elementsToRead is the count
     final output = _heapI8.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
@@ -212,30 +220,32 @@ Future<void> mgpuReadBufferAsyncInt16(
   Int16List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int16List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
+  // Element index for heap copy
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncInt16".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncInt16".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
-    final heapInt16 = _heapI16.buffer.asInt16List();
-    final output = heapInt16.sublist(startIndex, startIndex + elementsToRead);
+
+    // Use Int16 view for copying
+    final output = _heapI16.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
     _free(ptr);
@@ -247,30 +257,30 @@ Future<void> mgpuReadBufferAsyncInt32(
   Int32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int32List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncInt32".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncInt32".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
-    final heapInt32 = _heapI32.buffer.asInt32List();
-    final output = heapInt32.sublist(startIndex, startIndex + elementsToRead);
+
+    final output = _heapI32.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
     _free(ptr);
@@ -279,39 +289,71 @@ Future<void> mgpuReadBufferAsyncInt32(
 
 Future<void> mgpuReadBufferAsyncInt64(
   MGPUBuffer buffer,
-  ByteData outputData, {
+  // Note: Dart web doesn't have Int64List directly, use ByteData or handle BigInt conversion
+  // Assuming caller provides appropriate ByteData or handles conversion from Uint8List view
+  TypedData outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
-  throw UnimplementedError(
-      'mgpuReadBufferAsyncInt64 not implemented in this version');
-  // Use 8 bytes per element.
-  final int bytesPerElem = 8;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.lengthInBytes - elementOffset * bytesPerElem));
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
-  final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+  final int bytesPerElem = 8; // Int64
+  final int elementsToRead = (readElements > 0)
+      ? readElements
+      : ((outputData.lengthInBytes ~/ bytesPerElem) - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      (elementOffset * bytesPerElem) >= outputData.lengthInBytes) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
+  // Byte index for heap copy
+  final int startByteIndex = ptr.toDartInt;
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncInt64".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncInt64".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
-    final ByteData heapBD = _heapU8.buffer.asByteData();
-    for (int i = 0; i < elementsToRead; i++) {
-      final int value = heapBD.getInt64(
-          startIndex * bytesPerElem + i * bytesPerElem, Endian.little);
-      outputData.setInt64(elementOffset + i, value, Endian.little);
+
+    // Copy using Uint8List view as Int64List is not standard in dart:html
+    final heapBytes =
+        _heapU8.sublist(startByteIndex, startByteIndex + sizeToAllocate);
+
+    if (outputData is ByteData) {
+      // Ensure we don't write past the end of the ByteData buffer
+      final int bytesAvailableInOut =
+          outputData.lengthInBytes - (elementOffset * bytesPerElem);
+      final int bytesToCopy = sizeToAllocate <= bytesAvailableInOut
+          ? sizeToAllocate
+          : bytesAvailableInOut;
+      if (bytesToCopy > 0) {
+        final outputBytes = Uint8List.view(
+            outputData.buffer,
+            outputData.offsetInBytes + (elementOffset * bytesPerElem),
+            bytesToCopy);
+        outputBytes.setRange(0, bytesToCopy, heapBytes.sublist(0, bytesToCopy));
+      }
+    } else if (outputData is Uint8List) {
+      // Allow direct copy if caller uses Uint8List
+      final int bytesAvailableInOut =
+          outputData.lengthInBytes - (elementOffset * bytesPerElem);
+      final int bytesToCopy = sizeToAllocate <= bytesAvailableInOut
+          ? sizeToAllocate
+          : bytesAvailableInOut;
+      if (bytesToCopy > 0) {
+        outputData.setRange(
+            elementOffset * bytesPerElem,
+            (elementOffset * bytesPerElem) + bytesToCopy,
+            heapBytes.sublist(0, bytesToCopy));
+      }
+    } else {
+      // Consider throwing an error for unsupported outputData types for Int64
+      print(
+          "Warning: mgpuReadBufferAsyncInt64 expects outputData to be ByteData or Uint8List");
     }
   } finally {
     _free(ptr);
@@ -323,28 +365,29 @@ Future<void> mgpuReadBufferAsyncUint8(
   Uint8List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint8List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
-  final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
+  final int startIndex = ptr.toDartInt; // Byte index
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncUint8".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncUint8".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
     final output = _heapU8.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
@@ -357,28 +400,29 @@ Future<void> mgpuReadBufferAsyncUint16(
   Uint16List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint16List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncUint16".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncUint16".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
     final output = _heapU16.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
@@ -391,28 +435,29 @@ Future<void> mgpuReadBufferAsyncUint32(
   Uint32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint32List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncUint32".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncUint32".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
     final output = _heapU32.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
@@ -422,36 +467,70 @@ Future<void> mgpuReadBufferAsyncUint32(
 
 Future<void> mgpuReadBufferAsyncUint64(
   MGPUBuffer buffer,
-  Uint64List outputData, {
+  // Note: Dart web doesn't have Uint64List directly, use ByteData or handle BigInt conversion
+  // Assuming caller provides appropriate ByteData or handles conversion from Uint8List view
+  TypedData outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
-  throw UnimplementedError(
-      'mgpuReadBufferAsyncUint64 not implemented in this version');
-  final int bytesPerElem = Uint64List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
-  final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+  final int bytesPerElem = 8; // Uint64
+  final int elementsToRead = (readElements > 0)
+      ? readElements
+      : ((outputData.lengthInBytes ~/ bytesPerElem) - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      (elementOffset * bytesPerElem) >= outputData.lengthInBytes) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
+  final int startByteIndex = ptr.toDartInt; // Byte index
+
   try {
     await ccall(
-      "mgpuReadBufferAsyncUint64".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncUint64".toJS, // Use sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
-    final Uint64List heapUint64 = _heapU8.buffer.asUint64List();
-    final output = heapUint64.sublist(startIndex, startIndex + elementsToRead);
-    outputData.setAll(elementOffset, output);
+
+    // Copy using Uint8List view as Uint64List is not standard in dart:html
+    final heapBytes =
+        _heapU8.sublist(startByteIndex, startByteIndex + sizeToAllocate);
+
+    if (outputData is ByteData) {
+      final int bytesAvailableInOut =
+          outputData.lengthInBytes - (elementOffset * bytesPerElem);
+      final int bytesToCopy = sizeToAllocate <= bytesAvailableInOut
+          ? sizeToAllocate
+          : bytesAvailableInOut;
+      if (bytesToCopy > 0) {
+        final outputBytes = Uint8List.view(
+            outputData.buffer,
+            outputData.offsetInBytes + (elementOffset * bytesPerElem),
+            bytesToCopy);
+        outputBytes.setRange(0, bytesToCopy, heapBytes.sublist(0, bytesToCopy));
+      }
+    } else if (outputData is Uint8List) {
+      // Allow direct copy if caller uses Uint8List
+      final int bytesAvailableInOut =
+          outputData.lengthInBytes - (elementOffset * bytesPerElem);
+      final int bytesToCopy = sizeToAllocate <= bytesAvailableInOut
+          ? sizeToAllocate
+          : bytesAvailableInOut;
+      if (bytesToCopy > 0) {
+        outputData.setRange(
+            elementOffset * bytesPerElem,
+            (elementOffset * bytesPerElem) + bytesToCopy,
+            heapBytes.sublist(0, bytesToCopy));
+      }
+    } else {
+      // Consider throwing an error for unsupported outputData types for Uint64
+      print(
+          "Warning: mgpuReadBufferAsyncUint64 expects outputData to be ByteData or Uint8List");
+    }
   } finally {
     _free(ptr);
   }
@@ -462,28 +541,30 @@ Future<void> mgpuReadBufferAsyncFloat(
   Float32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Float32List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
+    // Assuming C++ function is named mgpuReadBufferSyncFloat32 now
     await ccall(
-      "mgpuReadBufferSync".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncFloat32".toJS, // Use specific sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
     final output = _heapF32.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {
@@ -496,28 +577,30 @@ Future<void> mgpuReadBufferAsyncDouble(
   Float64List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  int readBytes = 0,
-  int byteOffset = 0,
+  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Float64List.bytesPerElement;
-  final int sizeToRead = (readElements > 0)
-      ? readElements * bytesPerElem
-      : (readBytes > 0
-          ? readBytes
-          : (outputData.length - elementOffset) * bytesPerElem);
-  final int effectiveByteOffset =
-      (readElements > 0) ? elementOffset * bytesPerElem : byteOffset;
-  final JSNumber ptr = _malloc(sizeToRead.toJS);
+  final int elementsToRead =
+      (readElements > 0) ? readElements : (outputData.length - elementOffset);
+  final int sizeToAllocate = elementsToRead * bytesPerElem;
+
+  if (elementsToRead <= 0 ||
+      elementOffset < 0 ||
+      elementOffset >= outputData.length) return;
+
+  final JSNumber ptr = _malloc(sizeToAllocate.toJS);
   final int startIndex = ptr.toDartInt ~/ bytesPerElem;
+
   try {
+    // Assuming C++ function is named mgpuReadBufferSyncFloat64 now
     await ccall(
-      "mgpuReadBufferSync".toJS,
-      "number".toJS,
+      "mgpuReadBufferSyncFloat64".toJS, // Use specific sync C++ function
+      "void".toJS,
       ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, sizeToRead.toJS, effectiveByteOffset.toJS].toJSDeep,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
       {"async": true}.toJSDeep,
     ).toDart;
-    final int elementsToRead = sizeToRead ~/ bytesPerElem;
+
     final output = _heapF64.sublist(startIndex, startIndex + elementsToRead);
     outputData.setAll(elementOffset, output);
   } finally {

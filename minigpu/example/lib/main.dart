@@ -31,8 +31,8 @@ class InteractiveShaderExample extends StatefulWidget {
 class _InteractiveShaderExampleState extends State<InteractiveShaderExample> {
   late Minigpu _minigpu;
   late ComputeShader _shader;
-  late Buffer _inputBuffer;
-  late Buffer _outputBuffer;
+  Buffer? _inputBuffer;
+  Buffer? _outputBuffer;
   List<int> _result = [];
   final TextEditingController _shaderController = TextEditingController();
 
@@ -78,6 +78,9 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
 
   void _createBuffers() {
     int memSize = getBufferSizeForType(BufferDataType.int8, _bufferSize);
+
+    _inputBuffer?.destroy();
+    _outputBuffer?.destroy();
     _inputBuffer = _minigpu.createBuffer(memSize, BufferDataType.int8);
     _outputBuffer = _minigpu.createBuffer(memSize, BufferDataType.int8);
   }
@@ -85,7 +88,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
   void _setBufferData() {
     List<int> data = List.generate(_bufferSize, (i) => i + 10);
     final Int8List floatData = Int8List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
+    _inputBuffer?.setData(floatData, _bufferSize,
+        dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
@@ -95,7 +99,7 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     List<int> data = List.generate(_bufferSize, (i) => i + 10);
     final Int8List floatData = Int8List.fromList(data);
     if (_minigpu.isInitialized) {
-      _inputBuffer.setData(floatData, _bufferSize,
+      _inputBuffer?.setData(floatData, _bufferSize,
           dataType: BufferDataType.int8);
     }
     setState(() {
@@ -106,7 +110,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
   void _resetBuffer() {
     List<int> data = List.filled(_bufferSize, 0);
     final Int8List floatData = Int8List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
+    _inputBuffer?.setData(floatData, _bufferSize,
+        dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
@@ -116,7 +121,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     List<int> data =
         List.generate(_bufferSize, (i) => -5 + _random.nextInt(10) * 10);
     final Int8List floatData = Int8List.fromList(data);
-    _inputBuffer.setData(floatData, _bufferSize, dataType: BufferDataType.int8);
+    _inputBuffer?.setData(floatData, _bufferSize,
+        dataType: BufferDataType.int8);
     setState(() {
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
     });
@@ -124,21 +130,21 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
 
   Future<void> _runKernel() async {
     _shader.loadKernelString(_shaderController.text);
-    _shader.setBuffer('inp', _inputBuffer);
-    _shader.setBuffer('out', _outputBuffer);
+    _shader.setBuffer('inp', _inputBuffer!);
+    _shader.setBuffer('out', _outputBuffer!);
 
     int workgroups = ((_bufferSize + 255) / 256).floor();
     await _shader.dispatch(workgroups, 1, 1);
 
     final Int8List outputData = Int8List(_bufferSize);
-    await _outputBuffer.read(outputData, _bufferSize,
+    await _outputBuffer?.read(outputData, _bufferSize,
         dataType: BufferDataType.int8);
 
     setState(() {
       List<int> data = outputData.map((v) => v.toInt()).toList();
       _result = data.sublist(0, _previewLength.clamp(0, data.length));
       // Feed output as the next input
-      _inputBuffer.setData(outputData, _bufferSize,
+      _inputBuffer?.setData(outputData, _bufferSize,
           dataType: BufferDataType.int8);
     });
 
@@ -172,8 +178,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
   @override
   void dispose() {
     _shader.destroy();
-    _inputBuffer.destroy();
-    _outputBuffer.destroy();
+    _inputBuffer?.destroy();
+    _outputBuffer?.destroy();
     _shaderController.dispose();
     super.dispose();
   }
@@ -243,7 +249,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
                         max: 200,
                         divisions: 40,
                         value: _bufferSize.toDouble(),
-                        onChanged: (val) {
+                        onChanged: (value) {},
+                        onChangeEnd: (val) {
                           setState(() {
                             _bufferSize = val.toInt();
                             if (_previewLength > _bufferSize) {
@@ -251,8 +258,8 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
                             }
                             _createBuffers();
                             _initializeBuffer();
-                            _shader.setBuffer('inp', _inputBuffer);
-                            _shader.setBuffer('out', _outputBuffer);
+                            _shader.setBuffer('inp', _inputBuffer!);
+                            _shader.setBuffer('out', _outputBuffer!);
                           });
                         },
                       ),

@@ -12,8 +12,8 @@ Future<void> main() async {
   final int memorySize = bufferSize * floatSize;
 
   // Create input and output buffers.
-  final inputBuffer = minigpu.createBuffer(memorySize);
-  final outputBuffer = minigpu.createBuffer(memorySize);
+  final inputBuffer = minigpu.createBuffer(memorySize, BufferDataType.float32);
+  final outputBuffer = minigpu.createBuffer(memorySize, BufferDataType.float32);
 
   // Initialize input data.
   List<double> data = List.generate(bufferSize, (i) => i / 10.0);
