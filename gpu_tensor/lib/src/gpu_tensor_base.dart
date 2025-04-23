@@ -1,74 +1,142 @@
 import 'dart:typed_data';
-
 import 'package:minigpu/minigpu.dart';
+
+int _elementSize(BufferDataType type) {
+  switch (type) {
+    case BufferDataType.int8:
+    case BufferDataType.uint8:
+      return 1;
+    case BufferDataType.float16:
+    case BufferDataType.int16:
+    case BufferDataType.uint16:
+      return 2;
+    case BufferDataType.int32:
+    case BufferDataType.uint32:
+    case BufferDataType.float32:
+      return 4;
+    case BufferDataType.int64:
+    case BufferDataType.uint64:
+    case BufferDataType.float64:
+      return 8;
+  }
+}
 
 /// A helper that creates (or reuses) a default GPU context.
 class DefaultMinigpu {
   static final instance = Minigpu();
 }
 
-/// A generalized tensor supporting any rank. Data is stored in a GPU buffer.
-class Tensor {
-  /// The shape in terms of dimensions: e.g. [3, 4, 5] for a 3×4×5 tensor.
+/// A generic tensor that works with a specific [TypedData] type.
+class Tensor<T extends TypedData> {
+  /// The shape in terms of dimensions.
   final List<int> shape;
 
-  /// Total number of elements (computed as shape[0]shape[1]...).
+  /// Total number of elements.
   final int size;
-
-  /// The rank (number of dimensions)
   int get rank => shape.length;
-
-  /// The GPU context used by this tensor.
   final Minigpu gpu;
-
-  /// The GPU buffer storing the data.
   late Buffer buffer;
 
-// Private constructor.
-  Tensor._(this.shape, {required this.gpu, Float32List? data})
+  /// The underlying data type.
+  final BufferDataType dataType;
+
+  // Private constructor.
+  Tensor._(this.shape,
+      {required this.gpu, T? data, this.dataType = BufferDataType.float32})
       : size = shape.reduce((a, b) => a * b) {
-// Each float is 4 bytes.
-    buffer = gpu.createBuffer(size * 4);
+    final int byteSize = size * _elementSize(dataType);
+    buffer = gpu.createBuffer(byteSize, dataType);
     if (data != null) {
-      if (data.length != size) {
+      if (data.lengthInBytes ~/ _elementSize(dataType) != size) {
         throw Exception(
-            "Provided data length (${data.length}) does not match tensor size ($size)");
+            "Provided data length (${data.lengthInBytes ~/ _elementSize(dataType)}) does not match tensor size ($size)");
       }
-      buffer.setData(data, size);
+      buffer.setData(data, size, dataType: dataType);
     } else {
-// Initialize with zero.
-      buffer.setData(Float32List(size), size);
+      // Initialize with zeros.
+      if (T == TypedData) {
+        buffer.setData(Float32List(size), size, dataType: dataType);
+      } else if (T == Int8List) {
+        buffer.setData(Int8List(size), size, dataType: dataType);
+      } else if (T == Int16List) {
+        buffer.setData(Int16List(size), size, dataType: dataType);
+      } else if (T == Int32List) {
+        buffer.setData(Int32List(size), size, dataType: dataType);
+      } else if (T == Int64List) {
+        buffer.setData(Int64List(size), size, dataType: dataType);
+      } else if (T == Uint8List) {
+        buffer.setData(Uint8List(size), size, dataType: dataType);
+      } else if (T == Uint16List) {
+        buffer.setData(Uint16List(size), size, dataType: dataType);
+      } else if (T == Uint32List) {
+        buffer.setData(Uint32List(size), size, dataType: dataType);
+      } else if (T == Float32List) {
+        buffer.setData(Float32List(size), size, dataType: dataType);
+      } else if (T == Float64List) {
+        buffer.setData(Float64List(size), size, dataType: dataType);
+      } else {
+        throw Exception("Unsupported TypedData type: ${T.toString()}");
+      }
     }
   }
 
-  /// Asynchronous factory that initializes the GPU before creating the tensor.
-  static Future<Tensor> create(List<int> shape,
-      {Minigpu? gpu, Float32List? data}) async {
+  /// Asynchronous factory to create a tensor.
+  static Future<Tensor<T>> create<T extends TypedData>(
+    List<int> shape, {
+    Minigpu? gpu,
+    T? data,
+    BufferDataType dataType = BufferDataType.float32,
+  }) async {
     gpu = gpu ?? DefaultMinigpu.instance;
     if (!gpu.isInitialized) {
       await gpu.init();
     }
-    return Tensor._(shape, gpu: gpu, data: data);
+    return Tensor._(shape, gpu: gpu, data: data, dataType: dataType);
   }
 
+  /// Returns the data from the GPU buffer as type T.
+  Future<T> getData() async {
+    late T result;
+    if (T == TypedData) {
+      result = Float32List(size) as T;
+    } else if (T == Int8List) {
+      result = Int8List(size) as T;
+    } else if (T == Int16List) {
+      result = Int16List(size) as T;
+    } else if (T == Int32List) {
+      result = Int32List(size) as T;
+    } else if (T == Int64List) {
+      result = Int64List(size) as T;
+    } else if (T == Uint8List) {
+      result = Uint8List(size) as T;
+    } else if (T == Uint16List) {
+      result = Uint16List(size) as T;
+    } else if (T == Uint32List) {
+      result = Uint32List(size) as T;
+    } else if (T == Float32List) {
+      result = Float32List(size) as T;
+    } else if (T == Float64List) {
+      result = Float64List(size) as T;
+    } else {
+      throw Exception("Unsupported TypedData type: ${T.toString()}");
+    }
+    await buffer.read(result, size, dataType: dataType);
+    return result;
+  }
+
+  /// Writes [data] of type T to the GPU buffer.
+  void setData(T data) {
+    buffer.setData(data, size, dataType: dataType);
+  }
+
+  /// Destroys the tensor's GPU buffer.
   void destroy() {
     buffer.destroy();
   }
 
-  /// Creates a tensor by reusing an already existing [buffer] and specifying a new [shape].
-  /// (This is useful for operations like reshape that do not need to copy data.)
-  Tensor.fromBuffer(this.buffer, this.shape, {Minigpu? gpu})
+  /// Creates a tensor from an existing buffer.
+  Tensor.fromBuffer(this.buffer, this.shape,
+      {Minigpu? gpu, this.dataType = BufferDataType.float32})
       : gpu = gpu ?? DefaultMinigpu.instance,
         size = shape.reduce((a, b) => a * b);
-
-  /// Reads back the data from the GPU buffer.
-  Future<Float32List> getData() async {
-    final Float32List data = Float32List(size);
-    await buffer.read(data, size);
-    return data;
-  }
-
-  void setData(Float32List data) {
-    buffer.setData(data, size);
-  }
 }

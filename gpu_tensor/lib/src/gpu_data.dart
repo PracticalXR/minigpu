@@ -1,32 +1,31 @@
 import 'dart:typed_data';
+import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 
 import 'gpu_tensor_base.dart';
 
-extension TensorData on Tensor {
+extension TensorData<T extends TypedData> on Tensor<T> {
   /// Creates a new tensor by slicing the flattened tensor data.
   /// [start] is the starting flat index and [end] is the ending flat index (exclusive).
-  Future<Tensor> sliceLinear({required int start, required int end}) async {
+  Future<Tensor<T>> sliceLinear({required int start, required int end}) async {
     if (start < 0 || end > size || start >= end) {
       throw Exception(
           "Invalid slice indices: start=$start, end=$end, size=$size.");
     }
     int newSize = end - start;
-    // Create a temporary CPU buffer to hold the sliced data.
-    final slicedData = Float32List(newSize);
-    // Use the buffer's read method using the flat offset.
-    await buffer.read(slicedData, newSize, readOffset: start);
-    // Create and return a new tensor from the sliced data.
-    // Here we assume a 1D shape for the sliced tensor.
-    return await Tensor.create([newSize], data: slicedData, gpu: gpu);
+    // Read the tensor data then slice it using getTypedDataSublist.
+    T fullData = await getData();
+    final T slicedData = getTypedDataSublist<T>(fullData, start, end);
+    // Create a new tensor with 1D shape.
+    return await Tensor.create<T>(
+      [newSize],
+      data: slicedData,
+      dataType: dataType,
+    );
   }
 
   /// Slices the tensor based on multi-dimensional indices.
-  ///
-  /// [startIndices] and [endIndices] specify the lower (inclusive) and upper (exclusive)
-  /// bounds for each dimension. The function computes the flat offset and the total number
-  /// of elements to transfer based on the tensor's shape.
-  Future<Tensor> slice({
+  Future<Tensor<T>> slice({
     required List<int> startIndices,
     required List<int> endIndices,
   }) async {
@@ -36,13 +35,13 @@ extension TensorData on Tensor {
           "startIndices and endIndices must match tensor rank (${shape.length}).");
     }
 
-    // Calculate strides for the tensor.
+    // Calculate strides (row-major order).
     List<int> strides = List.filled(shape.length, 1);
     for (int i = shape.length - 2; i >= 0; i--) {
       strides[i] = strides[i + 1] * shape[i + 1];
     }
 
-    // Compute the flat offset from multi-dimensional indices.
+    // Compute flat offset.
     int flatOffset = 0;
     for (int i = 0; i < shape.length; i++) {
       if (startIndices[i] < 0 ||
@@ -54,7 +53,7 @@ extension TensorData on Tensor {
       flatOffset += startIndices[i] * strides[i];
     }
 
-    // Compute the new shape and the total number of elements to read.
+    // Compute new shape and total elements.
     List<int> newShape = [];
     int numElems = 1;
     for (int i = 0; i < shape.length; i++) {
@@ -63,30 +62,30 @@ extension TensorData on Tensor {
       numElems *= dimSize;
     }
 
-    // Read only the necessary portion from the GPU buffer.
-    final slicedData = Float32List(numElems);
-    await buffer.read(slicedData, numElems, readOffset: flatOffset);
-
-    // Create and return the new tensor from the sliced data.
-    return await Tensor.create(newShape, data: slicedData, gpu: gpu);
+    // Read the entire tensor data then extract the slice.
+    T fullData = await getData();
+    final T slicedData =
+        getTypedDataSublist(fullData, flatOffset, flatOffset + numElems);
+    return await Tensor.create<T>(
+      newShape,
+      data: slicedData,
+      dataType: dataType,
+    );
   }
 
   /// Returns the value of the tensor element at the given [indices].
-  /// Throws an exception if the [indices] length does not match the tensor rank
-  /// or if any index is out of bounds.
   Future<double> getElement(List<int> indices) async {
     if (indices.length != shape.length) {
       throw Exception(
           "Indices length (${indices.length}) does not match tensor rank (${shape.length}).");
     }
 
-    // Calculate strides for the tensor (assumes row-major order).
+    // Calculate strides (row-major order).
     List<int> strides = List.filled(shape.length, 1);
     for (int i = shape.length - 2; i >= 0; i--) {
       strides[i] = strides[i + 1] * shape[i + 1];
     }
 
-    // Compute the flat offset from multi-dimensional indices.
     int flatIndex = 0;
     for (int i = 0; i < shape.length; i++) {
       if (indices[i] < 0 || indices[i] >= shape[i]) {
@@ -96,79 +95,92 @@ extension TensorData on Tensor {
       flatIndex += indices[i] * strides[i];
     }
 
-    // Instead of pulling the entire tensor data, allocate a small
-    // buffer to hold only the required single element.
-    final elementData = Float32List(1);
-    await buffer.read(elementData, 1, readOffset: flatIndex);
-    return elementData[0];
+    T data = await getData();
+    // Use our helper to retrieve the element.
+    return getTypedDataElement(data, flatIndex).toDouble();
   }
 
   /// Sets the value of the tensor element at the given [indices] to [value].
-  /// Throws an exception if the [indices] length does not match the tensor rank
-  /// or if any index is out of bounds.
   Future<void> setElement(List<int> indices, double value) async {
-    if (indices.length != shape.length) {
-      throw Exception(
-          "Indices length (${indices.length}) does not match tensor rank (${shape.length}).");
-    }
-    // Calculate strides for the tensor (assumes row-major order).
+    // Calculate strides (row-major order).
     List<int> strides = List.filled(shape.length, 1);
     for (int i = shape.length - 2; i >= 0; i--) {
       strides[i] = strides[i + 1] * shape[i + 1];
     }
-    // Compute the flat offset from multi-dimensional indices.
+
     int flatIndex = 0;
     for (int i = 0; i < shape.length; i++) {
       if (indices[i] < 0 || indices[i] >= shape[i]) {
         throw Exception(
             "Index out of bounds for dimension $i: ${indices[i]} not in [0, ${shape[i] - 1}].");
       }
-      flatIndex += indices[i] * strides[i];
+      // Ensure the result of multiplication is treated as int
+      flatIndex += (indices[i] * strides[i]);
     }
 
-    // Create a compute shader that writes the given value at the computed flat index.
-    final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> A: array<f32>;
-  
+    // Get the correct WGSL type string
+    final wgslType = getWGSLType(dataType);
+    // Format the value correctly for WGSL (e.g., using f32(), i32(), etc.)
+    // This assumes getWGSLType returns types like 'f32', 'i32', 'u32'
+    final wgslValueString;
+    // Basic example, might need refinement based on getWGSLType results and desired precision
+    if (wgslType.startsWith('f')) {
+      // Ensure it has a decimal or use constructor
+      wgslValueString =
+          value.toString().contains('.') ? value.toString() : '$value.0';
+      // Alternative: wgslValueString = '$wgslType($value)'; // e.g., f32(99.0)
+    } else if (wgslType.startsWith('i') || wgslType.startsWith('u')) {
+      wgslValueString = '${value.toInt()}'; // Convert double to int for i32/u32
+      // Alternative: wgslValueString = '$wgslType(${value.toInt()})'; // e.g., i32(99)
+    } else {
+      // Fallback or error for unsupported types
+      wgslValueString = value.toString();
+    }
+
+    final shaderTemplate = '''
+@group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
+
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  A[${flatIndex}u] = $value;
+  A[${flatIndex}u] = $wgslValueString; // Use the formatted value string
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderCode);
-    // IMPORTANT: Bind the tensor's GPU buffer to the shader.
-    shader.setBuffer('A', buffer);
-    // Dispatch a single workgroup (1,1,1) to perform the write.
-    await shader.dispatch(1, 1, 1);
-    shader.destroy();
+    try {
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'wgslType': wgslType,
+        'flatIndex': flatIndex.toString(),
+        'wgslValueString': wgslValueString,
+      });
+      // Add try-finally for shader destruction
+      shader.loadKernelString(shaderCode);
+      shader.setBuffer('A', buffer); // Use buffer directly
+      await shader.dispatch(1, 1, 1);
+    } finally {
+      shader.destroy();
+    }
   }
 
   /// Reshapes the tensor into a new shape without changing the underlying data.
-  /// Throws an exception if the total number of elements would differ.
-  Tensor reshape(List<int> newShape) {
+  Tensor<T> reshape(List<int> newShape) {
     int newSize = newShape.reduce((a, b) => a * b);
     if (newSize != size) {
       throw Exception(
           "New shape $newShape does not match total number of elements $size");
     }
-    return Tensor.fromBuffer(buffer, newShape);
+    // Use the generic fromBuffer constructor.
+    return Tensor.fromBuffer(buffer, newShape, gpu: gpu, dataType: dataType);
   }
 
-  /// Transposes a tensor according to the given [axes] permutation.
-  /// If [axes] is omitted, the dimensions are reversed (default behavior).
-  /// For example, for a tensor with shape [2,3,4]:
-  ///   - transpose() produces a tensor with shape [4,3,2].
-  ///   - transpose(axes: [1,0,2]) swaps the first two dimensions producing shape [3,2,4].
-  Future<Tensor> transpose({List<int>? axes}) async {
+  /// Transposes the tensor according to the given [axes] permutation.
+  Future<Tensor<T>> transpose({List<int>? axes}) async {
     final int rank = shape.length;
-    // Use reverse order if no permutation is provided.
+    // Default: reverse dimensions.
     axes ??= List<int>.generate(rank, (i) => rank - i - 1);
     if (axes.length != rank) {
       throw Exception(
           "Axes length (${axes.length}) must equal tensor rank ($rank).");
     }
-    // Validate that axes is a permutation of 0..rank-1.
     final sortedAxes = List<int>.from(axes)..sort();
     for (int i = 0; i < rank; i++) {
       if (sortedAxes[i] != i) {
@@ -178,17 +190,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Compute the new shape.
     List<int> newShape = axes.map((i) => shape[i]).toList();
-    // Compute total number of elements of the output.
     final int outSize = newShape.fold(1, (prod, e) => prod * e);
 
-    // Compute input strides (row-major layout) for the original tensor.
+    // Compute input strides (row-major order).
     List<int> inputStrides = List.filled(rank, 1);
     for (int i = rank - 2; i >= 0; i--) {
       inputStrides[i] = inputStrides[i + 1] * shape[i + 1];
     }
 
-    // Compute factors for unraveling an output flat index into indices in [newShape].
-    // outFactors[i] = product(newShape[i+1:]) with outFactors[last] = 1.
+    // Compute output factors.
     List<int> outFactors = List.filled(rank, 1);
     for (int i = 0; i < rank; i++) {
       int prod = 1;
@@ -198,14 +208,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       outFactors[i] = prod;
     }
 
-    // Compute the inverse permutation.
-    // For each original dimension d, find its new position: invPermutation[d] = j if axes[j] == d.
+    // Compute inverse permutation.
     List<int> invPermutation = List.filled(rank, 0);
     for (int j = 0; j < rank; j++) {
       invPermutation[axes[j]] = j;
     }
 
-    // Helper to format integer lists as WGSL constant arrays.
     String formatArray(List<int> arr) => arr.map((x) => "${x}u").join(", ");
 
     final String shaderCode = '''
@@ -215,24 +223,21 @@ const outFactors : array<u32, $rank> = array<u32, $rank>(${formatArray(outFactor
 const inputStrides : array<u32, $rank> = array<u32, $rank>(${formatArray(inputStrides)});
 const invPermutation : array<u32, $rank> = array<u32, $rank>(${formatArray(invPermutation)});
 
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<${getWGSLType(dataType)};
+@group(0) @binding(1) var<storage, read_write> output: array<${getWGSLType(dataType)};
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let i: u32 = global_id.x;
-  if (i >= outSize) {
-    return;
-  }
+  if(i >= outSize) { return; }
   var remainder: u32 = i;
   var outIndices: array<u32, rank>;
-  for (var j: u32 = 0u; j < rank; j = j + 1u) {
+  for(var j: u32 = 0u; j < rank; j = j + 1u) {
     outIndices[j] = remainder / outFactors[j];
     remainder = remainder % outFactors[j];
   }
   var inIndex: u32 = 0u;
-  // Reconstruct the input index using the inverse permutation.
-  for (var d: u32 = 0u; d < rank; d = d + 1u) {
+  for(var d: u32 = 0u; d < rank; d = d + 1u) {
     let pos = outIndices[invPermutation[d]];
     inIndex = inIndex + pos * inputStrides[d];
   }
@@ -240,7 +245,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 ''';
 
-    Tensor result = await Tensor.create(newShape, gpu: gpu);
+    Tensor<T> result = await Tensor.create<T>(
+      newShape,
+      gpu: gpu,
+      dataType: dataType,
+    );
     final ComputeShader shader = gpu.createComputeShader();
     shader.loadKernelString(shaderCode);
     shader.setBuffer("input", buffer);

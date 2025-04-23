@@ -6,7 +6,7 @@ Future<void> main() async {
   group('Tensor tests', () {
     test('Tensor creation with zeros', () async {
       var shape = [2, 3];
-      var tensor = await Tensor.create(shape);
+      var tensor = await Tensor.create<Float32List>(shape);
       var data = await tensor.getData();
       expect(data.length, equals(6));
       expect(data.every((v) => v == 0), isTrue);

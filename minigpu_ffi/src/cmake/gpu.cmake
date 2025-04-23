@@ -3,7 +3,7 @@ set(CMAKE_CXX_STANDARD 20)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/download.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/print_target.cmake")
 
-download_repository("gpu" "https://github.com/MichealReed/gpu.cpp" "${EXT_SOURCE_DIR}/gpu" "improve-async")
+download_repository("gpu" "https://github.com/MichealReed/gpu.cpp" "${EXT_SOURCE_DIR}/gpu" "minigpu")
 
 set(GPU_INCLUDE_DIR "${EXT_SOURCE_DIR}/gpu")
 

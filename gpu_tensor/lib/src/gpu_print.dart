@@ -3,7 +3,7 @@ import 'dart:typed_data';
 import 'gpu_tensor_base.dart';
 import 'gpu_data.dart';
 
-extension TensorPrintHelpers on Tensor {
+extension TensorPrintHelpers<T extends TypedData> on Tensor<T> {
   /// Returns a string representation of the first [counts] elements along each dimension.
   /// If [pretty] is true, the output is formatted with newlines and indentation.
   Future<String> head(List<int> counts, {bool pretty = false}) async {
@@ -17,19 +17,21 @@ extension TensorPrintHelpers on Tensor {
       int totalCols = shape[1];
       List<List<double>> rows = [];
       for (int r = 0; r < numRows; r++) {
+        // For 2D printing, we always read a Float32List and then convert its values.
         final rowData = Float32List(numCols);
-        // Compute flat offset for the row start.
+        // Calculate the flat offset for this row.
         await buffer.read(rowData, numCols, readOffset: r * totalCols);
-        rows.add(rowData);
+        rows.add(rowData.map((e) => e.toDouble()).toList());
       }
       return _format2D(rows, pretty: pretty);
     } else {
-      // Fallback for tensor rank != 2: use slicing.
+      // Use slicing for higher dimensional tensors.
       List<int> startIndices = List.filled(shape.length, 0);
-      Tensor subTensor =
+      Tensor<T> subTensor =
           await slice(startIndices: startIndices, endIndices: counts);
-      List<double> subData = await subTensor.getData();
-      return _formatTensor(subData, counts, pretty: pretty);
+      T subData = await subTensor.getData();
+      List<double> dataList = _toDoubleList(subData);
+      return _formatTensor(dataList, counts, pretty: pretty);
     }
   }
 
@@ -51,11 +53,10 @@ extension TensorPrintHelpers on Tensor {
         final rowData = Float32List(numCols);
         await buffer.read(rowData, numCols,
             readOffset: r * totalCols + startCol);
-        rows.add(rowData);
+        rows.add(rowData.map((e) => e.toDouble()).toList());
       }
       return _format2D(rows, pretty: pretty);
     } else {
-      // For higher-dimensional tensors, use slicing:
       List<int> startIndices = [];
       for (int i = 0; i < shape.length; i++) {
         if (counts[i] > shape[i]) {
@@ -64,13 +65,29 @@ extension TensorPrintHelpers on Tensor {
         }
         startIndices.add(shape[i] - counts[i]);
       }
-      Tensor subTensor = await slice(
+      Tensor<T> subTensor = await slice(
           startIndices: startIndices, endIndices: List<int>.from(shape));
-      // For consistent formatting, slice the head of that sub-tensor.
+      // For formatted output, slice the head of the sub-tensor.
       subTensor = await subTensor.slice(
           startIndices: List.filled(counts.length, 0), endIndices: counts);
-      List<double> subData = await subTensor.getData();
-      return _formatTensor(subData, counts, pretty: pretty);
+      T subData = await subTensor.getData();
+      List<double> dataList = _toDoubleList(subData);
+      return _formatTensor(dataList, counts, pretty: pretty);
+    }
+  }
+
+  /// Helper: converts [data] of type T to a List<double>.
+  List<double> _toDoubleList(T data) {
+    if (data is Float32List) {
+      return data.map((e) => e.toDouble()).toList();
+    } else if (data is Float64List) {
+      return data.map((e) => e.toDouble()).toList();
+    } else if (data is Int32List) {
+      return data.map((e) => e.toDouble()).toList();
+    } else if (data is Uint8List) {
+      return data.map((e) => e.toDouble()).toList();
+    } else {
+      throw Exception("Unsupported TypedData type: ${data.runtimeType}");
     }
   }
 

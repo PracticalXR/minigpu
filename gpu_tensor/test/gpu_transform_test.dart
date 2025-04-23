@@ -1,4 +1,5 @@
 import 'dart:typed_data';
+import 'package:minigpu/minigpu.dart';
 import 'package:test/test.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
 
@@ -17,7 +18,8 @@ Future<void> main() async {
       ]);
 
       // Create a tensor with shape [4] (4 complex numbers).
-      var tensor = await Tensor.create([8], data: inputData);
+      var tensor = await Tensor.create([8],
+          data: inputData, dataType: BufferDataType.float32);
       // Perform forward FFT.
       var fftResult = await tensor.fft();
 

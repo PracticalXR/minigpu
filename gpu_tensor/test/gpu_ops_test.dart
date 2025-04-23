@@ -174,7 +174,7 @@ Future<void> main() async {
       // Using known values: ln(1)=0, ln(e)=1
       var shape = [2];
       var data = Float32List.fromList([1.0, math.e]);
-      var tensor = await Tensor.create(shape, data: data);
+      var tensor = await Tensor.create<Float32List>(shape, data: data);
       var result = await tensor.log();
       var resultData = await result.getData();
       expect(resultData[0], closeTo(0.0, 1e-5));
@@ -354,7 +354,7 @@ Future<void> main() async {
       // Row 1 mean: (1+2+3)/3 = 2, Row 2 mean: (4+5+6)/3 = 5
       var shape = [2, 3];
       var data = Float32List.fromList([1, 2, 3, 4, 5, 6]);
-      var tensor = await Tensor.create(shape, data: data);
+      var tensor = await Tensor.create<Float32List>(shape, data: data);
       var meanTensor = await tensor.mean();
       var resultData = await meanTensor.getData();
       expect(meanTensor.shape, equals([2]));

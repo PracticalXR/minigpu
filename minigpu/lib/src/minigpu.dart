@@ -38,8 +38,8 @@ final class Minigpu {
   }
 
   /// Creates a buffer.
-  Buffer createBuffer(int bufferSize) {
-    final platformBuffer = _platform.createBuffer(bufferSize);
+  Buffer createBuffer(int bufferSize, BufferDataType dataType) {
+    final platformBuffer = _platform.createBuffer(bufferSize, dataType);
     final buff = Buffer(platformBuffer);
     _bufferFinalizer.attach(this, buff);
     return buff;

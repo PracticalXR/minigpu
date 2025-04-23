@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 import '../gpu_tensor.dart';
 
@@ -13,7 +14,7 @@ extension GpuFft on Tensor {
         (shape.length == 1) ? [total * 2] : (List.from(shape)..add(2));
     Tensor out = await Tensor.create(newShape, gpu: gpu);
 
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -28,6 +29,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode =
+        prepareShader(shaderTemplate, dataType, {'total': total});
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', out.buffer);
@@ -90,7 +93,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int half = m >> 1;
       int numOperations = n >> 1;
 
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -123,6 +126,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType,
+          {'half': half, 'm': m, 'numOperations': numOperations});
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -167,7 +172,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = rows * (cols >> 1);
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -203,6 +208,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType,
+          {'half': half, 'm': m, 'numOperations': numOperations});
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -215,12 +222,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     // FFT on columns.
     int stagesCol = (math.log(rows) / math.ln2).toInt();
-    pong = await Tensor.create(shape, gpu: gpu);
+    pong = await Tensor.create(shape);
     for (int s = 0; s < stagesCol; s++) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = cols * (rows >> 1);
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -256,6 +263,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType,
+          {'half': half, 'm': m, 'numOperations': numOperations});
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -304,7 +313,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = R * C * (D >> 1);
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -349,6 +358,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'D': D,
+        'R': R,
+        'C': C,
+        'm': m,
+        'half': half,
+        'numOperations': numOperations
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -366,7 +383,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = D * C * (R >> 1);
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -411,6 +428,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'D': D,
+        'R': R,
+        'C': C,
+        'm': m,
+        'half': half,
+        'numOperations': numOperations
+      });
+
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -428,7 +454,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = D * R * (C >> 1);
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -473,6 +499,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'D': D,
+        'R': R,
+        'C': C,
+        'm': m,
+        'half': half,
+        'numOperations': numOperations
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
