@@ -19,9 +19,6 @@ void MGPU::initializeContext() {
   } catch (const std::exception &ex) {
     // Log and potentially re-throw or handle context creation failure
     LOG(kDefLog, kError, "Failed to create GPU context: %s", ex.what());
-    // Depending on application structure, might want to throw
-    // std::runtime_error here throw std::runtime_error("Failed to create GPU
-    // context: " + std::string(ex.what()));
   }
 }
 
@@ -34,14 +31,13 @@ void MGPU::initializeContextAsync(std::function<void()> callback) {
       } else if (!ctx) {
         LOG(kDefLog, kError,
             "Async context initialization failed, callback skipped.");
-        // Optionally, invoke callback with an error status
       }
     } catch (const std::exception &ex) {
       // Log error from the async thread
       LOG(kDefLog, kError, "Async context initialization failed: %s",
           ex.what());
     }
-  }).detach(); // Detach thread for fire-and-forget async
+  }).detach();
 }
 
 void MGPU::destroyContext() {
@@ -49,7 +45,7 @@ void MGPU::destroyContext() {
     ctx.reset(); // Use reset() for unique_ptr to destroy the managed object
     LOG(kDefLog, kInfo, "GPU context destroyed successfully.");
   } else {
-    LOG(kDefLog, kWarn, // Use Warn level for non-critical state info
+    LOG(kDefLog, kWarn,
         "Attempted to destroy GPU context, but it was already destroyed or not "
         "initialized.");
   }
@@ -198,13 +194,13 @@ void Buffer::createBuffer(size_t sizeParam, gpu::NumType requestedDataType) {
             gpu::toString(internalDataType).c_str());
       }
     } else if (physicalByteSize > 0 && internalDataType != kUnknown) {
-      logicalLength = 0; // Unknown element size
+      logicalLength = 0;
       LOG(kDefLog, kError,
           "Cannot determine element size for type %s, but byte size > 0. "
           "Setting length to 0.",
           gpu::toString(internalDataType).c_str());
     } else {
-      logicalLength = 0; // Zero size or unknown type
+      logicalLength = 0;
     }
     LOG(kDefLog, kInfo,
         "Creating buffer: requested physical size=%zu bytes, type=%s. "
@@ -383,7 +379,6 @@ bool Buffer::validateBufferStateForRead(NumType readAsType,
     return false;
   }
 
-  // Check 3: (Optional but good sanity check) Does the logical length match the
   // physical size based on the expected state?
   size_t internalElementSize = gpu::sizeBytes(bufferType);
   if (internalElementSize > 0 && length > 0) {
@@ -413,9 +408,6 @@ bool Buffer::validateBufferStateForRead(NumType readAsType,
     }
   }
 
-  // If we passed the packed state and internal type checks, the buffer is in
-  // the correct state to be read *as* readAsType. The originalType check was
-  // removed as it's unreliable here.
   return true;
 }
 
@@ -864,7 +856,6 @@ void Buffer::readSyncExpandedUint64(void *outputData, size_t readElementCount,
 }
 
 // --- Public readSync Method ---
-
 void Buffer::readSync(void *outputData, NumType readAsType,
                       size_t readElementCount, size_t readElementOffset) {
 
@@ -925,7 +916,6 @@ void Buffer::readAsync(void *outputData, NumType dType, size_t size,
 }
 
 // --- setData Overloads ---
-
 // Helper to manage buffer creation/resizing and state updates
 void Buffer::ensureBuffer(size_t requiredLogicalLength,
                           gpu::NumType targetOriginalDataType) {
@@ -1116,7 +1106,6 @@ void Buffer::setData(const uint32_t *inputData, size_t numElements) {
 }
 
 // --- setData for Packed/Expanded Types ---
-
 void Buffer::setData(const int8_t *inputData, size_t numElements) {
   if (inputData == nullptr && numElements > 0)
     throw std::invalid_argument("setData(int8_t): inputData is null");
@@ -1166,7 +1155,7 @@ void Buffer::setData(const int8_t *inputData, size_t numElements) {
     return;
   }
 
-  // 2. Upload CPU int8 data (potentially padded), packing it into the temporary
+  // Upload CPU int8 data (potentially padded), packing it into the temporary
   // buffer
   if (paddedNumElements > 0) { // Use padded count for upload
     LOG(kDefLog, kInfo,
@@ -1182,7 +1171,7 @@ void Buffer::setData(const int8_t *inputData, size_t numElements) {
                paddedNumElements); // Use padded element count
   }
 
-  // 3. Ensure main buffer ('this') exists and is sized for UNPACKED int32 data.
+  // Ensure main buffer exists and is sized for UNPACKED int32 data.
   //    This still uses the *original* numElements for logical length.
   LOG(kDefLog, kInfo,
       "setData(int8_t): Ensuring main buffer exists for unpacked data (logical "
@@ -1198,7 +1187,7 @@ void Buffer::setData(const int8_t *inputData, size_t numElements) {
     return;
   }
 
-  // 4. Dispatch the unpack kernel: initialPackedUploadBuffer ->
+  // Dispatch the unpack kernel: initialPackedUploadBuffer ->
   // this->bufferData
   //    The kernel reads based on packed count, writes based on logical length.
   if (numElements >
@@ -1453,7 +1442,6 @@ void Buffer::setData(const double *inputData, size_t numElements) {
 }
 
 // --- setData for 64-bit integers (Direct Upload - No Packing/Expansion Yet)
-// ---
 void Buffer::setData(const int64_t *inputData, size_t numElements) {
   if (inputData == nullptr && numElements > 0)
     throw std::invalid_argument("setData(int64_t): inputData is null");

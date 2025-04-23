@@ -182,7 +182,8 @@ void dispatchI32toPackedI8(MGPU &mgpu, Buffer &unpacked_input,
 void dispatchPackedU8toU32(MGPU &mgpu, Buffer &packed_input,
                            Buffer &unpacked_output) {
   // Validation: Input is packed u32, Output is unpacked u32 representing u8
-  if (packed_input.bufferType != gpu::ku32) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_input.bufferType != gpu::ku32) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU8toU32: Packed input buffer type is not ku32 (is %d).",
         packed_input.bufferType);
     return;
@@ -364,19 +365,22 @@ void dispatchPackedI16toI32(MGPU &mgpu, Buffer &packed_input,
 void dispatchI32toPackedI16(MGPU &mgpu, Buffer &unpacked_input,
                             Buffer &packed_output) {
   // Validation: Input is unpacked i32 representing i16, Output is packed i32
-  if (unpacked_input.bufferType != gpu::ki32 ||
-      !unpacked_input.isPacked) { LOG(gpu::kDefLog, gpu::kError,
+  if (unpacked_input.bufferType != gpu::ki32 || !unpacked_input.isPacked) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchI32toPackedI16: Unpacked input buffer state invalid. Expected "
         "type=ki32 and isPacked=true, but got type=%d, isPacked=%d.",
         unpacked_input.bufferType, unpacked_input.isPacked);
     return;
   }
-  if (packed_output.bufferType != gpu::ki32) { LOG(gpu::kDefLog, gpu::kError,
-        "dispatchI32toPackedI16: Packed output buffer type is not ki32 (is %d).",
+  if (packed_output.bufferType != gpu::ki32) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchI32toPackedI16: Packed output buffer type is not ki32 (is "
+        "%d).",
         packed_output.bufferType);
     return;
   }
-  if (unpacked_input.length == 0) { LOG(gpu::kDefLog, gpu::kWarn,
+  if (unpacked_input.length == 0) {
+    LOG(gpu::kDefLog, gpu::kWarn,
         "dispatchI32toPackedI16: Unpacked input buffer logical length is "
         "0. Nothing to pack.");
     return;
@@ -387,16 +391,16 @@ void dispatchI32toPackedI16(MGPU &mgpu, Buffer &unpacked_input,
       (numLogicalElements + 1) / 2; // i32 elements needed for packing
 
   // Physical Size Validation
-  if (unpacked_input.bufferData.size <
-      numLogicalElements * sizeof(int32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (unpacked_input.bufferData.size < numLogicalElements * sizeof(int32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchI32toPackedI16: Unpacked input buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on its logical length (%zu).",
         unpacked_input.bufferData.size, numLogicalElements * sizeof(int32_t),
         numLogicalElements);
     return;
   }
-  if (packed_output.bufferData.size <
-      numPackedElements * sizeof(int32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_output.bufferData.size < numPackedElements * sizeof(int32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchI32toPackedI16: Packed output buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on input logical length "
         "(%zu).",
@@ -422,7 +426,8 @@ void dispatchI32toPackedI16(MGPU &mgpu, Buffer &unpacked_input,
 void dispatchPackedU16toU32(MGPU &mgpu, Buffer &packed_input,
                             Buffer &unpacked_output) {
   // Validation: Input is packed u32, Output is unpacked u32 representing u16
-  if (packed_input.bufferType != gpu::ku32) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_input.bufferType != gpu::ku32) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU16toU32: Packed input buffer type is not ku32 (is %d).",
         packed_input.bufferType);
     return;
@@ -445,8 +450,8 @@ void dispatchPackedU16toU32(MGPU &mgpu, Buffer &packed_input,
       (numLogicalElements + 1) / 2; // u32 elements needed for packing
 
   // Physical Size Validation
-  if (packed_input.bufferData.size <
-      numPackedElements * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_input.bufferData.size < numPackedElements * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU16toU32: Packed input buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on output logical length "
         "(%zu).",
@@ -454,8 +459,8 @@ void dispatchPackedU16toU32(MGPU &mgpu, Buffer &packed_input,
         numLogicalElements);
     return;
   }
-  if (unpacked_output.bufferData.size <
-      numLogicalElements * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (unpacked_output.bufferData.size < numLogicalElements * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU16toU32: Unpacked output buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on its logical length (%zu).",
         unpacked_output.bufferData.size, numLogicalElements * sizeof(uint32_t),
@@ -480,20 +485,22 @@ void dispatchPackedU16toU32(MGPU &mgpu, Buffer &packed_input,
 void dispatchU32toPackedU16(MGPU &mgpu, Buffer &unpacked_input,
                             Buffer &packed_output) {
   // Validation: Input is unpacked u32 representing u16, Output is packed u32
-  if (unpacked_input.bufferType != gpu::ku32 ||
-      !unpacked_input.isPacked) { LOG(gpu::kDefLog, gpu::kError,
+  if (unpacked_input.bufferType != gpu::ku32 || !unpacked_input.isPacked) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchU32toPackedU16: Unpacked input buffer state invalid. Expected "
         "type=ku32 and isPacked=true, but got type=%d, isPacked=%d.",
         unpacked_input.bufferType, unpacked_input.isPacked);
     return;
   }
-  if (packed_output.bufferType != gpu::ku32) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_output.bufferType != gpu::ku32) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchU32toPackedU16: Packed output buffer type is not ku32 (is "
         "%d).",
         packed_output.bufferType);
     return;
   }
-  if (unpacked_input.length == 0) { LOG(gpu::kDefLog, gpu::kWarn,
+  if (unpacked_input.length == 0) {
+    LOG(gpu::kDefLog, gpu::kWarn,
         "dispatchU32toPackedU16: Unpacked input buffer logical length is "
         "0. Nothing to pack.");
     return;
@@ -504,16 +511,16 @@ void dispatchU32toPackedU16(MGPU &mgpu, Buffer &unpacked_input,
       (numLogicalElements + 1) / 2; // u32 elements needed for packing
 
   // Physical Size Validation
-  if (unpacked_input.bufferData.size <
-      numLogicalElements * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (unpacked_input.bufferData.size < numLogicalElements * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchU32toPackedU16: Unpacked input buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on its logical length (%zu).",
         unpacked_input.bufferData.size, numLogicalElements * sizeof(uint32_t),
         numLogicalElements);
     return;
   }
-  if (packed_output.bufferData.size <
-      numPackedElements * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (packed_output.bufferData.size < numPackedElements * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchU32toPackedU16: Packed output buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on input logical length "
         "(%zu).",
@@ -546,19 +553,22 @@ void dispatchExpandF64toU32x2(MGPU &mgpu, Buffer &input_f64,
   // signify it holds expanded data) and output_u32x2.length == input_f64.length
   // * 2
 
-  if (input_f64.bufferType != gpu::kf64) { LOG(gpu::kDefLog, gpu::kError,
+  if (input_f64.bufferType != gpu::kf64) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchExpandF64toU32x2: Input buffer type is not kf64 (is %d).",
         input_f64.bufferType);
     return;
   }
-  if (output_u32x2.bufferType !=
-      gpu::ku32  || !output_u32x2.isPacked ) { LOG(gpu::kDefLog, gpu::kError,
+  if (output_u32x2.bufferType != gpu::ku32 || !output_u32x2.isPacked) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchExpandF64toU32x2: Output buffer should have isPacked=true "
         "(indicates it represents expanded u32 pairs).");
     return;
   } // Add isPacked check if used
-  if (input_f64.length == 0) { LOG(gpu::kDefLog, gpu::kWarn,
-        "dispatchExpandF64toU32x2: Input buffer logical length is 0. Nothing to "
+  if (input_f64.length == 0) {
+    LOG(gpu::kDefLog, gpu::kWarn,
+        "dispatchExpandF64toU32x2: Input buffer logical length is 0. Nothing "
+        "to "
         "expand.");
     return;
   }
@@ -566,8 +576,8 @@ void dispatchExpandF64toU32x2(MGPU &mgpu, Buffer &input_f64,
   size_t numLogicalElements = input_f64.length; // Logical f64 elements
 
   // Physical Size Validation
-  if (input_f64.bufferData.size <
-      numLogicalElements * sizeof(double)) { LOG(gpu::kDefLog, gpu::kError,
+  if (input_f64.bufferData.size < numLogicalElements * sizeof(double)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchExpandF64toU32x2: Input f64 buffer physical size (%zu) is too "
         "small for required bytes (%zu) based on its logical length (%zu).",
         input_f64.bufferData.size, numLogicalElements * sizeof(double),
@@ -577,7 +587,8 @@ void dispatchExpandF64toU32x2(MGPU &mgpu, Buffer &input_f64,
   // Output buffer holds vec2<u32> effectively, so size is numLogicalElements *
   // sizeof(vec2<u32>) = numLogicalElements * 2 * sizeof(u32)
   if (output_u32x2.bufferData.size <
-      numLogicalElements * 2 * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+      numLogicalElements * 2 * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchExpandF64toU32x2: Output u32x2 buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on input logical length "
         "(%zu).",
@@ -607,18 +618,20 @@ void dispatchCombineU32x2toF64(MGPU &mgpu, Buffer &input_u32x2,
   // and output_f64.bufferType == kf64
   // and output_f64.length == input_u32x2.length / 2
 
-  if (input_u32x2.bufferType !=
-      gpu::ku32  || !input_u32x2.isPacked ) { LOG(gpu::kDefLog, gpu::kError,
+  if (input_u32x2.bufferType != gpu::ku32 || !input_u32x2.isPacked) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchCombineU32x2toF64: Input buffer should have isPacked=true "
         "(indicates it represents original u32 pairs).");
     return;
   }
-  if (output_f64.bufferType != gpu::kf64) { LOG(gpu::kDefLog, gpu::kError,
+  if (output_f64.bufferType != gpu::kf64) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchCombineU32x2toF64: Output buffer type is not kf64 (is %d).",
         output_f64.bufferType);
     return;
   }
-  if (output_f64.length == 0) { LOG(gpu::kDefLog, gpu::kWarn,
+  if (output_f64.length == 0) {
+    LOG(gpu::kDefLog, gpu::kWarn,
         "dispatchCombineU32x2toF64: Output buffer logical length is 0. Nothing "
         "to combine.");
     return;
@@ -627,8 +640,8 @@ void dispatchCombineU32x2toF64(MGPU &mgpu, Buffer &input_u32x2,
   size_t numLogicalElements = output_f64.length; // Logical f64 elements
 
   // Physical Size Validation
-  if (input_u32x2.bufferData.size <
-      numLogicalElements * 2 * sizeof(uint32_t)) { LOG(gpu::kDefLog, gpu::kError,
+  if (input_u32x2.bufferData.size < numLogicalElements * 2 * sizeof(uint32_t)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchCombineU32x2toF64: Input u32x2 buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on output logical length "
         "(%zu).",
@@ -636,8 +649,8 @@ void dispatchCombineU32x2toF64(MGPU &mgpu, Buffer &input_u32x2,
         numLogicalElements);
     return;
   }
-  if (output_f64.bufferData.size <
-      numLogicalElements * sizeof(double)) { LOG(gpu::kDefLog, gpu::kError,
+  if (output_f64.bufferData.size < numLogicalElements * sizeof(double)) {
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchCombineU32x2toF64: Output f64 buffer physical size (%zu) is "
         "too small for required bytes (%zu) based on its logical length (%zu).",
         output_f64.bufferData.size, numLogicalElements * sizeof(double),

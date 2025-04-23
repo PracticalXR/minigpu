@@ -311,7 +311,6 @@ void mgpuReadBufferAsyncUint64(MGPUBuffer *buffer, uint64_t *outputData,
       LOG(kDefLog, kError, "mgpuReadBufferAsyncUint64: Unknown exception");
     }
   } else {
-    // Note: Original log message said (uint32), corrected to (uint64)
     LOG(kDefLog, kError,
         "Invalid buffer, outputData, or callback pointer (uint64)");
   }
