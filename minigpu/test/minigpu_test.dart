@@ -54,7 +54,7 @@ void main() {
       inputBuffer.setData(inputData, numFloats);
 
       // WGSL shader code which adds 0.2 to each input element.
-      final shaderCode = '''
+      final shaderTemplate = '''
 const GELU_SCALING_FACTOR: f32 = 0.7978845608028654;
 @group(0) @binding(0) var<storage, read_write> inp: array<f32>;
 @group(0) @binding(1) var<storage, read_write> out: array<f32>;

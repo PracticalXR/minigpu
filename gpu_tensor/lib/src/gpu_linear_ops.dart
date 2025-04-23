@@ -1,3 +1,4 @@
+import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 
 import 'gpu_tensor_base.dart';
@@ -15,7 +16,6 @@ extension TensorLinearOperator on Tensor {
   /// Matrix multiplication (dot product)
   /// for 2D tensors or batched matrix multiplication for higher dimensions.
   Future<Tensor> matMul(Tensor other) async {
-// Both tensors must have rank at least 2.
     if (rank < 2 || other.rank < 2) {
       throw Exception("matMul requires tensors with rank >= 2.");
     }
@@ -29,97 +29,150 @@ extension TensorLinearOperator on Tensor {
             "Inner dimensions do not match for matrix multiplication.");
       }
       int p = other.shape[1];
-      // The result has shape [m, p].
-      Tensor result = await Tensor.create([m, p]);
+      Tensor result = await Tensor.create([m, p],
+          dataType: dataType, gpu: gpu); // Pass dataType and gpu
 
-      final shaderCode = '''
+      // Define the shader template with placeholders
+      const shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
+
 @compute @workgroup_size(8,8,1)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let row: u32 = gid.x;
   let col: u32 = gid.y;
-  if (row < ${m}u && col < ${p}u) {
-    var sum: f32 = 0.0;
-    for (var k: u32 = 0u; k < ${n}u; k = k + 1u) {
-      let aIndex = row * ${n}u + k;
-      let bIndex = k * ${p}u + col;
-      sum = sum + A[aIndex] * B[bIndex];
-    }
-    let cIndex = row * ${p}u + col;
-    C[cIndex] = sum;
+
+  // Bounds check for safety
+  if (row >= \${m} || col >= \${p}) {
+    return;
   }
+
+  var sum: f32 = 0.0;
+  for (var k: u32 = 0u; k < \${n}; k = k + 1u) {
+    let aIndex = row * \${n} + k;
+    let bIndex = k * \${p} + col;
+    sum = sum + A[aIndex] * B[bIndex];
+  }
+
+  let cIndex = row * \${p} + col;
+  C[cIndex] = sum;
 }
 ''';
+      // Prepare the shader code using the helper
+      final shaderCode =
+          prepareShader(shaderTemplate, dataType, {'m': m, 'n': n, 'p': p});
 
       final ComputeShader shader = gpu.createComputeShader();
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('A', buffer);
-      shader.setBuffer('B', other.buffer);
-      shader.setBuffer('C', result.buffer);
-      int wgX = (m + 7) ~/ 8;
-      int wgY = (p + 7) ~/ 8;
-      await shader.dispatch(wgX, wgY, 1);
-      shader.destroy();
+      try {
+        // Use try-finally
+        shader.loadKernelString(shaderCode);
+        shader.setBuffer('A', buffer);
+        shader.setBuffer('B', other.buffer);
+        shader.setBuffer('C', result.buffer);
+        int wgX = (m + 7) ~/ 8;
+        int wgY = (p + 7) ~/ 8;
+        await shader.dispatch(wgX, wgY, 1);
+      } finally {
+        shader.destroy();
+      }
       return result;
     } else {
-// Assume we are doing batched matrix multiplication:
-// The left tensor has matrix dimensions [m, n] and the right [n, p]
-// where the batch is given by all preceding dimensions (which must match).
+      // Batched matrix multiplication
       int m = shape[rank - 2];
-      int n = shape.last; // also left inner dim
+      int n = shape.last;
       int p = other.shape.last;
 
-// Get batch dimensions:
       List<int> batchShapeA = shape.sublist(0, rank - 2);
       List<int> batchShapeB = other.shape.sublist(0, other.rank - 2);
-// For simplicity, require exact equality of batch dims.
       if (!_batchShapesEqual(batchShapeA, batchShapeB)) {
         throw Exception("Batch dimensions must match for batched matMul.");
       }
       int batch = batchShapeA.isEmpty ? 1 : batchShapeA.reduce((a, b) => a * b);
 
-// The result shape is [batchShape, m, p]
       List<int> resultShape = List.from(batchShapeA)..addAll([m, p]);
-      Tensor result = await Tensor.create(resultShape);
+      Tensor result = await Tensor.create(resultShape,
+          dataType: dataType, gpu: gpu); // Pass dataType and gpu
 
-// Use a shader aware of the batch dimension (using 3D dispatch):
-      final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> A: array<f32>;
-@group(0) @binding(1) var<storage, read_write> B: array<f32>;
+      // Calculate strides needed in the shader
+      int strideAm = n; // Stride to move one row down in A's matrix part
+      int strideAn =
+          1; // Stride to move one col right in A's matrix part (usually 1)
+      int strideBm = p; // Stride to move one row down in B's matrix part
+      int strideBn =
+          1; // Stride to move one col right in B's matrix part (usually 1)
+      int strideCm = p; // Stride to move one row down in C's matrix part
+      int strideCn =
+          1; // Stride to move one col right in C's matrix part (usually 1)
+
+      int batchStrideA = m * n; // Size of one matrix in A
+      int batchStrideB = n * p; // Size of one matrix in B
+      int batchStrideC = m * p; // Size of one matrix in C
+
+      // Define the shader template with placeholders
+      const shaderTemplate = '''
+@group(0) @binding(0) var<storage, read_write> A: array<f32>; // Use read
+@group(0) @binding(1) var<storage, read_write> B: array<f32>; // Use read
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
-@compute @workgroup_size(8,8,1)
+
+@compute @workgroup_size(8,8,1) // Workgroup size might need adjustment based on typical 'batch' size
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-let b: u32 = gid.z;
-let row: u32 = gid.x;
-let col: u32 = gid.y;
-if (b < ${batch}u && row < ${m}u && col < ${p}u) {
-var sum: f32 = 0.0;
-let offsetA: u32 = b * ${m * n}u;
-let offsetB: u32 = b * ${n * p}u;
-for (var k: u32 = 0u; k < ${n}u; k = k + 1u) {
-let indexA = offsetA + row * ${n}u + k;
-let indexB = offsetB + k * ${p}u + col;
-sum = sum + A[indexA] * B[indexB];
-}
-let indexC: u32 = b * ${m * p}u + row * ${p}u + col;
-C[indexC] = sum;
-}
+  let b: u32 = gid.z; // Batch index
+  let row: u32 = gid.x; // Row index within the matrix (maps to m)
+  let col: u32 = gid.y; // Col index within the matrix (maps to p)
+
+  // Bounds check
+  if (b >= \${batch} || row >= \${m} || col >= \${p}) {
+    return;
+  }
+
+  var sum: f32 = 0.0;
+  let offsetA: u32 = b * \${batchStrideA};
+  let offsetB: u32 = b * \${batchStrideB};
+
+  for (var k: u32 = 0u; k < \${n}; k = k + 1u) {
+    // Calculate indices using strides (more general than direct multiplication)
+    let indexA = offsetA + row * \${strideAm} + k * \${strideAn};
+    let indexB = offsetB + k * \${strideBm} + col * \${strideBn};
+    sum = sum + A[indexA] * B[indexB];
+  }
+
+  let offsetC: u32 = b * \${batchStrideC};
+  let indexC: u32 = offsetC + row * \${strideCm} + col * \${strideCn};
+  C[indexC] = sum;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('A', buffer);
-      shader.setBuffer('B', other.buffer);
-      shader.setBuffer('C', result.buffer);
+      // Prepare the shader code using the helper
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'm': m,
+        'n': n,
+        'p': p,
+        'batch': batch,
+        'strideAm': strideAm,
+        'strideAn': strideAn,
+        'strideBm': strideBm,
+        'strideBn': strideBn,
+        'strideCm': strideCm,
+        'strideCn': strideCn,
+        'batchStrideA': batchStrideA,
+        'batchStrideB': batchStrideB,
+        'batchStrideC': batchStrideC
+      });
 
-// Compute workgroup counts.
-      int wgX = (m + 7) ~/ 8;
-      int wgY = (p + 7) ~/ 8;
-      int wgZ = batch; // Or choose to workgroup-split this if needed.
-      await shader.dispatch(wgX, wgY, wgZ);
-      shader.destroy();
+      final ComputeShader shader = gpu.createComputeShader();
+      try {
+        shader.loadKernelString(shaderCode);
+        shader.setBuffer('A', buffer);
+        shader.setBuffer('B', other.buffer);
+        shader.setBuffer('C', result.buffer);
+
+        int wgX = (m + 7) ~/ 8; // Workgroups needed for rows (m)
+        int wgY = (p + 7) ~/ 8; // Workgroups needed for columns (p)
+        int wgZ = batch; // One workgroup per batch item
+        await shader.dispatch(wgX, wgY, wgZ);
+      } finally {
+        shader.destroy();
+      }
       return result;
     }
   }
@@ -171,7 +224,7 @@ C[indexC] = sum;
       // Create output tensor with shape [outH, outW, Cout].
       Tensor result = await Tensor.create([outH, outW, Cout], gpu: gpu);
 
-      final shaderCode = '''
+      final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> kernel: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
@@ -237,6 +290,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'H': H,
+        'W': W,
+        'Cin': Cin,
+        'kH': kH,
+        'kW': kW,
+        'Cout': Cout,
+        'outH': outH,
+        'outW': outW,
+        'strideH': strideH,
+        'strideW': strideW,
+        'padH': padH,
+        'padW': padW,
+        'dilationH': dilationH,
+        'dilationW': dilationW
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', buffer);
       shader.setBuffer('kernel', kernel.buffer);
@@ -277,7 +346,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     Tensor result = await Tensor.create([outH, outW], gpu: gpu);
 
     // WGSL shader code: each invocation computes one output pixel.
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> kernel: array<f32>;
 @group(0) @binding(2) var<storage, read_write> output: array<f32>;
@@ -314,6 +383,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType,
+        {'H': H, 'W': W, 'kH': kH, 'kW': kW, 'outH': outH, 'outW': outW});
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('kernel', kernel.buffer);

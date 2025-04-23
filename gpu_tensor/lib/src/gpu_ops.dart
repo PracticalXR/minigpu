@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 import 'gpu_tensor_base.dart';
 
@@ -11,7 +12,7 @@ extension TensorOperator<T extends TypedData> on Tensor<T> {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -24,6 +25,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -41,7 +45,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -54,6 +58,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -123,7 +130,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -136,6 +143,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -150,7 +160,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> addScalar(double scalar) async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -162,6 +172,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -175,7 +188,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> subtractScalar(double scalar) async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -187,6 +200,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -200,7 +216,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> multiplyScalar(double scalar) async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -212,6 +228,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -228,7 +247,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -241,6 +260,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -255,7 +277,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> divideScalar(double scalar) async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -267,6 +289,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -280,7 +305,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> powScalar(double exponent) async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -292,6 +317,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -305,7 +333,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> log() async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -317,6 +345,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -330,7 +361,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   Future<Tensor<T>> exp() async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -342,6 +373,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -355,7 +389,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   Future<Tensor<T>> sqrt() async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -367,6 +401,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -381,7 +418,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     String divisorLiteral = divisor.toStringAsFixed(1);
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -393,6 +430,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -409,7 +449,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -422,6 +462,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -439,7 +482,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -452,6 +495,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -469,7 +515,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -482,6 +528,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -499,7 +548,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
@@ -512,6 +561,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
@@ -562,7 +614,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> abs() async {
     Tensor<T> result =
         await Tensor.create<T>(shape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
@@ -574,7 +626,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
+
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
     int workgroups = (size + 255) ~/ 256;
@@ -599,7 +655,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     List<int> outShape = List.from(shape)..removeAt(axis);
     Tensor<T> result =
         await Tensor.create<T>(outShape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 
@@ -623,7 +679,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'd': d.toString(),
+      'inner': inner.toString(),
+      'totalOut': totalOut.toString(),
+    });
     shader.loadKernelString(shaderCode);
+
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
     int workgroups = (totalOut + 255) ~/ 256;
@@ -657,7 +719,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     List<int> outShape = List.from(shape)..removeAt(axis);
     Tensor<T> result =
         await Tensor.create<T>(outShape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 
@@ -681,6 +743,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'd': d.toString(),
+      'inner': inner.toString(),
+      'totalOut': totalOut.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -706,7 +773,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     List<int> outShape = List.from(shape)..removeAt(axis);
     Tensor<T> result =
         await Tensor.create<T>(outShape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 
@@ -730,6 +797,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'd': d.toString(),
+      'inner': inner.toString(),
+      'totalOut': totalOut.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -755,7 +827,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     List<int> outShape = List.from(shape)..removeAt(axis);
     Tensor<T> result =
         await Tensor.create<T>(outShape, gpu: gpu, dataType: dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 
@@ -784,6 +856,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode =
+        prepareShader(shaderTemplate, dataType, {'shape': shape});
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);

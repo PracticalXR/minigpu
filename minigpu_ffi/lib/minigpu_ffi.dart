@@ -171,11 +171,8 @@ final class FfiBuffer implements PlatformBuffer {
     final int totalElementsInOutput = outputData.lengthInBytes ~/ elementSize;
 
     // Determine the number of elements to actually read
-    final int elementsToRead = (readElements > 0)
-        ? readElements
-        : (totalElementsInOutput > elementOffset
-            ? totalElementsInOutput - elementOffset
-            : 0);
+    final int elementsToRead =
+        (readElements > 0) ? readElements : totalElementsInOutput;
 
     // --- Input Validation ---
     if (elementOffset < 0) {
@@ -187,7 +184,7 @@ final class FfiBuffer implements PlatformBuffer {
           elementsToRead, 'readElements', 'Cannot be negative');
     }
     // Check if requested range is valid within the output buffer
-    if (elementOffset + elementsToRead > totalElementsInOutput) {
+    if (elementsToRead > totalElementsInOutput) {
       throw RangeError(
           'Read range (offset: $elementOffset, count: $elementsToRead) exceeds output buffer capacity ($totalElementsInOutput elements)');
     }
@@ -228,8 +225,7 @@ final class FfiBuffer implements PlatformBuffer {
                 nativePtr.cast<Int8>().asTypedList(elementsToRead);
             // Copy data into the correct portion of the outputData
             if (outputData is Int8List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -251,8 +247,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Int16>().asTypedList(elementsToRead);
             if (outputData is Int16List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -275,8 +270,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Int32>().asTypedList(elementsToRead);
             if (outputData is Int32List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -299,8 +293,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Int64>().asTypedList(elementsToRead);
             if (outputData is Int64List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -323,8 +316,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Uint8>().asTypedList(elementsToRead);
             if (outputData is Uint8List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -346,8 +338,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Uint16>().asTypedList(elementsToRead);
             if (outputData is Uint16List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -370,8 +361,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Uint32>().asTypedList(elementsToRead);
             if (outputData is Uint32List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -394,8 +384,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<int> data =
                 nativePtr.cast<Uint64>().asTypedList(elementsToRead);
             if (outputData is Uint64List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -421,8 +410,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<double> data =
                 nativePtr.cast<Float>().asTypedList(elementsToRead);
             if (outputData is Float32List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
@@ -445,8 +433,7 @@ final class FfiBuffer implements PlatformBuffer {
             final List<double> data =
                 nativePtr.cast<Double>().asTypedList(elementsToRead);
             if (outputData is Float64List) {
-              outputData.setRange(
-                  elementOffset, elementOffset + elementsToRead, data);
+              outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {

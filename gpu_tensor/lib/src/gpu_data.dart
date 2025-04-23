@@ -102,36 +102,63 @@ extension TensorData<T extends TypedData> on Tensor<T> {
 
   /// Sets the value of the tensor element at the given [indices] to [value].
   Future<void> setElement(List<int> indices, double value) async {
-    if (indices.length != shape.length) {
-      throw Exception(
-          "Indices length (${indices.length}) does not match tensor rank (${shape.length}).");
-    }
+    // Calculate strides (row-major order).
     List<int> strides = List.filled(shape.length, 1);
     for (int i = shape.length - 2; i >= 0; i--) {
       strides[i] = strides[i + 1] * shape[i + 1];
     }
+
     int flatIndex = 0;
     for (int i = 0; i < shape.length; i++) {
       if (indices[i] < 0 || indices[i] >= shape[i]) {
         throw Exception(
             "Index out of bounds for dimension $i: ${indices[i]} not in [0, ${shape[i] - 1}].");
       }
-      flatIndex += indices[i] * strides[i];
+      // Ensure the result of multiplication is treated as int
+      flatIndex += (indices[i] * strides[i]);
     }
 
-    final shaderCode = '''
-@group(0) @binding(0) var<storage, read_write> A: array<f32>;
-  
+    // Get the correct WGSL type string
+    final wgslType = getWGSLType(dataType);
+    // Format the value correctly for WGSL (e.g., using f32(), i32(), etc.)
+    // This assumes getWGSLType returns types like 'f32', 'i32', 'u32'
+    final wgslValueString;
+    // Basic example, might need refinement based on getWGSLType results and desired precision
+    if (wgslType.startsWith('f')) {
+      // Ensure it has a decimal or use constructor
+      wgslValueString =
+          value.toString().contains('.') ? value.toString() : '$value.0';
+      // Alternative: wgslValueString = '$wgslType($value)'; // e.g., f32(99.0)
+    } else if (wgslType.startsWith('i') || wgslType.startsWith('u')) {
+      wgslValueString = '${value.toInt()}'; // Convert double to int for i32/u32
+      // Alternative: wgslValueString = '$wgslType(${value.toInt()})'; // e.g., i32(99)
+    } else {
+      // Fallback or error for unsupported types
+      wgslValueString = value.toString();
+    }
+
+    final shaderTemplate = '''
+@group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
+
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  A[${flatIndex}u] = $value;
+  A[${flatIndex}u] = $wgslValueString; // Use the formatted value string
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderCode);
-    shader.setBuffer('A', buffer);
-    await shader.dispatch(1, 1, 1);
-    shader.destroy();
+    try {
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'wgslType': wgslType,
+        'flatIndex': flatIndex.toString(),
+        'wgslValueString': wgslValueString,
+      });
+      // Add try-finally for shader destruction
+      shader.loadKernelString(shaderCode);
+      shader.setBuffer('A', buffer); // Use buffer directly
+      await shader.dispatch(1, 1, 1);
+    } finally {
+      shader.destroy();
+    }
   }
 
   /// Reshapes the tensor into a new shape without changing the underlying data.
@@ -196,8 +223,8 @@ const outFactors : array<u32, $rank> = array<u32, $rank>(${formatArray(outFactor
 const inputStrides : array<u32, $rank> = array<u32, $rank>(${formatArray(inputStrides)});
 const invPermutation : array<u32, $rank> = array<u32, $rank>(${formatArray(invPermutation)});
 
-@group(0) @binding(0) var<storage, read> input: array<f32>;
-@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(0) var<storage, read_write> input: array<${getWGSLType(dataType)};
+@group(0) @binding(1) var<storage, read_write> output: array<${getWGSLType(dataType)};
 
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {

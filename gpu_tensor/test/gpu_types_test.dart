@@ -88,7 +88,7 @@ void main() {
       final shape = [2, 5];
       Tensor<Float64List> tensor = await Tensor.create<Float64List>(
         shape,
-        dataType: BufferDataType.double,
+        dataType: BufferDataType.float64,
       );
       final data = await tensor.getData();
       expect(data, isA<Float64List>());

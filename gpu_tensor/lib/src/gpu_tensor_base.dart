@@ -6,16 +6,17 @@ int _elementSize(BufferDataType type) {
     case BufferDataType.int8:
     case BufferDataType.uint8:
       return 1;
+    case BufferDataType.float16:
     case BufferDataType.int16:
     case BufferDataType.uint16:
       return 2;
     case BufferDataType.int32:
     case BufferDataType.uint32:
-    case BufferDataType.float:
+    case BufferDataType.float32:
       return 4;
     case BufferDataType.int64:
     case BufferDataType.uint64:
-    case BufferDataType.double:
+    case BufferDataType.float64:
       return 8;
   }
 }
@@ -41,10 +42,10 @@ class Tensor<T extends TypedData> {
 
   // Private constructor.
   Tensor._(this.shape,
-      {required this.gpu, T? data, this.dataType = BufferDataType.float})
+      {required this.gpu, T? data, this.dataType = BufferDataType.float32})
       : size = shape.reduce((a, b) => a * b) {
     final int byteSize = size * _elementSize(dataType);
-    buffer = gpu.createBuffer(byteSize);
+    buffer = gpu.createBuffer(byteSize, dataType);
     if (data != null) {
       if (data.lengthInBytes ~/ _elementSize(dataType) != size) {
         throw Exception(
@@ -84,7 +85,7 @@ class Tensor<T extends TypedData> {
     List<int> shape, {
     Minigpu? gpu,
     T? data,
-    BufferDataType dataType = BufferDataType.float,
+    BufferDataType dataType = BufferDataType.float32,
   }) async {
     gpu = gpu ?? DefaultMinigpu.instance;
     if (!gpu.isInitialized) {
@@ -135,7 +136,7 @@ class Tensor<T extends TypedData> {
 
   /// Creates a tensor from an existing buffer.
   Tensor.fromBuffer(this.buffer, this.shape,
-      {Minigpu? gpu, this.dataType = BufferDataType.float})
+      {Minigpu? gpu, this.dataType = BufferDataType.float32})
       : gpu = gpu ?? DefaultMinigpu.instance,
         size = shape.reduce((a, b) => a * b);
 }

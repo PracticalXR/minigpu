@@ -32,12 +32,10 @@ String getWGSLType(BufferDataType type) {
     case BufferDataType.uint64: // Packed as u32
       return 'u32';
     case BufferDataType.float16:
-      return 'f16';
     case BufferDataType.float32:
       return 'f32';
     case BufferDataType.float64:
-      // WGSL does not support 64-bit floats, so doubles are packed into two 32-bit ints.
-      return 'i32';
+      return 'u32';
   }
 }
 

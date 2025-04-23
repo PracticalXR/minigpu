@@ -21,7 +21,7 @@ Future<void> main() async {
   inputBuffer.setData(inputData, bufferSize);
 
   // WGSL shader code from the Flutter example.
-  final shaderCode = '''
+  final shaderTemplate = '''
 const GELU_SCALING_FACTOR: f32 = 0.7978845608028654; // sqrt(2.0 / PI)
 @group(0) @binding(0) var<storage, read_write> inp: array<f32>;
 @group(0) @binding(1) var<storage, read_write> out: array<f32>;

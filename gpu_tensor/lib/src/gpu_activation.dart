@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 import '../gpu_tensor.dart';
 
@@ -8,7 +9,7 @@ extension GpuActivation<T extends TypedData> on Tensor<T> {
   Future<Tensor<T>> relu() async {
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
@@ -22,6 +23,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', result.buffer);
@@ -35,7 +40,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> sigmoid() async {
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
@@ -52,6 +57,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', result.buffer);
@@ -65,7 +74,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> sin() async {
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> B: array<$wgslType>;
 
@@ -78,6 +87,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -91,7 +104,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   Future<Tensor<T>> cos() async {
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> A: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> B: array<$wgslType>;
 
@@ -104,6 +117,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
@@ -117,7 +134,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   Future<Tensor<T>> tanh() async {
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
@@ -136,6 +153,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'size': size.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', result.buffer);
@@ -157,7 +178,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     Tensor<T> result = await Tensor.create<T>(shape);
     final wgslType = getWGSLType(result.dataType);
-    final shaderCode = '''
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
@@ -186,6 +207,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'wgslType': wgslType,
+      'total': total.toString(),
+      'd': d.toString(),
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', result.buffer);
