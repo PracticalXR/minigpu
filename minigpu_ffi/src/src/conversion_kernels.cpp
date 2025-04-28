@@ -672,4 +672,8 @@ void dispatchCombineU32x2toF64(MGPU &mgpu, Buffer &input_u32x2,
 }
 
 } // namespace kernels
+<<<<<<< Updated upstream
 } // namespace mgpu
+=======
+} // namespace mgpu
+>>>>>>> Stashed changes
