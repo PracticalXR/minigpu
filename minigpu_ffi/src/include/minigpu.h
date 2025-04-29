@@ -90,30 +90,27 @@ EXPORT void mgpuReadBufferSyncFloat64(MGPUBuffer *buffer, double *outputData,
                                       size_t elementOffset);
 // Signed Integer Types
 EXPORT void mgpuSetBufferDataInt8(MGPUBuffer *buffer, const int8_t *inputData,
-                                  size_t elementCount, size_t elementOffset);
+                                  size_t byteSize);
 EXPORT void mgpuSetBufferDataInt16(MGPUBuffer *buffer, const int16_t *inputData,
-                                   size_t elementCount, size_t elementOffset);
+                                   size_t byteSize);
 EXPORT void mgpuSetBufferDataInt32(MGPUBuffer *buffer, const int32_t *inputData,
-                                   size_t elementCount, size_t elementOffset);
+                                   size_t byteSize);
 EXPORT void mgpuSetBufferDataInt64(MGPUBuffer *buffer, const int64_t *inputData,
-                                   size_t elementCount, size_t elementOffset);
+                                   size_t byteSize);
 // Unsigned Integer Types
 EXPORT void mgpuSetBufferDataUint8(MGPUBuffer *buffer, const uint8_t *inputData,
-                                   size_t elementCount, size_t elementOffset);
+                                   size_t byteSize);
 EXPORT void mgpuSetBufferDataUint16(MGPUBuffer *buffer,
-                                    const uint16_t *inputData,
-                                    size_t elementCount, size_t elementOffset);
+                                    const uint16_t *inputData, size_t byteSize);
 EXPORT void mgpuSetBufferDataUint32(MGPUBuffer *buffer,
-                                    const uint32_t *inputData,
-                                    size_t elementCount, size_t elementOffset);
+                                    const uint32_t *inputData, size_t byteSize);
 EXPORT void mgpuSetBufferDataUint64(MGPUBuffer *buffer,
-                                    const uint64_t *inputData,
-                                    size_t elementCount, size_t elementOffset);
+                                    const uint64_t *inputData, size_t byteSize);
 // Floating Point Number Types
 EXPORT void mgpuSetBufferDataFloat(MGPUBuffer *buffer, const float *inputData,
-                                   size_t elementCount, size_t elementOffset);
+                                   size_t byteSize);
 EXPORT void mgpuSetBufferDataDouble(MGPUBuffer *buffer, const double *inputData,
-                                    size_t elementCount, size_t elementOffset);
+                                    size_t byteSize);
 
 #ifdef __cplusplus
 }
