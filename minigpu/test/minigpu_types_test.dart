@@ -21,7 +21,7 @@ void main() {
       final Float32List input = Float32List.fromList(
         List.generate(count, (i) => i.toDouble()),
       );
-      buffer.setData(input, input.lengthInBytes);
+      buffer.setData(input, input.length);
 
       final Float32List output = Float32List(count);
       await buffer.read(output, count, dataType: BufferDataType.float32);
@@ -79,8 +79,7 @@ void main() {
       final Int16List input = Int16List.fromList(
         List.generate(count, (i) => i * 10 - 50),
       );
-      buffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.int16);
+      buffer.setData(input, input.length, dataType: BufferDataType.int16);
 
       final Int16List output = Int16List(count);
       await buffer.read(output, count, dataType: BufferDataType.int16);
@@ -97,8 +96,7 @@ void main() {
       final Int32List input = Int32List.fromList(
         List.generate(count, (i) => i * 100 - 500),
       );
-      buffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.int32);
+      buffer.setData(input, input.length, dataType: BufferDataType.int32);
 
       final Int32List output = Int32List(count);
       await buffer.read(output, count, dataType: BufferDataType.int32);
@@ -133,8 +131,7 @@ void main() {
       final Uint8List input = Uint8List.fromList(
         List.generate(count, (i) => i),
       );
-      buffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.uint8);
+      buffer.setData(input, input.length, dataType: BufferDataType.uint8);
 
       final Uint8List output = Uint8List(count);
       await buffer.read(output, count, dataType: BufferDataType.uint8);
@@ -151,8 +148,7 @@ void main() {
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => i * 2),
       );
-      buffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.uint16);
+      buffer.setData(input, input.length, dataType: BufferDataType.uint16);
 
       final Uint16List output = Uint16List(count);
       await buffer.read(output, count, dataType: BufferDataType.uint16);
@@ -169,8 +165,7 @@ void main() {
       final Uint32List input = Uint32List.fromList(
         List.generate(count, (i) => (i + 1) * 100),
       );
-      buffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.uint32);
+      buffer.setData(input, input.length, dataType: BufferDataType.uint32);
 
       final Uint32List output = Uint32List(count);
       await buffer.read(output, count, dataType: BufferDataType.uint32);
@@ -191,7 +186,7 @@ void main() {
       final Float32List input = Float32List.fromList(
           List.generate(count, (i) => i.toDouble(), growable: false));
       // No packing concerns at the test level.
-      inputBuffer.setData(input, input.lengthInBytes,
+      inputBuffer.setData(input, input.length,
           dataType: BufferDataType.float32);
 
       final String shaderCode = '''
@@ -269,8 +264,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
       final Int32List input = Int32List.fromList(
           List.generate(count, (i) => i * 100 - 500, growable: false));
-      inputBuffer.setData(input, input.lengthInBytes,
-          dataType: BufferDataType.int32);
+      inputBuffer.setData(input, input.length, dataType: BufferDataType.int32);
 
       final String shaderCode = '''
 @group(0) @binding(0) var<storage, read_write> inp: array<i32>;
@@ -337,8 +331,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs 4 Uint8 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint8, count);
-      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint8);
-      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint8);
+      final inputBuffer = minigpu.createBuffer(count, BufferDataType.uint8);
+      final outputBuffer = minigpu.createBuffer(count, BufferDataType.uint8);
 
       final Uint8List input =
           Uint8List.fromList(List.generate(count, (i) => i, growable: false));
@@ -352,7 +346,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let idx = global_id.x;
   // The array length is managed by the API.
-  if (idx < ${bufSize ~/ Uint32List.bytesPerElement}u) {
+  if (idx < arrayLength(&inp)) {
     out[idx] = inp[idx];
   }
 }
@@ -375,8 +369,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs 2 Uint16 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint16, count);
-      final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint16);
-      final outputBuffer = minigpu.createBuffer(bufSize, BufferDataType.uint16);
+      final inputBuffer = minigpu.createBuffer(count, BufferDataType.uint16);
+      final outputBuffer = minigpu.createBuffer(count, BufferDataType.uint16);
 
       final Uint16List input = Uint16List.fromList(
           List.generate(count, (i) => i * 2, growable: false));
@@ -389,7 +383,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   let idx = global_id.x;
-  if (idx < ${bufSize ~/ Uint32List.bytesPerElement}u) {
+  if (idx < arrayLength(&inp)) {
     out[idx] = inp[idx];
   }
 }
