@@ -16,8 +16,8 @@ class MinigpuWeb extends MinigpuPlatform {
   }
 
   @override
-  void destroyContext() {
-    wasm.mgpuDestroyContext();
+  Future<void> destroyContext() async {
+    await wasm.mgpuDestroyContext();
   }
 
   @override

@@ -80,3 +80,14 @@ class MinigpuAlreadyInitError extends Error {
       ? 'Minigpu already initialized'
       : 'Minigpu already initialized: $message';
 }
+
+class MinigpuNotInitializedError extends Error {
+  MinigpuNotInitializedError([this.message]);
+
+  final String? message;
+
+  @override
+  String toString() => message == null
+      ? 'Minigpu not initialized'
+      : 'Minigpu not initialized: $message';
+}

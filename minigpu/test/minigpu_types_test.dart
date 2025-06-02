@@ -2,16 +2,20 @@ import 'dart:typed_data';
 import 'package:minigpu/minigpu.dart';
 import 'package:test/test.dart';
 
-Future<Minigpu> _initMinigpu() async {
-  final minigpu = Minigpu();
-  await minigpu.init();
-  return minigpu;
-}
-
 void main() {
   group('Buffer Data Types Tests', () {
+    late Minigpu minigpu;
+
+    setUpAll(() async {
+      minigpu = Minigpu();
+      await minigpu.init();
+    });
+
+    tearDownAll(() async {
+      await minigpu.destroy();
+    });
+
     test('Float32 read/write', () async {
-      final minigpu = await _initMinigpu();
       // Allocate 16 floats.
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement;
@@ -30,7 +34,6 @@ void main() {
     });
 
     test('Float64 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // Allocate based on the packed type (floats)
       final int bufferSize = count * Float64List.bytesPerElement;
@@ -54,7 +57,6 @@ void main() {
     });
 
     test('Int8 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int8List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.int8);
@@ -71,7 +73,6 @@ void main() {
     });
 
     test('Int16 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int16List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.int16);
@@ -88,7 +89,6 @@ void main() {
     });
 
     test('Int32 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.int32);
@@ -105,7 +105,6 @@ void main() {
     });
 
     test('Int64 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.int64);
@@ -123,7 +122,6 @@ void main() {
     });
 
     test('Uint8 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint8List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint8);
@@ -140,7 +138,6 @@ void main() {
     });
 
     test('Uint16 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint16List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint16);
@@ -157,7 +154,6 @@ void main() {
     });
 
     test('Uint32 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement;
       final buffer = minigpu.createBuffer(byteSize, BufferDataType.uint32);
@@ -175,8 +171,18 @@ void main() {
   });
 
   group('Compute Shader Roundtrip Tests', () {
+    late Minigpu minigpu;
+
+    setUpAll(() async {
+      minigpu = Minigpu();
+      await minigpu.init();
+    });
+
+    tearDownAll(() async {
+      await minigpu.destroy();
+    });
+
     test('Float32 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int bufSize = getBufferSizeForType(BufferDataType.float32, count);
       final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.float32);
@@ -214,7 +220,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
 
     test('Float64 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // For doubles the API automatically packs/unpacks.
       final int bufSize = getBufferSizeForType(BufferDataType.float64, count);
@@ -256,7 +261,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
 
     test('Int32 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int bufSize = getBufferSizeForType(BufferDataType.int32, count);
       final inputBuffer = minigpu.createBuffer(bufSize, BufferDataType.int32);
@@ -291,7 +295,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
 
     test('Int64 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // The API packs Int64 into 2 Int32; the user simply passes Int64List.
       final int bufSize = getBufferSizeForType(BufferDataType.int64, count);
@@ -327,7 +330,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
 
     test('Uint8 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // The API packs 4 Uint8 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint8, count);
@@ -365,7 +367,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     });
 
     test('Uint16 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // The API packs 2 Uint16 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint16, count);

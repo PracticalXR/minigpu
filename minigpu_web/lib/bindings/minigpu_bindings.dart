@@ -62,11 +62,14 @@ Future<void> mgpuInitializeContext() async {
   ).toDart;
 }
 
-@JS('_mgpuDestroyContext')
-external void _mgpuDestroyContext();
-
-void mgpuDestroyContext() {
-  _mgpuDestroyContext();
+Future<void> mgpuDestroyContext() async {
+  await ccall(
+    "mgpuDestroyContext".toJS,
+    "void".toJS,
+    <JSAny>[].toJSDeep,
+    <JSAny>[].toJSDeep,
+    {"async": true}.toJSDeep,
+  ).toDart;
 }
 
 // Compute shader functions

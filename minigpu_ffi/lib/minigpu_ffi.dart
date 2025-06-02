@@ -35,7 +35,7 @@ class MinigpuFfi extends MinigpuPlatform {
   }
 
   @override
-  void destroyContext() {
+  Future<void> destroyContext() async {
     ffi.mgpuDestroyContext();
   }
 
@@ -513,7 +513,10 @@ final class FfiBuffer implements PlatformBuffer {
     }
 
     final int byteSize = elementCount * elementSize;
-    final Pointer<NativeType> nativePtr = malloc.allocate<NativeType>(byteSize);
+    final Pointer<NativeType> nativePtr = (inputData is Int8List ||
+            inputData is Uint8List)
+        ? malloc.allocate<NativeType>((byteSize + 3) & ~3) // Align to 4 bytes
+        : malloc.allocate<NativeType>(byteSize);
 
     try {
       // Copy data from inputData (up to elementCount) to nativePtr
@@ -521,8 +524,8 @@ final class FfiBuffer implements PlatformBuffer {
       if (inputData is Int8List && dataType == BufferDataType.int8) {
         nativePtr
             .cast<Int8>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
+            .asTypedList(byteSize)
+            .setRange(0, byteSize, inputData);
       } else if (inputData is Int16List && dataType == BufferDataType.int16) {
         nativePtr
             .cast<Int16>()
@@ -541,8 +544,8 @@ final class FfiBuffer implements PlatformBuffer {
       } else if (inputData is Uint8List && dataType == BufferDataType.uint8) {
         nativePtr
             .cast<Uint8>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
+            .asTypedList(byteSize)
+            .setRange(0, byteSize, inputData);
       } else if (inputData is Uint16List && dataType == BufferDataType.uint16) {
         nativePtr
             .cast<Uint16>()
@@ -580,11 +583,10 @@ final class FfiBuffer implements PlatformBuffer {
         }
       }
 
-      // Switch to call the proper native function, passing ELEMENT count
+      // Switch to call the proper native function
       switch (dataType) {
         case BufferDataType.int8:
-          ffi.mgpuSetBufferDataInt8(_self, nativePtr.cast<Int8>(),
-              elementCount); // Pass ELEMENT count
+          ffi.mgpuSetBufferDataInt8(_self, nativePtr.cast<Int8>(), byteSize);
           break;
         case BufferDataType.int16:
           ffi.mgpuSetBufferDataInt16(_self, nativePtr.cast<Int16>(), byteSize);

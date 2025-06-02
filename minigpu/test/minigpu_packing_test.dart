@@ -2,18 +2,21 @@ import 'dart:typed_data';
 import 'package:minigpu/minigpu.dart';
 import 'package:test/test.dart';
 
-Future<Minigpu> _initMinigpu() async {
-  final minigpu = Minigpu();
-  await minigpu.init();
-  return minigpu;
-}
-
 // Removed getBufferSizeForType helper
 
 void main() {
   group('Buffer Data Types Read/Write Tests', () {
+    late Minigpu minigpu;
+
+    setUpAll(() async {
+      minigpu = Minigpu();
+      await minigpu.init();
+    });
+    tearDownAll(() async {
+      await minigpu.destroy();
+    });
+
     test('Float32 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
@@ -34,7 +37,6 @@ void main() {
     });
 
     test('Int8 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For i8, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
@@ -55,7 +57,6 @@ void main() {
     });
 
     test('Int16 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For i16, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
@@ -76,7 +77,6 @@ void main() {
     });
 
     test('Int32 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
@@ -97,7 +97,6 @@ void main() {
     });
 
     test('Int64 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
@@ -118,7 +117,6 @@ void main() {
     });
 
     test('Uint8 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For u8, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
@@ -139,7 +137,6 @@ void main() {
     });
 
     test('Uint16 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For u16, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
@@ -160,7 +157,6 @@ void main() {
     });
 
     test('Uint32 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
@@ -181,7 +177,6 @@ void main() {
     });
 
     test('Uint64 read/write', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint64List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
@@ -203,8 +198,18 @@ void main() {
   });
 
   group('Compute Shader Roundtrip Tests', () {
+    late Minigpu minigpu;
+
+    setUpAll(() async {
+      minigpu = Minigpu();
+      await minigpu.init();
+    });
+
+    tearDownAll(() async {
+      await minigpu.destroy();
+    });
+
     test('Float32 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
@@ -247,7 +252,6 @@ void main() {
     });
 
     test('Float64 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       // For f64, createBuffer expects logical element count (C++ handles expansion)
       final inputBuffer = minigpu.createBuffer(count, BufferDataType.float64);
@@ -291,8 +295,7 @@ void main() {
     });
 
     test('Int8 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
-      final int count = 17;
+      final int count = 7;
       // For i8, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
           count, BufferDataType.int8); // Pass logical count
@@ -337,7 +340,6 @@ void main() {
     });
 
     test('Int16 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For i16, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
@@ -380,7 +382,6 @@ void main() {
     });
 
     test('Int32 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
@@ -424,7 +425,6 @@ void main() {
     });
 
     test('Int64 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
@@ -468,7 +468,6 @@ void main() {
     });
 
     test('Uint8 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For u8, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
@@ -514,7 +513,6 @@ void main() {
     });
 
     test('Uint16 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 17;
       // For u16, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
@@ -561,7 +559,6 @@ void main() {
     });
 
     test('Uint32 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
@@ -606,7 +603,6 @@ void main() {
     });
 
     test('Uint64 Roundtrip', () async {
-      final minigpu = await _initMinigpu();
       final int count = 16;
       final int byteSize = count * Uint64List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(

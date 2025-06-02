@@ -82,7 +82,7 @@ abstract class MinigpuPlatform {
       throw UnimplementedError('No platform implementation available.');
 
   Future<void> initializeContext();
-  void destroyContext();
+  Future<void> destroyContext();
   PlatformComputeShader createComputeShader();
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType);
 }

@@ -29,6 +29,14 @@ final class Minigpu {
     isInitialized = true;
   }
 
+  /// Destroys the minigpu context.
+  Future<void> destroy() async {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+
+    await _platform.destroyContext();
+    isInitialized = false;
+  }
+
   /// Creates a compute shader.
   ComputeShader createComputeShader() {
     final platformShader = _platform.createComputeShader();

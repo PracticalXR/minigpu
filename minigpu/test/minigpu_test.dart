@@ -2,10 +2,9 @@ import 'dart:typed_data';
 import 'package:minigpu/minigpu.dart';
 import 'package:test/test.dart';
 
+late Minigpu minigpu;
 void main() {
   group('Minigpu Library Tests', () {
-    late Minigpu minigpu;
-
     setUp(() async {
       // Each test gets a new instance.
       minigpu = Minigpu();
