@@ -119,9 +119,7 @@ final class FfiBuffer implements PlatformBuffer {
   Future<void> read(
     TypedData outputData,
     int readElements, {
-    // Renamed parameter for clarity
     int elementOffset = 0,
-    // REMOVED byte-based parameters to avoid confusion
     int readBytes = 0,
     int byteOffset = 0,
     BufferDataType dataType = BufferDataType.float32,
@@ -216,8 +214,8 @@ final class FfiBuffer implements PlatformBuffer {
             ffi.mgpuReadBufferAsyncInt8(
               _self,
               nativePtr.cast<Int8>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
+              elementsToRead,
+              elementOffset,
               nativeCallable.nativeFunction,
             );
             await completer.future;
@@ -308,8 +306,8 @@ final class FfiBuffer implements PlatformBuffer {
             ffi.mgpuReadBufferAsyncUint8(
               _self,
               nativePtr.cast<Uint8>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
+              elementsToRead, // ELEMENT count
+              elementOffset, // ELEMENT offset
               nativeCallable.nativeFunction,
             );
             await completer.future;
@@ -376,8 +374,8 @@ final class FfiBuffer implements PlatformBuffer {
             ffi.mgpuReadBufferAsyncUint64(
               _self,
               nativePtr.cast<Uint64>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
+              elementsToRead, // ELEMENT count
+              elementOffset, // ELEMENT offset
               nativeCallable.nativeFunction,
             );
             await completer.future;
@@ -402,8 +400,8 @@ final class FfiBuffer implements PlatformBuffer {
             ffi.mgpuReadBufferAsyncFloat(
               _self,
               nativePtr.cast<Float>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
+              elementsToRead, // ELEMENT count
+              elementOffset, // ELEMENT offset
               nativeCallable.nativeFunction,
             );
             await completer.future;
