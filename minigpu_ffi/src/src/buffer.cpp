@@ -1520,7 +1520,11 @@ void Buffer::release() {
         "Releasing buffer (physical size: %zu, logical length: %zu, internal "
         "type: %s, isPacked: %d)",
         bufferData.size, length, gpu::toString(bufferType).c_str(), isPacked);
+    wgpuBufferDestroy(bufferData.buffer);
     wgpuBufferRelease(bufferData.buffer);
+    wgpuDeviceTick(mgpu.getContext().device);
+
+    wgpuInstanceProcessEvents(mgpu.getContext().instance);
     bufferData.buffer = nullptr;
     bufferData.size = 0;
     bufferData.usage = WGPUBufferUsage_None;

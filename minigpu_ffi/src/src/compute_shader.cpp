@@ -10,6 +10,51 @@ namespace mgpu {
 
 ComputeShader::ComputeShader(MGPU &mgpu) : mgpu(mgpu) {}
 
+ComputeShader::~ComputeShader() {
+  LOG(kDefLog, kInfo, "ComputeShader destructor: Cleaning up cached kernel.");
+  destroyCachedKernel();
+}
+
+size_t ComputeShader::calculateBindingsHash() const {
+  size_t hash = bindings.size();
+  for (const auto &binding : bindings) {
+    // Simple hash based on buffer pointer and shape
+    hash ^= reinterpret_cast<size_t>(binding.data.buffer) + 0x9e3779b9 +
+            (hash << 6) + (hash >> 2);
+    if (!binding.shape.data.empty()) {
+      hash ^= binding.shape[0] + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+    }
+  }
+  return hash;
+}
+
+bool ComputeShader::needsKernelRecreation(int groupsX, int groupsY,
+                                          int groupsZ) const {
+  if (!cachedKernel.has_value()) {
+    return true; // No cached kernel
+  }
+
+  if (lastGroupSize[0] != static_cast<size_t>(groupsX) ||
+      lastGroupSize[1] != static_cast<size_t>(groupsY) ||
+      lastGroupSize[2] != static_cast<size_t>(groupsZ)) {
+    return true; // Group size changed
+  }
+
+  size_t currentHash = calculateBindingsHash();
+  if (lastBindingsHash != currentHash) {
+    return true; // Bindings changed
+  }
+
+  return false; // Can reuse cached kernel
+}
+
+void ComputeShader::destroyCachedKernel() {
+  if (cachedKernel.has_value()) {
+    LOG(kDefLog, kInfo, "Destroyed cached kernel.");
+    cachedKernel.reset();
+  }
+}
+
 void ComputeShader::loadKernelString(const std::string &kernelString) {
   // Assuming default workgroup size and type for now, might need adjustment
   code = KernelCode{kernelString, Shape{256, 1, 1}, ki32};
@@ -46,9 +91,16 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
     bindings.resize(tag + 1); // Resize to accommodate the new tag
   }
 
+  // Check if buffer is already bound to avoid unnecessary work
+  if (bindings[tag].data.buffer == buffer.bufferData.buffer &&
+      bindings[tag].shape.data.size() > 0 &&
+      bindings[tag].shape[0] == buffer.length) {
+    LOG(kDefLog, kInfo,
+        "setBuffer: Tag=%d already bound to same buffer, skipping.", tag);
+    return;
+  }
+
   // --- Shape Calculation ---
-  // The shape should represent the *logical* number of elements.
-  // This information is now stored directly in buffer.length.
   size_t logicalNumElements = buffer.length;
 
   // Log buffer details for debugging
@@ -65,6 +117,13 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
 
   // Create the Tensor binding using the buffer's data and the logical shape.
   bindings[tag] = Tensor{.data = buffer.bufferData, .shape = shape};
+
+  // Invalidate cached kernel when bindings change
+  size_t newHash = calculateBindingsHash();
+  if (newHash != lastBindingsHash) {
+    LOG(kDefLog, kInfo, "Buffer binding changed, invalidating cached kernel.");
+    destroyCachedKernel();
+  }
 }
 
 void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
@@ -79,43 +138,45 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
     return;
   }
 
-  // Create array of view offsets for tensor, size_t all 0
-  // This assumes we always bind the entire buffer, starting at offset 0.
-  std::vector<size_t> viewOffsets(bindings.size(), 0);
-
-  LOG(kDefLog, kInfo,
-      "Dispatching kernel with groups: (%d, %d, %d) and %zu bindings.", groupsX,
-      groupsY, groupsZ, bindings.size());
-
-  // Ensure all bindings are valid before creating the kernel
+  // Ensure all bindings are valid
   for (size_t i = 0; i < bindings.size(); ++i) {
     if (bindings[i].data.buffer == nullptr) {
-      // This check might be redundant if setBuffer prevents null buffers, but
-      // good for safety.
       LOG(kDefLog, kError,
           "dispatch: Binding at tag %zu is null. Cannot dispatch.", i);
       return;
     }
   }
 
-  Kernel kernel =
-      createKernel(mgpu.getContext(), code, bindings.data(), bindings.size(),
-                   viewOffsets.data(),
-                   {static_cast<size_t>(groupsX), static_cast<size_t>(groupsY),
-                    static_cast<size_t>(groupsZ)});
+  // Only create kernel if needed
+  if (needsKernelRecreation(groupsX, groupsY, groupsZ)) {
+    LOG(kDefLog, kInfo,
+        "Creating new kernel for dispatch (%d, %d, %d) with %zu bindings.",
+        groupsX, groupsY, groupsZ, bindings.size());
 
-  // Check if kernel creation failed (createKernel might return a null/invalid
-  // kernel) Assuming createKernel returns a struct where some member indicates
-  // validity, e.g., pipeline != nullptr if (kernel.pipeline == nullptr) { //
-  // Adjust based on actual Kernel struct definition
-  //     LOG(kDefLog, kError, "dispatch: Failed to create kernel object.");
-  //     return;
-  // }
+    destroyCachedKernel(); // Clean up old kernel first
 
-  dispatchKernel(mgpu.getContext(), kernel);
-  LOG(kDefLog, kInfo, "Kernel dispatch complete.");
+    std::vector<size_t> viewOffsets(bindings.size(), 0);
+
+    cachedKernel = createKernel(mgpu.getContext(), code, bindings.data(),
+                                bindings.size(), viewOffsets.data(),
+                                {static_cast<size_t>(groupsX),
+                                 static_cast<size_t>(groupsY),
+                                 static_cast<size_t>(groupsZ)});
+
+    // Update cache state
+    lastGroupSize = {static_cast<size_t>(groupsX), static_cast<size_t>(groupsY),
+                     static_cast<size_t>(groupsZ)};
+    lastBindingsHash = calculateBindingsHash();
+
+    LOG(kDefLog, kInfo, "Cached new kernel.");
+  } else {
+    LOG(kDefLog, kInfo, "Reusing cached kernel for dispatch.");
+  }
+
+  // Dispatch with cached kernel
+  dispatchKernel(mgpu.getContext(), cachedKernel.value());
+  LOG(kDefLog, kInfo, "Kernel dispatch complete (cached).");
 }
-
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
                                   std::function<void()> callback) {
   LOG(kDefLog, kInfo,

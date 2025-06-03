@@ -8,6 +8,7 @@
 #include <future>
 #include <memory> // For std::unique_ptr
 #include <string>
+#include <optional>
 #include <vector>
 
 namespace mgpu {

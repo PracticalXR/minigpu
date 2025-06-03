@@ -111,7 +111,6 @@ EXPORT void mgpuSetBufferDataFloat(MGPUBuffer *buffer, const float *inputData,
                                    size_t byteSize);
 EXPORT void mgpuSetBufferDataDouble(MGPUBuffer *buffer, const double *inputData,
                                     size_t byteSize);
-
 #ifdef __cplusplus
 }
 #endif
