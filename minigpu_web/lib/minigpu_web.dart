@@ -175,29 +175,57 @@ class WebBuffer implements PlatformBuffer {
     int size, {
     BufferDataType dataType = BufferDataType.float32,
   }) {
+    if (inputData.elementSizeInBytes != dataType.bytesPerElement) {
+      return;
+    }
+
     switch (dataType) {
       case BufferDataType.int8:
-        wasm.mgpuSetBufferDataInt8(_buffer, inputData as Int8List, size);
+        if (inputData is! Int8List) {
+          break;
+        }
+        wasm.mgpuSetBufferDataInt8(_buffer, inputData, size);
         break;
       case BufferDataType.int16:
+        if (inputData is! Int16List) {
+          break;
+        }
         wasm.mgpuSetBufferDataInt16(_buffer, inputData as Int16List, size);
         break;
       case BufferDataType.int32:
+        if (inputData is! Int32List) {
+          break;
+        }
         wasm.mgpuSetBufferDataInt32(_buffer, inputData as Int32List, size);
         break;
       case BufferDataType.int64:
+        if (inputData is! Int64List && inputData is! ByteData) {
+          break;
+        }
         wasm.mgpuSetBufferDataInt64(_buffer, inputData as Int64List, size);
         break;
       case BufferDataType.uint8:
+        if (inputData is! Uint8List) {
+          break;
+        }
         wasm.mgpuSetBufferDataUint8(_buffer, inputData as Uint8List, size);
         break;
       case BufferDataType.uint16:
+        if (inputData is! Uint16List) {
+          break;
+        }
         wasm.mgpuSetBufferDataUint16(_buffer, inputData as Uint16List, size);
         break;
       case BufferDataType.uint32:
+        if (inputData is! Uint32List) {
+          break;
+        }
         wasm.mgpuSetBufferDataUint32(_buffer, inputData as Uint32List, size);
         break;
       case BufferDataType.uint64:
+        if (inputData is! Uint64List && inputData is! ByteData) {
+          break;
+        }
         wasm.mgpuSetBufferDataUint64(_buffer, inputData as Uint64List, size);
         break;
       case BufferDataType.float16:
@@ -205,9 +233,15 @@ class WebBuffer implements PlatformBuffer {
           'float16 is not supported in WebAssembly.',
         );
       case BufferDataType.float32:
+        if (inputData is! Float32List) {
+          break;
+        }
         wasm.mgpuSetBufferDataFloat(_buffer, inputData as Float32List, size);
         break;
       case BufferDataType.float64:
+        if (inputData is! Float64List) {
+          break;
+        }
         wasm.mgpuSetBufferDataDouble(_buffer, inputData as Float64List, size);
         break;
     }

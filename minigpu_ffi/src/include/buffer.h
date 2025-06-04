@@ -7,8 +7,8 @@
 #include <functional> // For std::function
 #include <future>
 #include <memory> // For std::unique_ptr
-#include <string>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace mgpu {
@@ -93,6 +93,10 @@ private:
                     gpu::NumType targetOriginalDataType);
 
   // Helpers for readSync
+  bool validateBufferStateTransition(gpu::NumType requestedReadType) const;
+  bool isPackedType(gpu::NumType type) const;
+  bool recreateBufferSafely(size_t newLogicalLength,
+                            gpu::NumType newOriginalDataType);
   bool validateReadPreconditions(const void *outputData,
                                  gpu::NumType readAsType) const;
   bool validateBufferStateForRead(gpu::NumType readAsType,
@@ -109,9 +113,9 @@ private:
   void readSyncExpandedFloat64(void *outputData, size_t readElementCount,
                                size_t readElementOffset);
   void readSyncExpandedInt64(void *outputData, size_t readElementCount,
-                               size_t readElementOffset);
+                             size_t readElementOffset);
   void readSyncExpandedUint64(void *outputData, size_t readElementCount,
-                               size_t readElementOffset);
+                              size_t readElementOffset);
 };
 
 } // namespace mgpu

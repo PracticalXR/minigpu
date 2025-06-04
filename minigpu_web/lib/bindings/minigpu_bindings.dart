@@ -100,15 +100,22 @@ void mgpuLoadKernel(MGPUComputeShader shader, String kernelString) {
     ..setRange(0, bytes.length, bytes)
     ..[bytes.length] = 0; // null terminator
 
-  // Allocate memory for the string.
-  final allocSize = kernelBytes.length * kernelBytes.elementSizeInBytes;
+  final allocSize = kernelBytes.length;
   final ptr = _malloc(allocSize.toJS);
-  try {
-    _heapU8.setAll(ptr.toDartInt, kernelBytes);
-    _mgpuLoadKernel(shader, ptr);
-  } finally {
+  final int startIndex = ptr.toDartInt;
+
+  // Bounds check
+  if (startIndex < 0 || startIndex + kernelBytes.length > _heapU8.length) {
     _free(ptr);
+    throw StateError('Kernel string allocation would exceed heap bounds: '
+        'trying to write ${kernelBytes.length} bytes at index $startIndex '
+        'but heap size is ${_heapU8.length}');
   }
+
+  _heapU8.setRange(startIndex, startIndex + kernelBytes.length, kernelBytes);
+  _mgpuLoadKernel(shader, ptr);
+
+  _free(ptr);
 }
 
 @JS('_mgpuHasKernel')
@@ -181,7 +188,6 @@ Future<void> mgpuReadBufferAsyncInt8(
   Int8List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int8List.bytesPerElement;
   // Calculate element count based on outputData size if readElements is 0
@@ -202,11 +208,9 @@ Future<void> mgpuReadBufferAsyncInt8(
     await ccall(
       "mgpuReadBufferSyncInt8".toJS, // Use sync C++ function
       "void".toJS, // C++ function returns void
-      // Args: handle, pointer, element count, element offset
       ["number", "number", "number", "number"].toJSDeep,
-      // Pass ELEMENT count and offset
       [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
-      {"async": true}.toJSDeep, // Keep async: true
+      {"async": true}.toJSDeep,
     ).toDart;
 
     // Copy the data from WASM heap
@@ -223,7 +227,6 @@ Future<void> mgpuReadBufferAsyncInt16(
   Int16List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int16List.bytesPerElement;
   final int elementsToRead =
@@ -260,7 +263,6 @@ Future<void> mgpuReadBufferAsyncInt32(
   Int32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Int32List.bytesPerElement;
   final int elementsToRead =
@@ -297,7 +299,6 @@ Future<void> mgpuReadBufferAsyncInt64(
   TypedData outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = 8; // Int64
   final int elementsToRead = (readElements > 0)
@@ -368,7 +369,6 @@ Future<void> mgpuReadBufferAsyncUint8(
   Uint8List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint8List.bytesPerElement;
   final int elementsToRead =
@@ -403,7 +403,6 @@ Future<void> mgpuReadBufferAsyncUint16(
   Uint16List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint16List.bytesPerElement;
   final int elementsToRead =
@@ -438,7 +437,6 @@ Future<void> mgpuReadBufferAsyncUint32(
   Uint32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Uint32List.bytesPerElement;
   final int elementsToRead =
@@ -475,7 +473,6 @@ Future<void> mgpuReadBufferAsyncUint64(
   TypedData outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = 8; // Uint64
   final int elementsToRead = (readElements > 0)
@@ -544,7 +541,6 @@ Future<void> mgpuReadBufferAsyncFloat(
   Float32List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Float32List.bytesPerElement;
   final int elementsToRead =
@@ -580,7 +576,6 @@ Future<void> mgpuReadBufferAsyncDouble(
   Float64List outputData, {
   int readElements = 0,
   int elementOffset = 0,
-  // REMOVED byte-based parameters
 }) async {
   final int bytesPerElem = Float64List.bytesPerElement;
   final int elementsToRead =
@@ -611,10 +606,6 @@ Future<void> mgpuReadBufferAsyncDouble(
   }
 }
 
-/// New setBufferData functions for additional types.
-/// Each function allocates WASM memory, copies the Dart TypedData into the HEAP,
-/// then calls the native setter.
-
 @JS('_mgpuSetBufferDataInt8')
 external void _mgpuSetBufferDataInt8(
     MGPUBuffer buffer, JSNumber inputDataPtr, JSNumber size);
@@ -638,11 +629,18 @@ external void _mgpuSetBufferDataInt16(
 void mgpuSetBufferDataInt16(MGPUBuffer buffer, Int16List inputData, int size) {
   final int byteSize = size * Int16List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt;
+  final int startByteIndex = ptr.toDartInt;
   try {
-    final heapInt16 = _heapU8.buffer.asInt16List();
-    heapInt16.setRange(
-        startIndex ~/ 2, (startIndex ~/ 2) + inputData.length, inputData);
+    // Use direct heap view instead of creating new view
+    final int startElementIndex = startByteIndex ~/ Int16List.bytesPerElement;
+
+    // Bounds check
+    if (startElementIndex + inputData.length > _heapI16.length) {
+      throw StateError('Int16 buffer allocation would exceed heap bounds');
+    }
+
+    _heapI16.setRange(
+        startElementIndex, startElementIndex + inputData.length, inputData);
     _mgpuSetBufferDataInt16(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -656,10 +654,16 @@ external void _mgpuSetBufferDataInt32(
 void mgpuSetBufferDataInt32(MGPUBuffer buffer, Int32List inputData, int size) {
   final int byteSize = size * Int32List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt ~/ Int32List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
-    final heapInt32 = _heapU8.buffer.asInt32List();
-    heapInt32.setRange(startIndex, startIndex + inputData.length, inputData);
+    final int startElementIndex = startByteIndex ~/ Int32List.bytesPerElement;
+
+    if (startElementIndex + inputData.length > _heapI32.length) {
+      throw StateError('Int32 buffer allocation would exceed heap bounds');
+    }
+
+    _heapI32.setRange(
+        startElementIndex, startElementIndex + inputData.length, inputData);
     _mgpuSetBufferDataInt32(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -707,10 +711,16 @@ void mgpuSetBufferDataUint16(
     MGPUBuffer buffer, Uint16List inputData, int size) {
   final int byteSize = size * Uint16List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt ~/ Uint16List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
-    final heapUint16 = _heapU8.buffer.asUint16List();
-    heapUint16.setRange(startIndex, startIndex + inputData.length, inputData);
+    final int startElementIndex = startByteIndex ~/ Uint16List.bytesPerElement;
+
+    if (startElementIndex + inputData.length > _heapU16.length) {
+      throw StateError('Uint16 buffer allocation would exceed heap bounds');
+    }
+
+    _heapU16.setRange(
+        startElementIndex, startElementIndex + inputData.length, inputData);
     _mgpuSetBufferDataUint16(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -725,10 +735,16 @@ void mgpuSetBufferDataUint32(
     MGPUBuffer buffer, Uint32List inputData, int size) {
   final int byteSize = size * Uint32List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt ~/ Uint32List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
-    final heapUint32 = _heapU8.buffer.asUint32List();
-    heapUint32.setRange(startIndex, startIndex + inputData.length, inputData);
+    final int startElementIndex = startByteIndex ~/ Uint32List.bytesPerElement;
+
+    if (startElementIndex + inputData.length > _heapU32.length) {
+      throw StateError('Uint32 buffer allocation would exceed heap bounds');
+    }
+
+    _heapU32.setRange(
+        startElementIndex, startElementIndex + inputData.length, inputData);
     _mgpuSetBufferDataUint32(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -759,12 +775,17 @@ external void _mgpuSetBufferDataFloat(
 
 void mgpuSetBufferDataFloat(
     MGPUBuffer buffer, Float32List inputData, int size) {
-  final int byteSize = size * Float32List.bytesPerElement;
+  final int elementsToWrite = size > 0 ? size : inputData.length;
+  final int byteSize = elementsToWrite * Float32List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
   final int startIndex = ptr.toDartInt ~/ Float32List.bytesPerElement;
   try {
-    final heapFloat32 = _heapF32.buffer.asFloat32List();
-    heapFloat32.setRange(startIndex, startIndex + inputData.length, inputData);
+    // Ensure we don't write more elements than available in inputData
+    final int actualElements = elementsToWrite <= inputData.length
+        ? elementsToWrite
+        : inputData.length;
+    _heapF32.setRange(startIndex, startIndex + actualElements,
+        inputData.sublist(0, actualElements));
     _mgpuSetBufferDataFloat(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -779,11 +800,16 @@ void mgpuSetBufferDataDouble(
     MGPUBuffer buffer, Float64List inputData, int size) {
   final int byteSize = size * Float64List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  // For doubles, we assume HEAPU8's buffer can be viewed as Float64List.
-  final int startIndex = ptr.toDartInt ~/ Float64List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
-    final heapFloat64 = _heapU8.buffer.asFloat64List();
-    heapFloat64.setRange(startIndex, startIndex + inputData.length, inputData);
+    final int startElementIndex = startByteIndex ~/ Float64List.bytesPerElement;
+
+    if (startElementIndex + inputData.length > _heapF64.length) {
+      throw StateError('Float64 buffer allocation would exceed heap bounds');
+    }
+
+    _heapF64.setRange(
+        startElementIndex, startElementIndex + inputData.length, inputData);
     _mgpuSetBufferDataDouble(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);

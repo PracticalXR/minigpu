@@ -45,18 +45,38 @@ bool ComputeShader::needsKernelRecreation(int groupsX, int groupsY,
     return true; // Bindings changed
   }
 
+  if (lastShaderCode != code.data) {
+    return true; // Shader code changed
+  }
+
   return false; // Can reuse cached kernel
 }
 
 void ComputeShader::destroyCachedKernel() {
   if (cachedKernel.has_value()) {
-    LOG(kDefLog, kInfo, "Destroyed cached kernel.");
+    LOG(kDefLog, kInfo,
+        "Destroying cached kernel and releasing WebGPU resources.");
+
+    // Get reference to kernel before destroying it
+    auto kernel = cachedKernel.value();
+
+    if (kernel->bindGroup) {
+      wgpuBindGroupRelease(kernel->bindGroup);
+      kernel->bindGroup = nullptr;
+    }
+
+    // Now reset the cached kernel
     cachedKernel.reset();
+    lastBindingsHash = 0;
+
+    LOG(kDefLog, kInfo,
+        "Cached kernel destroyed and WebGPU resources released.");
   }
 }
 
 void ComputeShader::loadKernelString(const std::string &kernelString) {
   // Assuming default workgroup size and type for now, might need adjustment
+  
   code = KernelCode{kernelString, Shape{256, 1, 1}, ki32};
   LOG(kDefLog, kInfo, "Loaded kernel string.");
 }
@@ -167,6 +187,7 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
     lastGroupSize = {static_cast<size_t>(groupsX), static_cast<size_t>(groupsY),
                      static_cast<size_t>(groupsZ)};
     lastBindingsHash = calculateBindingsHash();
+    lastShaderCode = code.data;
 
     LOG(kDefLog, kInfo, "Cached new kernel.");
   } else {

@@ -270,6 +270,14 @@ void Buffer::createBuffer(size_t sizeParam, gpu::NumType requestedDataType) {
       physicalByteSize, logicalLength, gpu::toString(internalDataType).c_str(),
       packedState);
 
+  // hold the old bufferData if it exists
+  if (bufferData.buffer != nullptr) {
+    LOG(kDefLog, kInfo,
+        "Releasing old buffer before creating new one. Old size: %zu bytes.",
+        bufferData.size);
+    wgpuBufferRelease(bufferData.buffer);
+  }
+
   this->bufferData = gpu::Array{
       .buffer = newBuffer,
       .usage = usage,
@@ -916,147 +924,198 @@ void Buffer::readAsync(void *outputData, NumType dType, size_t size,
 }
 
 // --- setData Overloads ---
-// Helper to manage buffer creation/resizing and state updates
-void Buffer::ensureBuffer(size_t requiredLogicalLength,
-                          gpu::NumType targetOriginalDataType) {
+bool Buffer::validateBufferStateTransition(NumType requestedReadType) const {
+  if (bufferData.buffer == nullptr) {
+    LOG(kDefLog, kError, "validateBufferStateTransition: Buffer is null");
+    return false;
+  }
 
-  size_t targetPhysicalByteSize = 0;
-  gpu::NumType targetInternalDataType = targetOriginalDataType;
-  bool targetPackedState = false;
-  size_t internalElementSizeBytes = 0;
+  // If buffer is empty, it's safe
+  if (length == 0 || bufferData.size == 0) {
+    LOG(kDefLog, kInfo,
+        "validateBufferStateTransition: Empty buffer, safe to transition");
+    return true;
+  }
 
-  // Determine target internal state based on original data type
-  switch (targetOriginalDataType) {
+  // Get the original data type this buffer was created for
+  NumType originalType = getOriginalDataType();
+
+  // If we can't determine the original type, be conservative
+  if (originalType == kUnknown) {
+    LOG(kDefLog, kWarn,
+        "validateBufferStateTransition: Cannot determine original buffer type, "
+        "assuming unsafe");
+    return false;
+  }
+
+  // Check if the transition is safe
+  if (originalType == requestedReadType) {
+    return true; // Same type, always safe
+  }
+
+  // Check size compatibility for different types
+  size_t originalElementSize = gpu::sizeBytes(originalType);
+  size_t requestedElementSize = gpu::sizeBytes(requestedReadType);
+
+  if (originalElementSize == 0 || requestedElementSize == 0) {
+    LOG(kDefLog, kError,
+        "validateBufferStateTransition: Cannot determine element sizes");
+    return false;
+  }
+
+  // For packed types, check if the physical buffer can accommodate the new
+  // layout
+  bool originalIsPacked = isPackedType(originalType);
+  bool requestedIsPacked = isPackedType(requestedReadType);
+
+  if (originalIsPacked != requestedIsPacked) {
+    LOG(kDefLog, kWarn,
+        "validateBufferStateTransition: Packed state mismatch - "
+        "original=%s(packed=%d) vs requested=%s(packed=%d)",
+        gpu::toString(originalType).c_str(), originalIsPacked,
+        gpu::toString(requestedReadType).c_str(), requestedIsPacked);
+    return false;
+  }
+
+  return true;
+}
+
+// Add helper method to check if a type uses packed storage
+bool Buffer::isPackedType(NumType type) const {
+  switch (type) {
   case ki8:
   case ku8:
-    targetInternalDataType = (targetOriginalDataType == ki8) ? ki32 : ku32;
-    internalElementSizeBytes = sizeof(int32_t);
-    targetPhysicalByteSize = requiredLogicalLength * internalElementSizeBytes;
-    targetPackedState = true;
-    break;
   case ki16:
   case ku16:
-    targetInternalDataType = (targetOriginalDataType == ki16) ? ki32 : ku32;
-    internalElementSizeBytes = sizeof(int32_t);
-    targetPhysicalByteSize = requiredLogicalLength * internalElementSizeBytes;
-    targetPackedState = true;
-    break;
   case kf64:
-    targetInternalDataType = ku32; // Expanded u32 pairs
-    internalElementSizeBytes = sizeof(uint32_t);
-    targetPhysicalByteSize =
-        requiredLogicalLength * 2 * internalElementSizeBytes;
-    targetPackedState = true;
-    break;
-  case ki64:                       // <<< CHANGE HERE
-    targetInternalDataType = ki32; // Expanded i32 pairs
-    internalElementSizeBytes = sizeof(int32_t);
-    targetPhysicalByteSize =
-        requiredLogicalLength * 2 * internalElementSizeBytes;
-    targetPackedState = true; // It's a packed representation
-    break;
-  case ku64:                       // <<< CHANGE HERE
-    targetInternalDataType = ku32; // Expanded u32 pairs
-    internalElementSizeBytes = sizeof(uint32_t);
-    targetPhysicalByteSize =
-        requiredLogicalLength * 2 * internalElementSizeBytes;
-    targetPackedState = true; // It's a packed representation
-    break;
-  default: // Direct storage
-    internalElementSizeBytes = gpu::sizeBytes(targetInternalDataType);
-    if (internalElementSizeBytes == 0 && requiredLogicalLength > 0) {
-      throw std::runtime_error(
-          "ensureBuffer: Cannot determine size for target type " +
-          gpu::toString(targetInternalDataType));
-    }
-    targetPhysicalByteSize = requiredLogicalLength * internalElementSizeBytes;
-    targetPackedState = false;
-    break;
+  case ki64:
+  case ku64:
+    return true;
+  default:
+    return false;
   }
+}
 
-  bool needsRecreation = false;
-  if (bufferData.buffer == nullptr) {
-    LOG(kDefLog, kInfo,
-        "ensureBuffer: No buffer exists. Creating new one for %s.",
-        gpu::toString(targetOriginalDataType).c_str());
-    needsRecreation = true;
-  } else if (targetPhysicalByteSize > bufferData.size) {
-    LOG(kDefLog, kInfo,
-        "ensureBuffer: Buffer too small (current: %zu, required: %zu) for %s. "
-        "Recreating.",
-        bufferData.size, targetPhysicalByteSize,
-        gpu::toString(targetOriginalDataType).c_str());
-    needsRecreation = true;
-  } else if (bufferType != targetInternalDataType ||
-             isPacked != targetPackedState || length != requiredLogicalLength) {
-    LOG(kDefLog, kInfo,
-        "ensureBuffer: Buffer state mismatch or length change for %s. Reusing "
-        "buffer, updating state. "
-        "(Current: type=%s, packed=%d, len=%zu, size=%zu | Required: type=%s, "
-        "packed=%d, len=%zu, size=%zu)",
-        gpu::toString(targetOriginalDataType).c_str(),
-        gpu::toString(bufferType).c_str(), isPacked, length, bufferData.size,
-        gpu::toString(targetInternalDataType).c_str(), targetPackedState,
-        requiredLogicalLength, targetPhysicalByteSize);
-    // No recreation needed, just update state below
-  } else {
-    LOG(kDefLog, kInfo,
-        "ensureBuffer: Reusing existing buffer for %s (size: %zu, type: %s, "
-        "packed: %d, length: %zu).",
-        gpu::toString(targetOriginalDataType).c_str(), bufferData.size,
-        gpu::toString(bufferType).c_str(), isPacked, length);
-    return; // Buffer is suitable
-  }
+// Add safe buffer recreation method
+bool Buffer::recreateBufferSafely(size_t newLogicalLength,
+                                  NumType newOriginalDataType) {
+  LOG(kDefLog, kInfo,
+      "recreateBufferSafely: Recreating buffer from type=%s(packed=%d,len=%zu) "
+      "to type=%s(len=%zu)",
+      gpu::toString(bufferType).c_str(), isPacked, length,
+      gpu::toString(newOriginalDataType).c_str(), newLogicalLength);
 
-  if (needsRecreation) {
-    // createBuffer expects logical length for packed/expanded types, physical
-    // size otherwise
-    size_t sizeParamForCreate =
-        requiredLogicalLength; // Default for packed/expanded
-    if (!targetPackedState) {
-      sizeParamForCreate = targetPhysicalByteSize;
-    }
+  // Store old state for cleanup
+  WGPUBuffer oldBuffer = bufferData.buffer;
+  size_t oldSize = bufferData.size;
 
-    createBuffer(
-        sizeParamForCreate,
-        targetOriginalDataType); // createBuffer handles internal state setup
+  // Reset state before recreation
+  bufferData.buffer = nullptr;
+  bufferData.size = 0;
+  length = 0;
+  bufferType = kUnknown;
+  isPacked = false;
+
+  try {
+    // Create new buffer
+    createBuffer(newLogicalLength, newOriginalDataType);
 
     if (bufferData.buffer == nullptr) {
-      throw std::runtime_error(
-          "Failed to create/recreate buffer in ensureBuffer for " +
-          gpu::toString(targetOriginalDataType));
+      LOG(kDefLog, kError, "recreateBufferSafely: Failed to create new buffer");
+      return false;
     }
-    // Verify state set by createBuffer (optional sanity check)
-    if (this->bufferType != targetInternalDataType ||
-        this->length != requiredLogicalLength ||
-        this->isPacked != targetPackedState) {
-      LOG(kDefLog, kError,
-          "ensureBuffer: State mismatch after createBuffer! Expected (type=%s, "
-          "len=%zu, packed=%d), Got (type=%s, len=%zu, packed=%d). Overriding.",
-          gpu::toString(targetInternalDataType).c_str(), requiredLogicalLength,
-          targetPackedState, gpu::toString(this->bufferType).c_str(),
-          this->length, this->isPacked);
-      // Force set the state - indicates a potential logic error in createBuffer
-      this->bufferType = targetInternalDataType;
-      this->length = requiredLogicalLength;
-      this->isPacked = targetPackedState;
+
+    // Clean up old buffer
+    if (oldBuffer != nullptr) {
+      LOG(kDefLog, kInfo,
+          "recreateBufferSafely: Releasing old buffer (size=%zu)", oldSize);
+      wgpuBufferRelease(oldBuffer);
     }
-  } else {
-    // Reusing buffer, just update state
-    this->bufferType = targetInternalDataType;
-    this->length = requiredLogicalLength;
-    this->isPacked = targetPackedState;
+
     LOG(kDefLog, kInfo,
-        "ensureBuffer: Reused buffer. State updated: type=%s, packed=%d, "
-        "length=%zu",
-        gpu::toString(bufferType).c_str(), isPacked, this->length);
+        "recreateBufferSafely: Successfully recreated buffer. New state: "
+        "type=%s, packed=%d, size=%zu, length=%zu",
+        gpu::toString(bufferType).c_str(), isPacked, bufferData.size, length);
+    return true;
+
+  } catch (const std::exception &e) {
+    LOG(kDefLog, kError,
+        "recreateBufferSafely: Exception during recreation: %s", e.what());
+
+    // Restore old buffer if recreation failed
+    if (oldBuffer != nullptr) {
+      bufferData.buffer = oldBuffer;
+      bufferData.size = oldSize;
+      // Note: We've lost the original state info, buffer may be in inconsistent
+      // state
+    }
+    return false;
+  }
+}
+
+// Enhanced ensureBuffer with safe transitions
+void Buffer::ensureBuffer(size_t requiredLogicalLength,
+                          gpu::NumType targetOriginalDataType) {
+  // Check if current buffer is compatible
+  if (bufferData.buffer != nullptr) {
+    NumType currentOriginalType = getOriginalDataType();
+
+    // If we can determine the current type and it matches what we need
+    if (currentOriginalType == targetOriginalDataType &&
+        length >= requiredLogicalLength) {
+      // Buffer is compatible, just update length if needed
+      if (length != requiredLogicalLength) {
+        LOG(kDefLog, kInfo,
+            "ensureBuffer: Updating length from %zu to %zu for compatible "
+            "buffer",
+            length, requiredLogicalLength);
+        length = requiredLogicalLength;
+      }
+      return;
+    }
+
+    // If types don't match or buffer is too small, we need to recreate
+    if (currentOriginalType != targetOriginalDataType) {
+      LOG(kDefLog, kInfo,
+          "ensureBuffer: Type change detected (%s -> %s), recreating buffer",
+          gpu::toString(currentOriginalType).c_str(),
+          gpu::toString(targetOriginalDataType).c_str());
+    } else {
+      LOG(kDefLog, kInfo,
+          "ensureBuffer: Size increase needed (%zu -> %zu), recreating buffer",
+          length, requiredLogicalLength);
+    }
+
+    if (!recreateBufferSafely(requiredLogicalLength, targetOriginalDataType)) {
+      throw std::runtime_error(
+          "Failed to safely recreate buffer in ensureBuffer");
+    }
+    return;
+  }
+
+  // No existing buffer, create new one
+  LOG(kDefLog, kInfo,
+      "ensureBuffer: No existing buffer, creating new one for type=%s, "
+      "length=%zu",
+      gpu::toString(targetOriginalDataType).c_str(), requiredLogicalLength);
+
+  createBuffer(requiredLogicalLength, targetOriginalDataType);
+
+  if (bufferData.buffer == nullptr) {
+    throw std::runtime_error("Failed to create new buffer in ensureBuffer");
   }
 }
 
 // --- setData Implementations ---
-void Buffer::setData(const float *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const float *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0) {
     throw std::invalid_argument("setData(float): inputData is null");
+  }
+  size_t numElements = byteSize / sizeof(float);
+  if (bufferData.buffer == nullptr) {
+    LOG(kDefLog, kError, "setData(float): Buffer is null before upload");
+    return;
+  }
   gpu::NumType originalDataType = kf32;
   LOG(kDefLog, kInfo, "setData(float): %zu elements", numElements);
   try {
@@ -1064,18 +1123,32 @@ void Buffer::setData(const float *inputData, size_t numElements) {
         numElements,
         originalDataType); // Ensure buffer exists with direct storage state
     if (numElements > 0) {
-      // gpu::toGPU handles direct upload for kf32
+      size_t uploadBytes = numElements * sizeof(float);
+
+      // Validate buffer size before upload
+      if (uploadBytes > bufferData.size) {
+        LOG(kDefLog, kError,
+            "setData(float): Upload size (%zu bytes) exceeds buffer size (%zu "
+            "bytes)",
+            uploadBytes, bufferData.size);
+        return;
+      }
+
+      LOG(kDefLog, kInfo,
+          "setData(float): Uploading %zu bytes to buffer of size %zu",
+          uploadBytes, bufferData.size);
       gpu::toGPU(this->mgpu.getContext(), inputData, bufferData.buffer,
-                 numElements * sizeof(float));
+                 uploadBytes);
     }
   } catch (const std::exception &e) {
     LOG(kDefLog, kError, "setData(float): Failed - %s", e.what());
   }
 }
 
-void Buffer::setData(const int32_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const int32_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(int32_t): inputData is null");
+  size_t numElements = byteSize / sizeof(int32_t);
   gpu::NumType originalDataType = ki32;
   LOG(kDefLog, kInfo, "setData(int32_t): %zu elements", numElements);
   try {
@@ -1089,9 +1162,10 @@ void Buffer::setData(const int32_t *inputData, size_t numElements) {
   }
 }
 
-void Buffer::setData(const uint32_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const uint32_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(uint32_t): inputData is null");
+  size_t numElements = byteSize / sizeof(uint32_t);
   gpu::NumType originalDataType = ku32;
   LOG(kDefLog, kInfo, "setData(uint32_t): %zu elements", numElements);
   try {
@@ -1106,9 +1180,10 @@ void Buffer::setData(const uint32_t *inputData, size_t numElements) {
 }
 
 // --- setData for Packed/Expanded Types ---
-void Buffer::setData(const int8_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const int8_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(int8_t): inputData is null");
+  size_t numElements = byteSize / sizeof(int8_t);
   gpu::NumType originalDataType = ki8;
   gpu::NumType internalDataType = ki32;
   size_t packingRatio = 4;
@@ -1198,6 +1273,7 @@ void Buffer::setData(const int8_t *inputData, size_t numElements) {
         numElements);
     kernels::dispatchPackedI8toI32(mgpu, initialPackedUploadBuffer, *this);
   }
+  initialPackedUploadBuffer.release();
 
   LOG(kDefLog, kInfo,
       "setData(int8_t) complete. Main buffer state: type=%s, isPacked=%d, "
@@ -1206,9 +1282,10 @@ void Buffer::setData(const int8_t *inputData, size_t numElements) {
       this->length); // Length should be original numElements
 }
 
-void Buffer::setData(const uint8_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const uint8_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(uint8_t): inputData is null");
+  size_t numElements = byteSize / sizeof(uint8_t);
   gpu::NumType originalDataType = ku8;
   gpu::NumType internalDataType = ku32;
   size_t packingRatio = 4;
@@ -1280,6 +1357,7 @@ void Buffer::setData(const uint8_t *inputData, size_t numElements) {
         "buffer into main buffer (logical length %zu)",
         numElements);
     kernels::dispatchPackedU8toU32(mgpu, initialPackedUploadBuffer, *this);
+    initialPackedUploadBuffer.release();
   }
 
   LOG(kDefLog, kInfo,
@@ -1289,9 +1367,10 @@ void Buffer::setData(const uint8_t *inputData, size_t numElements) {
       this->length); // Length should be original numElements
 }
 
-void Buffer::setData(const int16_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const int16_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(int16_t): inputData is null");
+  size_t numElements = byteSize / sizeof(int16_t);
   gpu::NumType originalDataType = ki16;
   gpu::NumType internalDataType = ki32;
   size_t packingRatio = 2;
@@ -1340,6 +1419,8 @@ void Buffer::setData(const int16_t *inputData, size_t numElements) {
     kernels::dispatchPackedI16toI32(mgpu, initialPackedUploadBuffer, *this);
   }
 
+  initialPackedUploadBuffer.release();
+
   LOG(kDefLog, kInfo,
       "setData(int16_t) complete. Main buffer state: type=%s, isPacked=%d, "
       "physical_size=%zu, logical_length=%zu",
@@ -1347,9 +1428,10 @@ void Buffer::setData(const int16_t *inputData, size_t numElements) {
       this->length);
 }
 
-void Buffer::setData(const uint16_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const uint16_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(uint16_t): inputData is null");
+  size_t numElements = byteSize / sizeof(uint16_t);
   gpu::NumType originalDataType = ku16;
   gpu::NumType internalDataType = ku32;
   size_t packingRatio = 2;
@@ -1398,6 +1480,8 @@ void Buffer::setData(const uint16_t *inputData, size_t numElements) {
     kernels::dispatchPackedU16toU32(mgpu, initialPackedUploadBuffer, *this);
   }
 
+  initialPackedUploadBuffer.release();
+
   LOG(kDefLog, kInfo,
       "setData(uint16_t) complete. Main buffer state: type=%s, isPacked=%d, "
       "physical_size=%zu, logical_length=%zu",
@@ -1405,9 +1489,10 @@ void Buffer::setData(const uint16_t *inputData, size_t numElements) {
       this->length);
 }
 
-void Buffer::setData(const double *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const double *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(double): inputData is null");
+  size_t numElements = byteSize / sizeof(double);
   gpu::NumType originalDataType = kf64;
   // Internal state should be ku32, isPacked=true
   LOG(kDefLog, kInfo, "setData(double): %zu elements (logical length)",
@@ -1442,9 +1527,11 @@ void Buffer::setData(const double *inputData, size_t numElements) {
 }
 
 // --- setData for 64-bit integers (Direct Upload - No Packing/Expansion Yet)
-void Buffer::setData(const int64_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const int64_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(int64_t): inputData is null");
+
+  size_t numElements = byteSize / sizeof(int64_t);
 
   gpu::NumType originalDataType = ki64;
   // Internal state should be ki32, isPacked=true
@@ -1478,9 +1565,11 @@ void Buffer::setData(const int64_t *inputData, size_t numElements) {
       this->length);
 }
 
-void Buffer::setData(const uint64_t *inputData, size_t numElements) {
-  if (inputData == nullptr && numElements > 0)
+void Buffer::setData(const uint64_t *inputData, size_t byteSize) {
+  if (inputData == nullptr && byteSize > 0)
     throw std::invalid_argument("setData(uint64_t): inputData is null");
+
+  size_t numElements = byteSize / sizeof(uint64_t);
 
   gpu::NumType originalDataType = ku64;
   // Internal state should be ku32, isPacked=true
@@ -1520,11 +1609,7 @@ void Buffer::release() {
         "Releasing buffer (physical size: %zu, logical length: %zu, internal "
         "type: %s, isPacked: %d)",
         bufferData.size, length, gpu::toString(bufferType).c_str(), isPacked);
-    wgpuBufferDestroy(bufferData.buffer);
     wgpuBufferRelease(bufferData.buffer);
-    wgpuDeviceTick(mgpu.getContext().device);
-
-    wgpuInstanceProcessEvents(mgpu.getContext().instance);
     bufferData.buffer = nullptr;
     bufferData.size = 0;
     bufferData.usage = WGPUBufferUsage_None;

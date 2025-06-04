@@ -18,85 +18,218 @@ static int calculateGroups(size_t numElements, size_t workgroupSize = 256) {
   return static_cast<int>((numElements + workgroupSize - 1) / workgroupSize);
 }
 
-// Unpacks data from 'packed_input' (ki32 representing packed ki8) into
-// 'unpacked_output' (ki32) Kernel iterates over PACKED elements.
+// Enhanced kernel dispatch safety validation - specific to kernel operations
+static bool validateKernelDispatchSafety(const Buffer &sourceBuffer,
+                                         const Buffer &destBuffer,
+                                         size_t expectedSourceElements,
+                                         size_t expectedDestElements,
+                                         const std::string &kernelName) {
+
+  // Validate source buffer
+  if (sourceBuffer.bufferData.buffer == nullptr) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateKernelDispatchSafety(%s): Source buffer is null",
+        kernelName.c_str());
+    return false;
+  }
+
+  if (sourceBuffer.length < expectedSourceElements) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateKernelDispatchSafety(%s): Source buffer length (%zu) < "
+        "expected elements (%zu)",
+        kernelName.c_str(), sourceBuffer.length, expectedSourceElements);
+    return false;
+  }
+
+  // Validate destination buffer
+  if (destBuffer.bufferData.buffer == nullptr) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateKernelDispatchSafety(%s): Destination buffer is null",
+        kernelName.c_str());
+    return false;
+  }
+
+  if (destBuffer.length < expectedDestElements) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateKernelDispatchSafety(%s): Destination buffer length (%zu) < "
+        "expected elements (%zu)",
+        kernelName.c_str(), destBuffer.length, expectedDestElements);
+    return false;
+  }
+
+  // Calculate expected physical sizes based on kernel type
+  size_t sourceExpectedPhysicalSize = 0;
+  size_t destExpectedPhysicalSize = 0;
+
+  if (sourceBuffer.bufferType != gpu::kUnknown) {
+    size_t sourceElementSize = gpu::sizeBytes(sourceBuffer.bufferType);
+    if (kernelName.find("I8") != std::string::npos) {
+      // For I8 packing: 4 i8 elements per i32
+      sourceExpectedPhysicalSize =
+          ((expectedSourceElements + 3) / 4) * sourceElementSize;
+    } else if (kernelName.find("I16") != std::string::npos) {
+      // For I16 packing: 2 i16 elements per i32
+      sourceExpectedPhysicalSize =
+          ((expectedSourceElements + 1) / 2) * sourceElementSize;
+    } else {
+      sourceExpectedPhysicalSize = expectedSourceElements * sourceElementSize;
+    }
+
+    if (sourceBuffer.bufferData.size < sourceExpectedPhysicalSize) {
+      LOG(gpu::kDefLog, gpu::kError,
+          "validateKernelDispatchSafety(%s): Source buffer physical size (%zu) "
+          "< expected (%zu)",
+          kernelName.c_str(), sourceBuffer.bufferData.size,
+          sourceExpectedPhysicalSize);
+      return false;
+    }
+  }
+
+  if (destBuffer.bufferType != gpu::kUnknown) {
+    size_t destElementSize = gpu::sizeBytes(destBuffer.bufferType);
+    destExpectedPhysicalSize = expectedDestElements * destElementSize;
+
+    if (destBuffer.bufferData.size < destExpectedPhysicalSize) {
+      LOG(gpu::kDefLog, gpu::kError,
+          "validateKernelDispatchSafety(%s): Destination buffer physical size "
+          "(%zu) < expected (%zu)",
+          kernelName.c_str(), destBuffer.bufferData.size,
+          destExpectedPhysicalSize);
+      return false;
+    }
+  }
+
+  LOG(gpu::kDefLog, gpu::kInfo,
+      "validateKernelDispatchSafety(%s): PASSED - Source: %zu logical, %zu "
+      "physical bytes. Dest: %zu logical, %zu physical bytes",
+      kernelName.c_str(), sourceBuffer.length, sourceBuffer.bufferData.size,
+      destBuffer.length, destBuffer.bufferData.size);
+
+  return true;
+}
+
+// Enhanced safety validation for workgroup dispatch limits
+static bool validateWorkgroupDispatchSafety(size_t numElements,
+                                            size_t workgroupSize,
+                                            const std::string &kernelName) {
+  if (workgroupSize == 0) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateWorkgroupDispatchSafety(%s): Workgroup size cannot be zero",
+        kernelName.c_str());
+    return false;
+  }
+
+  size_t numWorkgroups = (numElements + workgroupSize - 1) / workgroupSize;
+
+  // WebGPU limits
+  const size_t MAX_WORKGROUPS_X = 65535;
+  const size_t MAX_TOTAL_INVOCATIONS = 256 * 65535; // Conservative estimate
+
+  if (numWorkgroups > MAX_WORKGROUPS_X) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateWorkgroupDispatchSafety(%s): Workgroup count (%zu) exceeds "
+        "X-dimension limit (%zu)",
+        kernelName.c_str(), numWorkgroups, MAX_WORKGROUPS_X);
+    return false;
+  }
+
+  size_t totalInvocations = numWorkgroups * workgroupSize;
+  if (totalInvocations > MAX_TOTAL_INVOCATIONS) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "validateWorkgroupDispatchSafety(%s): Total invocations (%zu) exceeds "
+        "limit (%zu)",
+        kernelName.c_str(), totalInvocations, MAX_TOTAL_INVOCATIONS);
+    return false;
+  }
+
+  LOG(gpu::kDefLog, gpu::kInfo,
+      "validateWorkgroupDispatchSafety(%s): PASSED - %zu elements, %zu "
+      "workgroups, %zu invocations",
+      kernelName.c_str(), numElements, numWorkgroups, totalInvocations);
+
+  return true;
+}
+
+// Update dispatchPackedI8toI32 with enhanced safety
 void dispatchPackedI8toI32(MGPU &mgpu, Buffer &packed_input,
                            Buffer &unpacked_output) {
   // --- State Validation ---
   if (packed_input.bufferType != gpu::ki32) {
-    gpu::LOG(
-        gpu::kDefLog, gpu::kError,
+    LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedI8toI32: Packed input buffer type is not ki32 (is %d).",
         packed_input.bufferType);
     return;
   }
   if (unpacked_output.bufferType != gpu::ki32) {
-    gpu::LOG(gpu::kDefLog, gpu::kError,
-             "dispatchPackedI8toI32: Unpacked output buffer type is not ki32 "
-             "(is %d).",
-             unpacked_output.bufferType);
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedI8toI32: Unpacked output buffer type is not ki32 (is "
+        "%d).",
+        unpacked_output.bufferType);
     return;
   }
-  // The output buffer MUST be marked as packed=true because it represents
-  // original i8 data.
   if (!unpacked_output.isPacked) {
-    gpu::LOG(gpu::kDefLog, gpu::kError,
-             "dispatchPackedI8toI32: Unpacked output buffer should have "
-             "isPacked=true (indicates it represents original i8 data).");
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedI8toI32: Unpacked output buffer should have "
+        "isPacked=true.");
     return;
   }
   if (unpacked_output.length == 0) {
-    gpu::LOG(gpu::kDefLog, gpu::kWarn,
-             "dispatchPackedI8toI32: Unpacked output buffer logical length is "
-             "0. Nothing to unpack.");
+    LOG(gpu::kDefLog, gpu::kWarn,
+        "dispatchPackedI8toI32: Unpacked output buffer logical length is 0. "
+        "Nothing to unpack.");
     return;
   }
 
   // --- Dispatch Calculation ---
-  // The kernel iterates based on the *packed* input index.
-  // The number of packed elements is determined by the *logical length* of the
-  // original i8 data (stored in unpacked_output.length).
-  size_t numLogicalElements =
-      unpacked_output.length; // The target buffer holds the logical length
-  size_t numPackedElements =
-      (numLogicalElements + 3) /
-      4; // Number of i32 elements in the packed representation
+  size_t numLogicalElements = unpacked_output.length;
+  size_t numPackedElements = (numLogicalElements + 3) / 4;
 
-  // --- Physical Size Validation ---
-  size_t requiredPackedBytes = numPackedElements * sizeof(int32_t);
-  if (packed_input.bufferData.size < requiredPackedBytes) {
-    gpu::LOG(
-        gpu::kDefLog, gpu::kError,
-        "dispatchPackedI8toI32: Packed input buffer physical size (%zu) is too "
-        "small for required bytes (%zu) based on output logical length (%zu).",
-        packed_input.bufferData.size, requiredPackedBytes, numLogicalElements);
-    return;
-  }
-  size_t requiredUnpackedBytes = numLogicalElements * sizeof(int32_t);
-  if (unpacked_output.bufferData.size < requiredUnpackedBytes) {
-    gpu::LOG(
-        gpu::kDefLog, gpu::kError,
-        "dispatchPackedI8toI32: Unpacked output buffer physical size (%zu) is "
-        "too small for required bytes (%zu) based on its logical length (%zu).",
-        unpacked_output.bufferData.size, requiredUnpackedBytes,
-        numLogicalElements);
+  // --- CRITICAL: Enhanced Safety Validation ---
+  if (!validateKernelDispatchSafety(packed_input, unpacked_output,
+                                    numPackedElements, numLogicalElements,
+                                    "dispatchPackedI8toI32")) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedI8toI32: Kernel dispatch safety validation FAILED. "
+        "Aborting to prevent crash.");
     return;
   }
 
-  gpu::LOG(gpu::kDefLog, gpu::kInfo,
-           "dispatchPackedI8toI32: Unpacking %zu logical elements. Dispatching "
-           "based on %zu packed elements.",
-           numLogicalElements, numPackedElements);
+  if (!validateWorkgroupDispatchSafety(numPackedElements, 256,
+                                       "dispatchPackedI8toI32")) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedI8toI32: Workgroup dispatch safety validation FAILED. "
+        "Aborting to prevent crash.");
+    return;
+  }
 
-  ComputeShader shader(mgpu);
-  shader.loadKernelString(kPackedInt8ToInt32Kernel);
-  shader.setBuffer(0, packed_input);
-  shader.setBuffer(1, unpacked_output);
+  LOG(gpu::kDefLog, gpu::kInfo,
+      "dispatchPackedI8toI32: SAFETY PASSED - Unpacking %zu logical elements. "
+      "Dispatching based on %zu packed elements.",
+      numLogicalElements, numPackedElements);
 
-  // Dispatch based on the number of PACKED elements the kernel needs to
-  // process.
-  int groupsX = calculateGroups(numPackedElements);
-  shader.dispatch(groupsX, 1, 1);
+  try {
+    ComputeShader shader(mgpu);
+    shader.loadKernelString(kPackedInt8ToInt32Kernel);
+    shader.setBuffer(0, packed_input);
+    shader.setBuffer(1, unpacked_output);
+
+    int groupsX = calculateGroups(numPackedElements);
+
+    LOG(gpu::kDefLog, gpu::kInfo,
+        "dispatchPackedI8toI32: Dispatching %d workgroups for %zu packed "
+        "elements",
+        groupsX, numPackedElements);
+    shader.dispatch(groupsX, 1, 1);
+
+    LOG(gpu::kDefLog, gpu::kInfo,
+        "dispatchPackedI8toI32: Kernel dispatch completed successfully");
+
+  } catch (const std::exception &e) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedI8toI32: Exception during kernel dispatch: %s",
+        e.what());
+    throw; // Re-throw to let caller handle
+  }
 }
 
 // Packs data from 'unpacked_input' (ki32, isPacked=true) into 'packed_output'
@@ -177,11 +310,10 @@ void dispatchI32toPackedI8(MGPU &mgpu, Buffer &unpacked_input,
   shader.dispatch(groupsX, 1, 1);
 }
 
-// Unpacks data from 'packed_input' (ku32 representing packed ku8) into
-// 'unpacked_output' (ku32)
+// Apply similar enhanced safety to other dispatch functions...
 void dispatchPackedU8toU32(MGPU &mgpu, Buffer &packed_input,
                            Buffer &unpacked_output) {
-  // Validation: Input is packed u32, Output is unpacked u32 representing u8
+  // Similar validation pattern...
   if (packed_input.bufferType != gpu::ku32) {
     LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU8toU32: Packed input buffer type is not ku32 (is %d).",
@@ -191,49 +323,52 @@ void dispatchPackedU8toU32(MGPU &mgpu, Buffer &packed_input,
   if (unpacked_output.bufferType != gpu::ku32 || !unpacked_output.isPacked) {
     LOG(gpu::kDefLog, gpu::kError,
         "dispatchPackedU8toU32: Unpacked output buffer should have "
-        "isPacked=true (indicates it represents original u8 data).");
+        "isPacked=true.");
     return;
   }
   if (unpacked_output.length == 0) {
     LOG(gpu::kDefLog, gpu::kWarn,
-        "dispatchPackedU8toU32: Unpacked output buffer logical length is "
-        "0. Nothing to unpack.");
+        "dispatchPackedU8toU32: Unpacked output buffer logical length is 0. "
+        "Nothing to unpack.");
     return;
   }
 
   size_t numLogicalElements = unpacked_output.length;
   size_t numPackedElements = (numLogicalElements + 3) / 4;
 
-  // Physical Size Validation (similar to i8 version)
-  if (packed_input.bufferData.size < numPackedElements * sizeof(uint32_t)) {
+  // Enhanced safety validation
+  if (!validateKernelDispatchSafety(packed_input, unpacked_output,
+                                    numPackedElements, numLogicalElements,
+                                    "dispatchPackedU8toU32")) {
     LOG(gpu::kDefLog, gpu::kError,
-        "dispatchPackedU8toU32: Packed input buffer physical size (%zu) is "
-        "too small for required bytes (%zu) based on output logical length "
-        "(%zu).",
-        packed_input.bufferData.size, numPackedElements * sizeof(uint32_t),
-        numLogicalElements);
-    return;
-  }
-  if (unpacked_output.bufferData.size < numLogicalElements * sizeof(uint32_t)) {
-    LOG(gpu::kDefLog, gpu::kError,
-        "dispatchPackedU8toU32: Unpacked output buffer physical size (%zu) "
-        "is too small for required bytes (%zu) based on its logical length "
-        "(%zu).",
-        unpacked_output.bufferData.size, numLogicalElements * sizeof(uint32_t),
-        numLogicalElements);
+        "dispatchPackedU8toU32: Kernel dispatch safety validation FAILED. "
+        "Aborting.");
     return;
   }
 
-  gpu::LOG(gpu::kDefLog, gpu::kInfo,
-           "dispatchPackedU8toU32: Unpacking %zu logical elements. Dispatching "
-           "based on %zu packed elements.",
-           numLogicalElements, numPackedElements);
+  if (!validateWorkgroupDispatchSafety(numPackedElements, 256,
+                                       "dispatchPackedU8toU32")) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedU8toU32: Workgroup dispatch safety validation FAILED. "
+        "Aborting.");
+    return;
+  }
 
-  ComputeShader shader(mgpu);
-  shader.loadKernelString(kPackedUInt8ToUInt32Kernel);
-  shader.setBuffer(0, packed_input);
-  shader.setBuffer(1, unpacked_output);
-  shader.dispatch(calculateGroups(numPackedElements), 1, 1);
+  try {
+    ComputeShader shader(mgpu);
+    shader.loadKernelString(kPackedUInt8ToUInt32Kernel);
+    shader.setBuffer(0, packed_input);
+    shader.setBuffer(1, unpacked_output);
+    shader.dispatch(calculateGroups(numPackedElements), 1, 1);
+
+    LOG(gpu::kDefLog, gpu::kInfo,
+        "dispatchPackedU8toU32: Kernel dispatch completed successfully");
+  } catch (const std::exception &e) {
+    LOG(gpu::kDefLog, gpu::kError,
+        "dispatchPackedU8toU32: Exception during kernel dispatch: %s",
+        e.what());
+    throw;
+  }
 }
 
 // Packs data from 'unpacked_input' (ku32, isPacked=true) into 'packed_output'

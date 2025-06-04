@@ -67,7 +67,7 @@ if(NOT DAWN_BUILD_FOUND)
   message(STATUS "Dawn build not found - pre-building Dawn.")
 
   # Force Dawn build options.
-  set(DAWN_ALWAYS_ASSERT           ON CACHE INTERNAL "Always assert in Dawn" FORCE)
+  set(DAWN_ALWAYS_ASSERT           OFF CACHE INTERNAL "Always assert in Dawn" FORCE)
   set(DAWN_BUILD_MONOLITHIC_LIBRARY ON CACHE INTERNAL "Build Dawn monolithically" FORCE)
   set(DAWN_BUILD_EXAMPLES          OFF CACHE INTERNAL "Build Dawn examples" FORCE)
   set(DAWN_BUILD_SAMPLES           OFF CACHE INTERNAL "Build Dawn samples" FORCE)

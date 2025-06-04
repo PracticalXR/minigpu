@@ -7,8 +7,8 @@ import 'platform_stub/minigpu_platform_stub.dart'
 /// Enum representing supported buffer data types.
 enum BufferDataType {
   float16,
-  float32, // 0 (Renamed from float)
-  float64, // 1 (Renamed from double)
+  float32, // 0
+  float64, // 1
   int8, // 2
   int16, // 3
   int32, // 4
@@ -17,6 +17,60 @@ enum BufferDataType {
   uint16, // 7
   uint32, // 8
   uint64, // 9
+}
+
+extension BufferDataTypeExtension on BufferDataType {
+  /// Returns the size in bytes for this data type
+  int get bytesPerElement {
+    switch (this) {
+      case BufferDataType.int8:
+      case BufferDataType.uint8:
+        return 1;
+      case BufferDataType.float16:
+      case BufferDataType.int16:
+      case BufferDataType.uint16:
+        return 2;
+      case BufferDataType.float32:
+      case BufferDataType.int32:
+      case BufferDataType.uint32:
+        return 4;
+      case BufferDataType.float64:
+      case BufferDataType.int64:
+      case BufferDataType.uint64:
+        return 8;
+    }
+  }
+
+  /// Returns whether this type is signed
+  bool get isSigned {
+    switch (this) {
+      case BufferDataType.int8:
+      case BufferDataType.int16:
+      case BufferDataType.int32:
+      case BufferDataType.int64:
+      case BufferDataType.float16:
+      case BufferDataType.float32:
+      case BufferDataType.float64:
+        return true;
+      case BufferDataType.uint8:
+      case BufferDataType.uint16:
+      case BufferDataType.uint32:
+      case BufferDataType.uint64:
+        return false;
+    }
+  }
+
+  /// Returns whether this type is a floating point type
+  bool get isFloatingPoint {
+    switch (this) {
+      case BufferDataType.float16:
+      case BufferDataType.float32:
+      case BufferDataType.float64:
+        return true;
+      default:
+        return false;
+    }
+  }
 }
 
 String getWGSLType(BufferDataType type) {
@@ -46,7 +100,6 @@ int getBufferSizeForType(BufferDataType type, int count) {
     case BufferDataType.float32:
       return count * Float32List.bytesPerElement;
     case BufferDataType.float64:
-      // Even though doubles are packed internally, the API “appears” to use 8 bytes per element.
       return count * Float64List.bytesPerElement;
     case BufferDataType.int32:
       return count * Int32List.bytesPerElement;

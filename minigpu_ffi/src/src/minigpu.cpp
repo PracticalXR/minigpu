@@ -173,10 +173,7 @@ void mgpuReadBufferAsyncInt8(MGPUBuffer *buffer, int8_t *outputData,
                                                           offset, callback);
     } catch (const std::exception &e) {
       LOG(kDefLog, kError, "mgpuReadBufferAsyncInt8: Exception: %s", e.what());
-      // Optionally, you could try to invoke the callback here to signal an
-      // error state, but the current Buffer::readAsync doesn't have an error
-      // callback mechanism. The detached thread might finish without calling
-      // the success callback.
+
     } catch (...) {
       LOG(kDefLog, kError, "mgpuReadBufferAsyncInt8: Unknown exception");
     }

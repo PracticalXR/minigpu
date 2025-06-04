@@ -3,7 +3,6 @@
 
 #include "buffer.h"
 
-
 namespace mgpu {
 class ComputeShader {
 public:
@@ -15,12 +14,20 @@ public:
   void dispatch(int groupsX, int groupsY, int groupsZ);
   void dispatchAsync(int groupsX, int groupsY, int groupsZ,
                      std::function<void()> callback);
+  bool validateAllBuffers() const;
+  bool validateSingleBuffer(size_t bindingIndex) const;
+  bool validateBufferRelationships() const;
+  bool validateMemoryBounds(int groupsX, int groupsY, int groupsZ) const;
+  bool validateKernelSpecificConstraints(int groupsX, int groupsY,
+                                         int groupsZ) const;
+  size_t calculateTotalElements(const gpu::Shape &shape) const;
   ~ComputeShader();
 
 private:
   MGPU &mgpu;
   gpu::KernelCode code;
   std::vector<gpu::Tensor> bindings;
+  std::string lastShaderCode;
 
   std::optional<gpu::Kernel> cachedKernel;
   std::vector<size_t> lastGroupSize = {0, 0, 0};

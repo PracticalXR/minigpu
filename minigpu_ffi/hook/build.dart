@@ -12,14 +12,15 @@ void main(List<String> args) async {
   await build(args, (input, output) async {
     Logger logger = Logger('build');
     await runBuild(input, output, sourceDir.absolute.uri);
-    final minigpuLib = await output.findAndAddCodeAssets(input, names: {
-      'minigpu_ffi': 'minigpu_ffi_bindings.dart',
-    });
-    final webgpuLib = await output.findAndAddCodeAssets(input,
-        names: {
-          'webgpu_dawn': 'webgpu_dawn.dart',
-        },
-        outDir: sourceDir.absolute.uri.resolve('external'));
+    final minigpuLib = await output.findAndAddCodeAssets(
+      input,
+      names: {'minigpu_ffi': 'minigpu_ffi_bindings.dart'},
+    );
+    final webgpuLib = await output.findAndAddCodeAssets(
+      input,
+      names: {'webgpu_dawn': 'webgpu_dawn.dart'},
+      outDir: sourceDir.absolute.uri.resolve('external'),
+    );
     final assets = <List<dynamic>>[minigpuLib, webgpuLib];
 
     for (final assetList in assets) {
@@ -63,6 +64,7 @@ Future<void> runBuild(
     name: name,
     sourceDir: sourceDir,
     generator: generator,
+    buildMode: BuildMode.release,
     defines: {},
   );
   await builder.run(

@@ -25,8 +25,9 @@ class MinigpuFfi extends MinigpuPlatform {
       completer.complete();
     }
 
-    final nativeCallable =
-        NativeCallable<Void Function()>.listener(nativeCallback);
+    final nativeCallable = NativeCallable<Void Function()>.listener(
+      nativeCallback,
+    );
 
     ffi.mgpuInitializeContextAsync(nativeCallable.nativeFunction);
 
@@ -47,10 +48,7 @@ class MinigpuFfi extends MinigpuPlatform {
   }
 
   @override
-  PlatformBuffer createBuffer(
-    int bufferSize,
-    BufferDataType dataType,
-  ) {
+  PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
     final self = ffi.mgpuCreateBuffer(bufferSize, dataType.index);
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
     return FfiBuffer(self);
@@ -94,10 +92,16 @@ final class FfiComputeShader implements PlatformComputeShader {
         completer.complete();
       }
 
-      final nativeCallable =
-          NativeCallable<Void Function()>.listener(nativeCallback);
+      final nativeCallable = NativeCallable<Void Function()>.listener(
+        nativeCallback,
+      );
       ffi.mgpuDispatchAsync(
-          _self, groupsX, groupsY, groupsZ, nativeCallable.nativeFunction);
+        _self,
+        groupsX,
+        groupsY,
+        groupsZ,
+        nativeCallable.nativeFunction,
+      );
       await completer.future;
       nativeCallable.close();
     } finally {}
@@ -169,22 +173,30 @@ final class FfiBuffer implements PlatformBuffer {
     final int totalElementsInOutput = outputData.lengthInBytes ~/ elementSize;
 
     // Determine the number of elements to actually read
-    final int elementsToRead =
-        (readElements > 0) ? readElements : totalElementsInOutput;
+    final int elementsToRead = (readElements > 0)
+        ? readElements
+        : totalElementsInOutput;
 
     // --- Input Validation ---
     if (elementOffset < 0) {
       throw RangeError.value(
-          elementOffset, 'elementOffset', 'Cannot be negative');
+        elementOffset,
+        'elementOffset',
+        'Cannot be negative',
+      );
     }
     if (elementsToRead < 0) {
       throw RangeError.value(
-          elementsToRead, 'readElements', 'Cannot be negative');
+        elementsToRead,
+        'readElements',
+        'Cannot be negative',
+      );
     }
     // Check if requested range is valid within the output buffer
     if (elementsToRead > totalElementsInOutput) {
       throw RangeError(
-          'Read range (offset: $elementOffset, count: $elementsToRead) exceeds output buffer capacity ($totalElementsInOutput elements)');
+        'Read range (offset: $elementOffset, count: $elementsToRead) exceeds output buffer capacity ($totalElementsInOutput elements)',
+      );
     }
     // --- End Input Validation ---
 
@@ -198,13 +210,15 @@ final class FfiBuffer implements PlatformBuffer {
       completer.complete();
     }
 
-    final nativeCallable =
-        NativeCallable<Void Function()>.listener(nativeCallback);
+    final nativeCallable = NativeCallable<Void Function()>.listener(
+      nativeCallback,
+    );
 
     // Allocate temporary native memory based on the number of elements to read
     final int bytesToAllocate = elementsToRead * elementSize;
-    final Pointer<NativeType> nativePtr =
-        malloc.allocate<NativeType>(bytesToAllocate);
+    final Pointer<NativeType> nativePtr = malloc.allocate<NativeType>(
+      bytesToAllocate,
+    );
 
     try {
       // Switch to call the proper native function, passing ELEMENT counts/offsets
@@ -219,8 +233,9 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Int8>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Int8>().asTypedList(
+              elementsToRead,
+            );
             // Copy data into the correct portion of the outputData
             if (outputData is Int8List) {
               outputData.setRange(0, elementsToRead, data);
@@ -229,7 +244,9 @@ final class FfiBuffer implements PlatformBuffer {
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setInt8(startByte + i * elementSize, data[i]);
               }
-            } else {/* Handle other potential TypedData types if needed */}
+            } else {
+              /* Handle other potential TypedData types if needed */
+            }
           }
           break;
         case BufferDataType.int16:
@@ -242,15 +259,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Int16>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Int16>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Int16List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setInt16(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -265,15 +286,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Int32>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Int32>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Int32List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setInt32(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -288,15 +313,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Int64>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Int64>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Int64List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setInt64(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -311,8 +340,9 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Uint8>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Uint8>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Uint8List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
@@ -333,15 +363,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Uint16>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Uint16>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Uint16List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setUint16(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -356,15 +390,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Uint32>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Uint32>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Uint32List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setUint32(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -379,41 +417,50 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<int> data =
-                nativePtr.cast<Uint64>().asTypedList(elementsToRead);
+            final List<int> data = nativePtr.cast<Uint64>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Uint64List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setUint64(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
           break;
         case BufferDataType.float16:
           throw UnimplementedError(
-              'BufferDataType.float16 read is not implemented yet.');
+            'BufferDataType.float16 read is not implemented yet.',
+          );
         case BufferDataType.float32:
           {
             ffi.mgpuReadBufferAsyncFloat(
               _self,
               nativePtr.cast<Float>(),
-              elementsToRead, // ELEMENT count
-              elementOffset, // ELEMENT offset
+              elementsToRead,
+              elementOffset,
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<double> data =
-                nativePtr.cast<Float>().asTypedList(elementsToRead);
+            final List<double> data = nativePtr.cast<Float>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Float32List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setFloat32(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -428,15 +475,19 @@ final class FfiBuffer implements PlatformBuffer {
               nativeCallable.nativeFunction,
             );
             await completer.future;
-            final List<double> data =
-                nativePtr.cast<Double>().asTypedList(elementsToRead);
+            final List<double> data = nativePtr.cast<Double>().asTypedList(
+              elementsToRead,
+            );
             if (outputData is Float64List) {
               outputData.setRange(0, elementsToRead, data);
             } else if (outputData is ByteData) {
               final int startByte = elementOffset * elementSize;
               for (int i = 0; i < elementsToRead; ++i) {
                 outputData.setFloat64(
-                    startByte + i * elementSize, data[i], Endian.host);
+                  startByte + i * elementSize,
+                  data[i],
+                  Endian.host,
+                );
               }
             }
           }
@@ -452,7 +503,6 @@ final class FfiBuffer implements PlatformBuffer {
   void setData(
     TypedData inputData,
     int elementCount, {
-    // Renamed parameter for clarity
     BufferDataType dataType = BufferDataType.float32,
   }) {
     // Determine element size based on data type.
@@ -499,12 +549,12 @@ final class FfiBuffer implements PlatformBuffer {
     // --- Input Validation ---
     final int totalElementsInInput = inputData.lengthInBytes ~/ elementSize;
     if (elementCount < 0) {
-      throw RangeError.value(
-          elementCount, 'elementCount', 'Cannot be negative');
+      return; // Allow setting zero elements
     }
     if (elementCount > totalElementsInInput) {
       throw RangeError(
-          'elementCount ($elementCount) exceeds input data capacity ($totalElementsInInput elements)');
+        'elementCount ($elementCount) exceeds input data capacity ($totalElementsInInput elements)',
+      );
     }
     // --- End Input Validation ---
 
@@ -513,8 +563,8 @@ final class FfiBuffer implements PlatformBuffer {
     }
 
     final int byteSize = elementCount * elementSize;
-    final Pointer<NativeType> nativePtr = (inputData is Int8List ||
-            inputData is Uint8List)
+    final Pointer<NativeType> nativePtr =
+        (inputData is Int8List || inputData is Uint8List)
         ? malloc.allocate<NativeType>((byteSize + 3) & ~3) // Align to 4 bytes
         : malloc.allocate<NativeType>(byteSize);
 
@@ -575,8 +625,11 @@ final class FfiBuffer implements PlatformBuffer {
             .setRange(0, elementCount, inputData);
       } else {
         // Fallback using ByteData view (less efficient but handles generic TypedData)
-        final inputBytes =
-            ByteData.view(inputData.buffer, inputData.offsetInBytes, byteSize);
+        final inputBytes = ByteData.view(
+          inputData.buffer,
+          inputData.offsetInBytes,
+          byteSize,
+        );
         final nativeBytes = nativePtr.cast<Uint8>().asTypedList(byteSize);
         for (int i = 0; i < byteSize; i++) {
           nativeBytes[i] = inputBytes.getUint8(i);
@@ -602,25 +655,38 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint16:
           ffi.mgpuSetBufferDataUint16(
-              _self, nativePtr.cast<Uint16>(), byteSize);
+            _self,
+            nativePtr.cast<Uint16>(),
+            byteSize,
+          );
           break;
         case BufferDataType.uint32:
           ffi.mgpuSetBufferDataUint32(
-              _self, nativePtr.cast<Uint32>(), byteSize);
+            _self,
+            nativePtr.cast<Uint32>(),
+            byteSize,
+          );
           break;
         case BufferDataType.uint64:
           ffi.mgpuSetBufferDataUint64(
-              _self, nativePtr.cast<Uint64>(), byteSize);
+            _self,
+            nativePtr.cast<Uint64>(),
+            byteSize,
+          );
           break;
         case BufferDataType.float16:
           throw UnimplementedError(
-              'BufferDataType.float16 setData is not implemented yet.');
+            'BufferDataType.float16 setData is not implemented yet.',
+          );
         case BufferDataType.float32:
           ffi.mgpuSetBufferDataFloat(_self, nativePtr.cast<Float>(), byteSize);
           break;
         case BufferDataType.float64:
           ffi.mgpuSetBufferDataDouble(
-              _self, nativePtr.cast<Double>(), byteSize);
+            _self,
+            nativePtr.cast<Double>(),
+            byteSize,
+          );
           break;
       }
     } finally {
