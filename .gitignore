@@ -5,7 +5,6 @@
 .packages
 .vscode/
 build/
-build_web/
 # If you're building an application, you may want to check-in your pubspec.lock
 pubspec.lock
 .idea
@@ -32,4 +31,3 @@ doc/api/
 
 third_party/*
 minigpu_ffi/src/external/dawn/*
-**/build_*/
