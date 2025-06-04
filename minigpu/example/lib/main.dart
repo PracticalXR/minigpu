@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:minigpu/minigpu.dart';
 
@@ -94,12 +95,13 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
 
   // State
   DataTypeDemo _currentType = DataTypeDemo.float32;
-  AlgorithmDemo _currentAlgorithm = AlgorithmDemo.flow;
-  int _bufferSize = 256;
-  int _previewLength = 16;
-  bool _autoMode = false;
+  AlgorithmDemo _currentAlgorithm = AlgorithmDemo.schumann;
+  int _bufferSize = 4096;
+  int _previewLength = 1024;
+  bool _autoMode = true;
   bool _isRunning = false;
-  double _animationSpeed = 1.0;
+  double _animationSpeed = 250.0;
+  int _frameCount = 0;
 
   List<double> _fullInputData = [];
   List<double> _fullOutputData = [];
@@ -109,8 +111,6 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
   int _operationsPerSecond = 0;
   int _totalOperations = 0;
   DateTime _lastOpTime = DateTime.now();
-
-  final Random _random = Random();
 
   List<double> get _previewInputData {
     if (_fullInputData.isEmpty) return [];
@@ -160,6 +160,7 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
     _createBuffers();
     _generateInputData();
     _shader = _minigpu.createComputeShader();
+    _runKernel();
   }
 
   void _createBuffers() {
@@ -174,6 +175,10 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
   void _generateInputData() {
     List<double> data;
     double scaleFactor = _getVisualizationScale();
+
+    // Increment frame counter for time-based evolution
+    _frameCount++;
+    double timePhase = _frameCount * 0.01; // Slow evolution
 
     switch (_currentAlgorithm) {
       case AlgorithmDemo.wave:
@@ -203,7 +208,7 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
         // Mandelbrot uses position data
         data = List.generate(_bufferSize, (i) => i.toDouble());
         break;
-      // Add all the enlightened pattern input data cases:
+
       case AlgorithmDemo.phi:
         // Golden ratio spiral needs harmonic seed data
         data = List.generate(_bufferSize, (i) {
@@ -328,75 +333,126 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
   void _setBufferData(List<double> data) {
     if (_inputBuffer == null) return;
 
-    // Filter valid data
-    final validData = data.where((value) => value.isFinite).toList();
+    // Ensure data size matches buffer size exactly
+    List<double> validData = List.filled(_bufferSize, 0.0);
 
-    // Ensure we don't exceed buffer size
-    if (validData.length > _bufferSize) {
-      validData.removeRange(_bufferSize, validData.length);
+    // Copy valid finite values up to buffer size
+    int copyCount = 0;
+    for (int i = 0; i < data.length && copyCount < _bufferSize; i++) {
+      if (data[i].isFinite) {
+        validData[copyCount] = data[i];
+        copyCount++;
+      }
     }
 
-    // Pad with zeros if needed
-    while (validData.length < _bufferSize) {
-      validData.add(0.0);
-    }
-
-    setState(() {
-      _fullInputData = List.from(validData);
-    });
-
+    // Clamp values to safe ranges for each type
     switch (_currentType.type) {
       case BufferDataType.int8:
-        final Int8List typedData = Int8List.fromList(
-            validData.map((e) => e.clamp(-128, 127).toInt()).toList());
+        final Int8List typedData = Int8List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(-128, 127).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.uint8:
-        final Uint8List typedData = Uint8List.fromList(
-            validData.map((e) => e.clamp(0, 255).toInt()).toList());
+        final Uint8List typedData = Uint8List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(0, 255).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.int16:
-        final Int16List typedData = Int16List.fromList(
-            validData.map((e) => e.clamp(-32768, 32767).toInt()).toList());
+        final Int16List typedData = Int16List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(-32768, 32767).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.uint16:
-        final Uint16List typedData = Uint16List.fromList(
-            validData.map((e) => e.clamp(0, 65535).toInt()).toList());
+        final Uint16List typedData = Uint16List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(0, 65535).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.int32:
-        final Int32List typedData = Int32List.fromList(validData
-            .map((e) => e.clamp(-2147483648, 2147483647).toInt())
-            .toList());
+        final Int32List typedData = Int32List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(-2147483648, 2147483647).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.uint32:
-        final Uint32List typedData = Uint32List.fromList(
-            validData.map((e) => e.clamp(0, 4294967295).toInt()).toList());
+        final Uint32List typedData = Uint32List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(0, 4294967295).toInt();
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.float32:
-        final Float32List typedData = Float32List.fromList(validData);
+        final Float32List typedData = Float32List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(-3.4028235e38, 3.4028235e38);
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
+
       case BufferDataType.float64:
-        final Float64List typedData = Float64List.fromList(validData);
+        final Float64List typedData = Float64List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i];
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: _currentType.type);
+        setState(() {
+          _fullInputData = List.from(typedData);
+        });
         break;
+
       default:
-        final Float32List typedData = Float32List.fromList(validData);
+        final Float32List typedData = Float32List(_bufferSize);
+        for (int i = 0; i < _bufferSize; i++) {
+          typedData[i] = validData[i].clamp(-3.4028235e38, 3.4028235e38);
+        }
         _inputBuffer?.setData(typedData, _bufferSize,
             dataType: BufferDataType.float32);
+        setState(() {
+          _fullInputData = typedData.map((e) => e.toDouble()).toList();
+        });
         break;
     }
   }
@@ -977,57 +1033,100 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       case AlgorithmDemo.schumann:
         if (isFloat) {
           return '''
-        // Earth's natural frequency (7.83Hz and harmonics)
-        let base_schumann = 0.00783; // 7.83Hz scaled
-        let fundamental = sin(x * base_schumann) * 25.0;
-        let second_harmonic = sin(x * base_schumann * 2.0) * 15.0;
-        let third_harmonic = sin(x * base_schumann * 3.0) * 10.0;
-        
-        // Grounding wave that connects to earth energy
-        let grounding = cos(x * 0.01 + f32(idx) * 0.0783) * 8.0;
-        
-        out[idx] = fundamental + second_harmonic + third_harmonic + grounding;''';
+    // Earth's natural frequency (7.83Hz and harmonics) with time evolution
+    let neighbor_left = select(0.0, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    
+    // Dynamic Schumann resonance with neighbor coupling
+    let base_schumann = 0.00783; // 7.83Hz scaled
+    let fundamental = sin(x * base_schumann + f32(idx) * 0.001) * 25.0;
+    let second_harmonic = sin(x * base_schumann * 2.0 + f32(idx) * 0.002) * 15.0;
+    let third_harmonic = sin(x * base_schumann * 3.0 + f32(idx) * 0.003) * 10.0;
+    
+    // Grounding wave that connects to earth energy with propagation
+    let grounding = cos(x * 0.01 + f32(idx) * 0.0783) * 8.0;
+    
+    // Add neighbor coupling for wave propagation
+    let coupling = (neighbor_left + neighbor_right) * 0.15;
+    
+    // Add chaos injection to prevent stagnation
+    let chaos = sin(x * 1.234 + f32(idx) * 0.567) * 2.0;
+    
+    // Remove damping, add energy injection instead
+    let evolved = fundamental + second_harmonic + third_harmonic + grounding + coupling + chaos;
+    
+    out[idx] = evolved;''';
         } else if (isUnsigned) {
           return '''
-        // Unsigned schumann pattern
-        let earth_freq = (x * 783u + idx * 78u) % 140u;
-        let grounding = (idx * 783u) % 60u;
-        out[idx] = earth_freq + grounding;''';
+    // Unsigned schumann with evolution
+    let neighbor_left = select(0u, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    let earth_freq = (x * 783u + idx * 78u) % 140u;
+    let grounding = (idx * 783u) % 60u;
+    let coupling = (neighbor_left + neighbor_right) / 8u;
+    let chaos = (x * 1234u + idx * 567u) % 20u;
+    out[idx] = earth_freq + grounding + coupling + chaos;''';
         } else {
           return '''
-        // Signed schumann pattern
-        let earth_freq = (u32(abs(x)) * 783u + idx * 78u) % 140u;
-        let grounding = (idx * 783u) % 60u;
-        out[idx] = i32(earth_freq + grounding) - 100;''';
+    // Signed schumann with evolution
+    let neighbor_left = select(0, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    let earth_freq = (u32(abs(x)) * 783u + idx * 78u) % 140u;
+    let grounding = (idx * 783u) % 60u;
+    let coupling = (neighbor_left + neighbor_right) / 8;
+    let chaos = i32((u32(abs(x)) * 1234u + idx * 567u) % 20u) - 10;
+    out[idx] = i32(earth_freq + grounding) + coupling + chaos - 100;''';
         }
 
       case AlgorithmDemo.fibonacci:
         if (isFloat) {
           return '''
-        // Fibonacci sequence creates natural harmony
-        let fib_ratio = 1.618033988749895;
-        let spiral_angle = f32(idx) * fib_ratio * 0.1;
-        let spiral_radius = sin(x * 0.01618) * 20.0;
-        
-        let fibonacci_wave = sin(spiral_angle) * spiral_radius;
-        let golden_harmonic = cos(spiral_angle / fib_ratio) * 15.0;
-        
-        // Nature's perfect proportion
-        out[idx] = fibonacci_wave + golden_harmonic;''';
+    // Fibonacci sequence with dynamic spiral evolution
+    let neighbor_left = select(0.0, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    
+    // Dynamic fibonacci spiral
+    let fib_ratio = 1.618033988749895;
+    let spiral_angle = f32(idx) * fib_ratio * 0.1 + x * 0.001;
+    let spiral_radius = sin(x * 0.01618 + f32(idx) * 0.001) * 20.0;
+    
+    let fibonacci_wave = sin(spiral_angle) * spiral_radius;
+    let golden_harmonic = cos(spiral_angle / fib_ratio) * 15.0;
+    
+    // Add neighbor coupling for propagation
+    let coupling = (neighbor_left + neighbor_right) * 0.1;
+    
+    // Stronger chaos injection to prevent stagnation
+    let chaos1 = sin(x * 0.789 + f32(idx) * 1.234) * 8.0;
+    let chaos2 = cos(x * 1.111 + f32(idx) * 0.987) * 5.0;
+    
+    // Add energy injection based on golden ratio
+    let energy_injection = sin(x * fib_ratio * 0.01) * 3.0;
+    
+    // Nature's perfect proportion with continuous evolution
+    out[idx] = fibonacci_wave + golden_harmonic + coupling + chaos1 + chaos2 + energy_injection;''';
         } else if (isUnsigned) {
           return '''
-        // Unsigned fibonacci pattern
-        let fib_angle = (idx * 1618u) % 360u;
-        let fib_radius = (x % 64u) + 20u;
-        let pattern = (fib_angle * fib_radius) / 200u;
-        out[idx] = pattern;''';
+    // Unsigned fibonacci with evolution
+    let neighbor_left = select(0u, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    let fib_angle = (idx * 1618u + x / 8u) % 360u;
+    let fib_radius = (x % 64u) + 20u;
+    let pattern = (fib_angle * fib_radius) / 200u;
+    let coupling = (neighbor_left + neighbor_right) / 10u;
+    let chaos = (x * 789u + idx * 1234u) % 30u;
+    out[idx] = pattern + coupling + chaos;''';
         } else {
           return '''
-        // Signed fibonacci pattern
-        let fib_angle = (idx * 1618u) % 360u;
-        let fib_radius = (u32(abs(x)) % 64u) + 20u;
-        let pattern = (fib_angle * fib_radius) / 200u;
-        out[idx] = i32(pattern) - 60;''';
+    // Signed fibonacci with evolution
+    let neighbor_left = select(0, inp[(idx - 1u) % arrayLength(&inp)], idx > 0u);
+    let neighbor_right = inp[(idx + 1u) % arrayLength(&inp)];
+    let fib_angle = (idx * 1618u + u32(abs(x)) / 8u) % 360u;
+    let fib_radius = (u32(abs(x)) % 64u) + 20u;
+    let pattern = (fib_angle * fib_radius) / 200u;
+    let coupling = (neighbor_left + neighbor_right) / 10;
+    let chaos = i32((u32(abs(x)) * 789u + idx * 1234u) % 30u) - 15;
+    out[idx] = i32(pattern) + coupling + chaos - 60;''';
         }
     }
   }
@@ -1250,27 +1349,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     bool wasAutoMode = _autoMode;
     _autoMode = false;
 
-    _createBuffers();
-    _generateInputData();
+    // Wait for any pending operations to complete
+    Future.delayed(Duration(milliseconds: 10), () {
+      if (mounted) {
+        _createBuffers();
+        _generateInputData();
 
-    // Restore auto mode after buffers are ready
-    if (wasAutoMode) {
-      Future.delayed(Duration(milliseconds: 10), () {
-        if (mounted) {
-          setState(() {
-            _autoMode = true;
+        // Restore auto mode after buffers are ready
+        if (wasAutoMode) {
+          Future.delayed(Duration(milliseconds: 10), () {
+            if (mounted) {
+              setState(() {
+                _autoMode = true;
+              });
+              _runKernel();
+            }
           });
-          _runKernel();
         }
-      });
-    }
+      }
+    });
   }
 
   void _switchAlgorithm(AlgorithmDemo newAlgorithm) {
     setState(() {
       _currentAlgorithm = newAlgorithm;
     });
-    _generateInputData();
+
+    // Add small delay to prevent race conditions
+    Future.delayed(Duration(milliseconds: 10), () {
+      if (mounted) {
+        _generateInputData();
+      }
+    });
   }
 
   @override
@@ -1662,165 +1772,144 @@ class DataVisualizationPainter extends CustomPainter {
     required this.dataType,
   }) : super(repaint: animation);
 
+  static Path? _cachedInputPath;
+  static Path? _cachedOutputPath;
+  static double _cachedMinVal = 0;
+  static double _cachedMaxVal = 0;
+  static int _cachedDataHash = 0;
+  static Size? _cachedGridSize;
+  static Picture? _cachedGrid;
+
   @override
   void paint(Canvas canvas, Size size) {
     if (inputData.isEmpty && outputData.isEmpty) return;
     if (size.width <= 0 || size.height <= 0) return;
 
+    // Check if we can reuse cached paths
+    int currentDataHash = inputData.hashCode ^ outputData.hashCode;
+    bool needsRecalculation = currentDataHash != _cachedDataHash;
+
+    if (needsRecalculation) {
+      _calculatePaths(size);
+      _cachedDataHash = currentDataHash;
+    }
+
+    // Draw grid ONLY when size changes
+    if (_cachedGridSize != size) {
+      _cacheGrid(size);
+      _cachedGridSize = size;
+    }
+
+    // Draw cached grid
+    if (_cachedGrid != null) {
+      canvas.drawPicture(_cachedGrid!);
+    }
+
+    // Use cached paths for drawing
     final paint = Paint()
-      ..strokeWidth = 3
+      ..strokeWidth = 2
       ..style = PaintingStyle.stroke;
 
-    final width = size.width;
-    final height = size.height;
-    final centerY = height / 2;
+    // Draw paths
+    if (_cachedInputPath != null) {
+      paint.color = Color(0xFF0080FF).withOpacity(0.8);
+      canvas.drawPath(_cachedInputPath!, paint);
+    }
 
-    // Calculate data range for proper scaling
+    if (_cachedOutputPath != null) {
+      paint.color = Color(0xFF00FFFF);
+      canvas.drawPath(_cachedOutputPath!, paint);
+    }
+
+    // Draw fewer animated points (every 4th point)
+    _drawAnimatedPoints(canvas, size);
+  }
+
+  void _cacheGrid(Size size) {
+    final recorder = PictureRecorder();
+    final gridCanvas = Canvas(recorder);
+
+    final gridPaint = Paint()
+      ..color = Color(0xFF0080FF).withOpacity(0.2)
+      ..strokeWidth = 1
+      ..style = PaintingStyle.stroke;
+
+    const int gridLines = 10;
+    final double horizontalSpacing = size.height * 0.8 / gridLines;
+    final double verticalSpacing = size.width / gridLines;
+    final double yOffset = size.height * 0.1;
+
+    // Draw horizontal lines
+    for (int i = 0; i <= gridLines; i++) {
+      double y = size.height - (i * horizontalSpacing) - yOffset;
+      gridCanvas.drawLine(Offset(0, y), Offset(size.width, y), gridPaint);
+    }
+
+    // Draw vertical lines
+    for (int i = 0; i <= gridLines; i++) {
+      double x = i * verticalSpacing;
+      gridCanvas.drawLine(Offset(x, 0), Offset(x, size.height), gridPaint);
+    }
+
+    _cachedGrid = recorder.endRecording();
+  }
+
+  void _calculatePaths(Size size) {
+    // Calculate min/max only when data changes
     List<double> allData = [...inputData, ...outputData];
     if (allData.isEmpty) return;
 
-    double minVal = allData.reduce((a, b) => a < b ? a : b);
-    double maxVal = allData.reduce((a, b) => a > b ? a : b);
+    _cachedMinVal = allData.reduce((a, b) => a < b ? a : b);
+    _cachedMaxVal = allData.reduce((a, b) => a > b ? a : b);
 
-    // Add padding to range
-    double range = maxVal - minVal;
+    double range = _cachedMaxVal - _cachedMinVal;
     if (range == 0) range = 1;
-    minVal -= range * 0.1;
-    maxVal += range * 0.1;
-    range = maxVal - minVal;
 
-    // Draw input data (electric blue)
-    if (inputData.isNotEmpty && inputData.length > 1) {
-      paint.color = Color(0xFF0080FF).withOpacity(0.8);
-      final inputPath = Path();
+    // Build paths once
+    _cachedInputPath = _buildPath(inputData, size, _cachedMinVal, range);
+    _cachedOutputPath = _buildPath(outputData, size, _cachedMinVal, range);
+  }
 
-      for (int i = 0; i < inputData.length; i++) {
-        final x = (i / (inputData.length - 1)) * width;
-        final value = inputData[i];
-        if (!value.isFinite) continue;
+  Path _buildPath(List<double> data, Size size, double minVal, double range) {
+    final path = Path();
+    if (data.isEmpty) return path;
 
-        // Scale to fit chart area
-        final normalizedValue = (value - minVal) / range;
-        final y = height - (normalizedValue * height * 0.8) - height * 0.1;
+    for (int i = 0; i < data.length; i++) {
+      final x = (i / (data.length - 1)) * size.width;
+      final normalizedValue = (data[i] - minVal) / range;
+      final y = size.height -
+          (normalizedValue * size.height * 0.8) -
+          size.height * 0.1;
 
-        if (!x.isFinite || !y.isFinite) continue;
-
-        if (i == 0) {
-          inputPath.moveTo(x, y);
-        } else {
-          inputPath.lineTo(x, y);
-        }
-
-        // Draw data points with electric glow
-        final animationOffset = animation.value.isFinite
-            ? sin(animation.value * 2 * pi + i * 0.5) * 2
-            : 0.0;
-
-        // Glow effect
-        canvas.drawCircle(
-            Offset(x, y),
-            6 + animationOffset,
-            Paint()
-              ..color = Color(0xFF0080FF).withOpacity(0.3)
-              ..style = PaintingStyle.fill);
-
-        canvas.drawCircle(
-            Offset(x, y),
-            3 + animationOffset * 0.5,
-            Paint()
-              ..color = Color(0xFF00FFFF)
-              ..style = PaintingStyle.fill);
-      }
-      canvas.drawPath(inputPath, paint);
-    }
-
-    // Draw output data (electric cyan)
-    if (outputData.isNotEmpty && outputData.length > 1) {
-      paint.color = Color(0xFF00FFFF);
-      final outputPath = Path();
-
-      for (int i = 0; i < outputData.length; i++) {
-        final x = (i / (outputData.length - 1)) * width;
-        final value = outputData[i];
-        if (!value.isFinite) continue;
-
-        // Scale to fit chart area
-        final normalizedValue = (value - minVal) / range;
-        final y = height - (normalizedValue * height * 0.8) - height * 0.1;
-
-        if (!x.isFinite || !y.isFinite) continue;
-
-        if (i == 0) {
-          outputPath.moveTo(x, y);
-        } else {
-          outputPath.lineTo(x, y);
-        }
-
-        // Animated output points with electric effect
-        final animationOffset = animation.value.isFinite
-            ? sin(animation.value * 2 * pi + i * 0.3) * 3
-            : 0.0;
-
-        // Glow effect
-        canvas.drawCircle(
-            Offset(x, y),
-            8 + animationOffset,
-            Paint()
-              ..color = Color(0xFF00FFFF).withOpacity(0.2)
-              ..style = PaintingStyle.fill);
-
-        canvas.drawCircle(
-            Offset(x, y),
-            4 + animationOffset * 0.5,
-            Paint()
-              ..color = Color(0xFF00FF80)
-              ..style = PaintingStyle.fill);
-      }
-      canvas.drawPath(outputPath, paint);
-    }
-
-    // Draw electric grid
-    final gridPaint = Paint()
-      ..color = Color(0xFF004080).withOpacity(0.5)
-      ..strokeWidth = 1;
-
-    // Horizontal lines
-    for (int i = 0; i <= 4; i++) {
-      final y = (i / 4) * height;
-      if (y.isFinite) {
-        canvas.drawLine(Offset(0, y), Offset(width, y), gridPaint);
+      if (i == 0) {
+        path.moveTo(x, y);
+      } else {
+        path.lineTo(x, y);
       }
     }
+    return path;
+  }
 
-    // Vertical lines
-    for (int i = 0; i <= 8; i++) {
-      final x = (i / 8) * width;
-      if (x.isFinite) {
-        canvas.drawLine(Offset(x, 0), Offset(x, height), gridPaint);
-      }
+  void _drawAnimatedPoints(Canvas canvas, Size size) {
+    // Draw fewer points with animation
+    for (int i = 0; i < outputData.length; i += 4) {
+      // Every 4th point
+      final x = (i / (outputData.length - 1)) * size.width;
+      final normalizedValue =
+          (outputData[i] - _cachedMinVal) / (_cachedMaxVal - _cachedMinVal);
+      final y = size.height -
+          (normalizedValue * size.height * 0.8) -
+          size.height * 0.1;
+
+      final animationOffset = sin(animation.value * 2 * pi + i * 0.3) * 2;
+
+      canvas.drawCircle(
+          Offset(x, y),
+          3 + animationOffset,
+          Paint()
+            ..color = Color(0xFF00FF80)
+            ..style = PaintingStyle.fill);
     }
-
-    // Draw scale labels
-    final textPainter = TextPainter(
-      textAlign: TextAlign.center,
-      textDirection: TextDirection.ltr,
-    );
-
-    // Min value label
-    textPainter.text = TextSpan(
-      text: minVal.toStringAsFixed(1),
-      style: TextStyle(color: Color(0xFF00FFFF), fontSize: 12),
-    );
-    textPainter.layout();
-    textPainter.paint(canvas, Offset(5, height - 20));
-
-    // Max value label
-    textPainter.text = TextSpan(
-      text: maxVal.toStringAsFixed(1),
-      style: TextStyle(color: Color(0xFF00FFFF), fontSize: 12),
-    );
-    textPainter.layout();
-    textPainter.paint(canvas, Offset(5, 5));
   }
 
   @override

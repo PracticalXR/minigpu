@@ -5164,7 +5164,7 @@ async function createWasm() {
   
   var Asyncify = {
   instrumentWasmImports(imports) {
-        var importPattern = /^(invoke_.*|__asyncjs__.*)$/;
+        var importPattern = /^(__asyncjs__.*)$/;
   
         for (let [x, original] of Object.entries(imports)) {
           if (typeof original == 'function') {
@@ -5200,7 +5200,7 @@ async function createWasm() {
   Disabled:3,
   },
   state:0,
-  StackSize:4096,
+  StackSize:262144,
   currData:null,
   handleSleepReturnValue:0,
   exportCallStack:[],

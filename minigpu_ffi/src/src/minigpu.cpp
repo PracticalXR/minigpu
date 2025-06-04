@@ -7,15 +7,10 @@ extern "C" {
 
 MGPU minigpu;
 
-void mgpuInitializeContext() {
-  minigpu.initializeContext();
-  setLogLevel(4);
-}
+void mgpuInitializeContext() { minigpu.initializeContext(); }
 
 void mgpuInitializeContextAsync(MGPUCallback callback) {
-
   minigpu.initializeContextAsync(callback);
-  setLogLevel(4);
 }
 
 void mgpuDestroyContext() { minigpu.destroyContext(); }

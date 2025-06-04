@@ -76,7 +76,6 @@ void ComputeShader::destroyCachedKernel() {
 
 void ComputeShader::loadKernelString(const std::string &kernelString) {
   // Assuming default workgroup size and type for now, might need adjustment
-  
   code = KernelCode{kernelString, Shape{256, 1, 1}, ki32};
   LOG(kDefLog, kInfo, "Loaded kernel string.");
 }
@@ -194,8 +193,13 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
     LOG(kDefLog, kInfo, "Reusing cached kernel for dispatch.");
   }
 
-  // Dispatch with cached kernel
+// Dispatch with cached kernel
+#ifdef __EMSCRIPTEN__
+  // In WebAssembly, we use async dispatch to avoid blocking the main thread
+  dispatchKernelAsync(mgpu.getContext(), cachedKernel.value());
+#else
   dispatchKernel(mgpu.getContext(), cachedKernel.value());
+#endif
   LOG(kDefLog, kInfo, "Kernel dispatch complete (cached).");
 }
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,

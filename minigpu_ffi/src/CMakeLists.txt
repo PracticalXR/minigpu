@@ -51,10 +51,28 @@ if(EMSCRIPTEN)
     # Create a helper library for WebGPU (from Dawn)
     add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/webgpu.cpp")
 
+    set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
+
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
+    if(EMSCRIPTEN_DEBUG)
+        set(DEBUG_FLAGS "\
+            -g3 \
+            -O0 \
+            -sSTACK_OVERFLOW_CHECK=2 \
+            -sRUNTIME_DEBUG=1 \
+            -sWARN_ON_UNDEFINED_SYMBOLS=1 \
+            -sASSERTIONS=2 \
+            -fsanitize=address \
+            -sNO_DISABLE_EXCEPTION_CATCHING \
+            --source-map-base=http://localhost:8080/ \
+        ")
+    else()
+        set(DEBUG_FLAGS "-O3")
+    endif()
+
     # (Additional compile options could be added here)
     set_target_properties(${MAIN_LIB} PROPERTIES LINK_FLAGS "\
-        -O3 \
+        ${DEBUG_FLAGS} \
         -sUSE_WEBGPU=0 \
         -sWASM=1 \
         -DDAWN_EMSCRIPTEN_TOOLCHAIN=${EMSCRIPTEN_DIR} \
@@ -66,6 +84,10 @@ if(EMSCRIPTEN)
         -sALLOW_MEMORY_GROWTH=1 \
         -sStackSize=16MB \
         -sASYNCIFY \
+        -sASYNCIFY_STACK_SIZE=262144 \
+        -sASYNCIFY_IGNORE_INDIRECT=1 \
+        -sRUNTIME_DEBUG=0 \
+        -sEXIT_RUNTIME=0 \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_enum_tables.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_struct_info.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_sig_info.js \

@@ -3,17 +3,17 @@ SHELL := /bin/bash
 
 # Detect the operating system
 ifeq ($(OS),Windows_NT)
-    DETECTED_OS := Windows
-    DEL_CMD := del /s /q
+	DETECTED_OS := Windows
+	DEL_CMD := del /s /q
 	RMDIR_CMD := rmdir /s /q
 	MKDIR_CMD := mkdir
-    SLASH := \\
+	SLASH := \\
 else
-    DETECTED_OS := $(shell uname)
-    DEL_CMD := rm -rf
+	DETECTED_OS := $(shell uname)
+	DEL_CMD := rm -rf
 	RMDIR_CMD := rm -rf
 	MKDIR_CMD := mkdir -p
-    SLASH := /
+	SLASH := /
 endif
 
 PLATFORM_INTERFACE_DIR := ./minigpu_platform_interface/
@@ -67,7 +67,7 @@ ffigen:
 
 build_weblib:
 	@echo "Building ffi lib to web via emscripten..."
-	@cd $(BUILD_WEB_DIR) && emcmake cmake .. && cmake --build .
+	@cd $(BUILD_WEB_DIR) && emcmake cmake .. -DCMAKE_TOOLCHAIN_FILE=$(EMSDK)/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake && cmake --build .
 
 build_ffilib:
 	@echo "Building ffi lib to native via emscripten..."

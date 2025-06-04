@@ -12,9 +12,9 @@ extern "C" {
 
 typedef struct MGPUComputeShader MGPUComputeShader;
 typedef struct MGPUBuffer MGPUBuffer;
+typedef void (*MGPUCallback)(void);
 
 EXPORT void mgpuInitializeContext();
-typedef void (*MGPUCallback)(void);
 EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);
 EXPORT void mgpuDestroyContext();
 EXPORT MGPUComputeShader *mgpuCreateComputeShader();
