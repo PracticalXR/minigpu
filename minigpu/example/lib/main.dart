@@ -3,32 +3,34 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:flutter/material.dart';
+import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:minigpu/minigpu.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 void main() {
-  runApp(MyApp());
+  runApp(const MyApp());
 }
 
 class MyApp extends StatelessWidget {
+  const MyApp({super.key});
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Minigpu Type Testing Lab',
       theme: ThemeData.dark().copyWith(
-        primaryColor: Color(0xFF00FFFF), // Electric cyan
-        colorScheme: ColorScheme.dark(
+        primaryColor: const Color(0xFF00FFFF), // Electric cyan
+        colorScheme: const ColorScheme.dark(
           primary: Color(0xFF00FFFF),
           secondary: Color(0xFF0080FF),
           surface: Color(0xFF1A1A2E),
-          background: Color(0xFF0F0F23),
         ),
-        cardColor: Color(0xFF1A1A2E),
-        appBarTheme: AppBarTheme(
+        cardColor: const Color(0xFF1A1A2E),
+        appBarTheme: const AppBarTheme(
           backgroundColor: Color(0xFF0F0F23),
           foregroundColor: Color(0xFF00FFFF),
         ),
       ),
-      home: TypeTestingExample(),
+      home: const TypeTestingExample(),
     );
   }
 }
@@ -77,11 +79,12 @@ enum AlgorithmDemo {
 }
 
 class TypeTestingExample extends StatefulWidget {
+  const TypeTestingExample({super.key});
   @override
-  _TypeTestingExampleState createState() => _TypeTestingExampleState();
+  TypeTestingExampleState createState() => TypeTestingExampleState();
 }
 
-class _TypeTestingExampleState extends State<TypeTestingExample>
+class TypeTestingExampleState extends State<TypeTestingExample>
     with TickerProviderStateMixin {
   late Minigpu _minigpu;
   late ComputeShader _shader;
@@ -99,9 +102,7 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
   int _bufferSize = 4096;
   int _previewLength = 1024;
   bool _autoMode = true;
-  bool _isRunning = false;
   double _animationSpeed = 250.0;
-  int _frameCount = 0;
 
   List<double> _fullInputData = [];
   List<double> _fullOutputData = [];
@@ -143,12 +144,12 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
     _tabController = TabController(length: 2, vsync: this);
 
     _waveController = AnimationController(
-      duration: Duration(seconds: 2),
+      duration: const Duration(seconds: 2),
       vsync: this,
     )..repeat();
 
     _colorController = AnimationController(
-      duration: Duration(seconds: 3),
+      duration: const Duration(seconds: 3),
       vsync: this,
     )..repeat();
 
@@ -175,10 +176,6 @@ class _TypeTestingExampleState extends State<TypeTestingExample>
   void _generateInputData() {
     List<double> data;
     double scaleFactor = _getVisualizationScale();
-
-    // Increment frame counter for time-based evolution
-    _frameCount++;
-    double timePhase = _frameCount * 0.01; // Slow evolution
 
     switch (_currentAlgorithm) {
       case AlgorithmDemo.wave:
@@ -1350,14 +1347,14 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     _autoMode = false;
 
     // Wait for any pending operations to complete
-    Future.delayed(Duration(milliseconds: 10), () {
+    Future.delayed(const Duration(milliseconds: 10), () {
       if (mounted) {
         _createBuffers();
         _generateInputData();
 
         // Restore auto mode after buffers are ready
         if (wasAutoMode) {
-          Future.delayed(Duration(milliseconds: 10), () {
+          Future.delayed(const Duration(milliseconds: 10), () {
             if (mounted) {
               setState(() {
                 _autoMode = true;
@@ -1375,8 +1372,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       _currentAlgorithm = newAlgorithm;
     });
 
-    // Add small delay to prevent race conditions
-    Future.delayed(Duration(milliseconds: 10), () {
+    Future.delayed(const Duration(milliseconds: 10), () {
       if (mounted) {
         _generateInputData();
       }
@@ -1397,16 +1393,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   Widget _buildTypeSelector() {
     return Card(
       child: Padding(
-        padding: EdgeInsets.all(8),
+        padding: const EdgeInsets.all(8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Data Type',
+            const Text('Data Type',
                 style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF00FFFF))),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               children: DataTypeDemo.values
@@ -1416,8 +1412,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                           label: Text(type.label),
                           selected: _currentType == type,
                           onSelected: (_) => _switchType(type),
-                          selectedColor: Color(0xFF0080FF),
-                          checkmarkColor: Color(0xFF00FFFF),
+                          selectedColor: const Color(0xFF0080FF),
+                          checkmarkColor: const Color(0xFF00FFFF),
                         ),
                       ))
                   .toList(),
@@ -1431,16 +1427,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   Widget _buildAlgorithmSelector() {
     return Card(
       child: Padding(
-        padding: EdgeInsets.all(8),
+        padding: const EdgeInsets.all(8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Algorithm',
+            const Text('Algorithm',
                 style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF00FFFF))),
-            SizedBox(height: 8),
+            const SizedBox(height: 8),
             Wrap(
               spacing: 8,
               children: AlgorithmDemo.values
@@ -1448,7 +1444,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                         label: Text(algo.label),
                         selected: _currentAlgorithm == algo,
                         onSelected: (_) => _switchAlgorithm(algo),
-                        selectedColor: Color(0xFF0080FF),
+                        selectedColor: const Color(0xFF0080FF),
                       ))
                   .toList(),
             ),
@@ -1500,17 +1496,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   Widget _buildDataTab() {
     return Card(
       child: Padding(
-        padding: EdgeInsets.all(8),
+        padding: const EdgeInsets.all(8),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Raw Data View',
+            const Text('Raw Data View',
                 style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF00FFFF))),
-            SizedBox(height: 16),
-            Container(
+            const SizedBox(height: 16),
+            SizedBox(
               height: 300,
               child: Row(
                 children: [
@@ -1518,16 +1514,17 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Input Data',
+                        const Text('Input Data',
                             style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color: Color(0xFF0080FF))),
-                        SizedBox(height: 8),
+                        const SizedBox(height: 8),
                         Expanded(
                           child: Container(
-                            padding: EdgeInsets.all(8),
+                            padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
-                              border: Border.all(color: Color(0xFF0080FF)),
+                              border:
+                                  Border.all(color: const Color(0xFF0080FF)),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: ListView.builder(
@@ -1536,7 +1533,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                               itemBuilder: (context, index) {
                                 return Text(
                                   '[$index]: ${_previewInputData[index].toStringAsFixed(3)}',
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                       fontFamily: 'monospace',
                                       color: Color(0xFF00FFFF)),
                                 );
@@ -1547,21 +1544,22 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                       ],
                     ),
                   ),
-                  SizedBox(width: 16),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('Output Data',
+                        const Text('Output Data',
                             style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 color: Color(0xFF00FF80))),
-                        SizedBox(height: 8),
+                        const SizedBox(height: 8),
                         Expanded(
                           child: Container(
-                            padding: EdgeInsets.all(8),
+                            padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
-                              border: Border.all(color: Color(0xFF00FF80)),
+                              border:
+                                  Border.all(color: const Color(0xFF00FF80)),
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: ListView.builder(
@@ -1570,7 +1568,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                               itemBuilder: (context, index) {
                                 return Text(
                                   '[$index]: ${_previewOutputData[index].toStringAsFixed(3)}',
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                       fontFamily: 'monospace',
                                       color: Color(0xFF00FF80)),
                                 );
@@ -1593,7 +1591,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   Widget _buildControls() {
     return Card(
       child: Padding(
-        padding: EdgeInsets.all(8),
+        padding: const EdgeInsets.all(8),
         child: Column(
           children: [
             Row(
@@ -1601,10 +1599,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               children: [
                 ElevatedButton.icon(
                   onPressed: _autoMode ? null : _runKernel,
-                  icon: Icon(Icons.play_arrow),
-                  label: Text('Execute'),
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('Execute'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Color(0xFF0080FF),
+                    backgroundColor: const Color(0xFF0080FF),
                     foregroundColor: Colors.white,
                   ),
                 ),
@@ -1618,37 +1616,38 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                   icon: Icon(_autoMode ? Icons.pause : Icons.autorenew),
                   label: Text(_autoMode ? 'Stop Auto' : 'Auto Mode'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor:
-                        _autoMode ? Color(0xFFFF4080) : Color(0xFF00FF80),
+                    backgroundColor: _autoMode
+                        ? const Color(0xFFFF4080)
+                        : const Color(0xFF00FF80),
                     foregroundColor: Colors.white,
                   ),
                 ),
                 ElevatedButton.icon(
                   onPressed: _generateInputData,
-                  icon: Icon(Icons.shuffle),
-                  label: Text('Randomize'),
+                  icon: const Icon(Icons.shuffle),
+                  label: const Text('Randomize'),
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: Color(0xFF00FFFF),
+                    backgroundColor: const Color(0xFF00FFFF),
                     foregroundColor: Colors.black,
                   ),
                 ),
               ],
             ),
-            SizedBox(height: 16),
+            const SizedBox(height: 16),
             Row(
               children: [
                 Expanded(
                   child: Column(
                     children: [
                       Text('Buffer Size: $_bufferSize',
-                          style: TextStyle(color: Color(0xFF00FFFF))),
+                          style: const TextStyle(color: Color(0xFF00FFFF))),
                       Slider(
                         min: 64,
                         max: 221184,
                         divisions: 108,
                         value: _bufferSize.toDouble(),
-                        activeColor: Color(0xFF00FFFF),
-                        inactiveColor: Color(0xFF0080FF),
+                        activeColor: const Color(0xFF00FFFF),
+                        inactiveColor: const Color(0xFF0080FF),
                         onChanged: (value) {
                           setState(() {
                             _bufferSize = value.toInt();
@@ -1662,19 +1661,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                     ],
                   ),
                 ),
-                SizedBox(width: 16),
+                const SizedBox(width: 16),
                 Expanded(
                   child: Column(
                     children: [
                       Text('Preview: $_previewLength',
-                          style: TextStyle(color: Color(0xFF00FFFF))),
+                          style: const TextStyle(color: Color(0xFF00FFFF))),
                       Slider(
                         min: 8,
                         max: 4096,
                         divisions: 108,
                         value: _previewLength.toDouble(),
-                        activeColor: Color(0xFF00FFFF),
-                        inactiveColor: Color(0xFF0080FF),
+                        activeColor: const Color(0xFF00FFFF),
+                        inactiveColor: const Color(0xFF0080FF),
                         onChanged: (value) {
                           setState(() {
                             _previewLength =
@@ -1694,13 +1693,13 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
                 children: [
                   Text(
                       'Animation Speed: ${_animationSpeed.toStringAsFixed(1)}x',
-                      style: TextStyle(color: Color(0xFF00FFFF))),
+                      style: const TextStyle(color: Color(0xFF00FFFF))),
                   Slider(
                     min: 0.1,
                     max: 1000.0,
                     value: _animationSpeed,
-                    activeColor: Color(0xFF00FFFF),
-                    inactiveColor: Color(0xFF0080FF),
+                    activeColor: const Color(0xFF00FFFF),
+                    inactiveColor: const Color(0xFF0080FF),
                     onChanged: (value) {
                       setState(() {
                         _animationSpeed = value;
@@ -1719,13 +1718,26 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text('Minigpu Type Testing Lab'),
+        title: const Text('Minigpu WebGPU Type Testing Lab'),
+        actions: [
+          IconButton(
+            icon: const FaIcon(FontAwesomeIcons.github),
+            tooltip: 'View on GitHub',
+            onPressed: () async {
+              final Uri url =
+                  Uri.parse('https://github.com/PracticalXR/minigpu');
+              if (await canLaunchUrl(url)) {
+                await launchUrl(url);
+              } else {}
+            },
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
-          labelColor: Color(0xFF00FFFF),
-          unselectedLabelColor: Color(0xFF0080FF),
-          indicatorColor: Color(0xFF00FFFF),
-          tabs: [
+          labelColor: const Color(0xFF00FFFF),
+          unselectedLabelColor: const Color(0xFF0080FF),
+          indicatorColor: const Color(0xFF00FFFF),
+          tabs: const [
             Tab(icon: Icon(Icons.timeline), text: 'Chart'),
             Tab(icon: Icon(Icons.data_object), text: 'Raw Data'),
           ],
@@ -1740,11 +1752,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
               controller: _tabController,
               children: [
                 SingleChildScrollView(
-                  padding: EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(8),
                   child: _buildVisualizationTab(),
                 ),
                 SingleChildScrollView(
-                  padding: EdgeInsets.all(8),
+                  padding: const EdgeInsets.all(8),
                   child: _buildDataTab(),
                 ),
               ],
@@ -1812,12 +1824,12 @@ class DataVisualizationPainter extends CustomPainter {
 
     // Draw paths
     if (_cachedInputPath != null) {
-      paint.color = Color(0xFF0080FF).withOpacity(0.8);
+      paint.color = const Color(0xFF0080FF).withValues(alpha: 0.8);
       canvas.drawPath(_cachedInputPath!, paint);
     }
 
     if (_cachedOutputPath != null) {
-      paint.color = Color(0xFF00FFFF);
+      paint.color = const Color(0xFF00FFFF);
       canvas.drawPath(_cachedOutputPath!, paint);
     }
 
@@ -1830,7 +1842,7 @@ class DataVisualizationPainter extends CustomPainter {
     final gridCanvas = Canvas(recorder);
 
     final gridPaint = Paint()
-      ..color = Color(0xFF0080FF).withOpacity(0.2)
+      ..color = const Color(0xFF0080FF).withValues(alpha: .2)
       ..strokeWidth = 1
       ..style = PaintingStyle.stroke;
 
@@ -1907,7 +1919,7 @@ class DataVisualizationPainter extends CustomPainter {
           Offset(x, y),
           3 + animationOffset,
           Paint()
-            ..color = Color(0xFF00FF80)
+            ..color = const Color(0xFF00FF80)
             ..style = PaintingStyle.fill);
     }
   }
