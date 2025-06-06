@@ -39,11 +39,13 @@ to your web/index.html file.
 
 ### Installation
 
+Make sure you're running Dart SDK >=3.9.0-21.0.dev or greater.
+
 Add the following to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  minigpu: ^1.1.3
+  minigpu: ^1.1.8
 ```
 
 Then run:

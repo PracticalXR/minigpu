@@ -1,6 +1,17 @@
 # minigpu
 
-## 1.1.4-WIP
+## 1.1.8-WIP
+
+## 1.1.6
+
+- fixed problem with audio input capture providing raw data
+
+## 1.1.5
+
+- Refactored example
+- Various fixes
+- Updated native assets to code assets
+- Memory problems fixed on web and ffi
 
 ## 1.1.3
 

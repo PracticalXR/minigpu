@@ -1,11 +1,11 @@
 publish_to: none
 name: minigpu_platform_interface
 description: The platform interface for minigpu. A library to brings multiplatform GPU compute to Dart and Flutter using GPU.cpp and Google Dawn.
-version: 1.1.4
+version: 1.1.8
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu_platform_interface
 
 environment:
-  sdk: ">=3.6.0 <4.0.0"
+  sdk: ">=3.9.0-21.0.dev <4.0.0"
   flutter: ">=1.20.0"
 
 # Add regular dependencies here.

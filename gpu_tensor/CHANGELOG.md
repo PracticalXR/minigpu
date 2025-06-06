@@ -1,6 +1,18 @@
 # gpu_tensor
 
+## 1.1.8-WIP
+
+## 1.1.7
+
+- fixed fft operations for 1D tensors
+- fixed memory leaks
+
+## 1.1.6
+
+- fixed problem with audio input capture providing raw data
+
 ## 1.0.1
+
 - Fix: pub.dev needs flutter dependency in pubspec.yaml
 
 ## 1.0.0

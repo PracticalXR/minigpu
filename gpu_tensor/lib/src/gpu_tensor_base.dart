@@ -26,6 +26,10 @@ class DefaultMinigpu {
   static final instance = Minigpu();
 }
 
+final Finalizer<Buffer> _bufferFinalizer = Finalizer(
+  (buffer) => buffer.destroy(),
+);
+
 /// A generic tensor that works with a specific [TypedData] type.
 class Tensor<T extends TypedData> {
   /// The shape in terms of dimensions.
@@ -41,15 +45,20 @@ class Tensor<T extends TypedData> {
   final BufferDataType dataType;
 
   // Private constructor.
-  Tensor._(this.shape,
-      {required this.gpu, T? data, this.dataType = BufferDataType.float32})
-      : size = shape.reduce((a, b) => a * b) {
+  Tensor._(
+    this.shape, {
+    required this.gpu,
+    T? data,
+    this.dataType = BufferDataType.float32,
+  }) : size = shape.reduce((a, b) => a * b) {
     final int byteSize = size * _elementSize(dataType);
     buffer = gpu.createBuffer(byteSize, dataType);
+    _bufferFinalizer.attach(this, buffer);
     if (data != null) {
       if (data.lengthInBytes ~/ _elementSize(dataType) != size) {
         throw Exception(
-            "Provided data length (${data.lengthInBytes ~/ _elementSize(dataType)}) does not match tensor size ($size)");
+          "Provided data length (${data.lengthInBytes ~/ _elementSize(dataType)}) does not match tensor size ($size)",
+        );
       }
       buffer.setData(data, size, dataType: dataType);
     } else {
@@ -131,12 +140,18 @@ class Tensor<T extends TypedData> {
 
   /// Destroys the tensor's GPU buffer.
   void destroy() {
+    _bufferFinalizer.detach(this);
     buffer.destroy();
   }
 
   /// Creates a tensor from an existing buffer.
-  Tensor.fromBuffer(this.buffer, this.shape,
-      {Minigpu? gpu, this.dataType = BufferDataType.float32})
-      : gpu = gpu ?? DefaultMinigpu.instance,
-        size = shape.reduce((a, b) => a * b);
+  Tensor.fromBuffer(
+    this.buffer,
+    this.shape, {
+    Minigpu? gpu,
+    this.dataType = BufferDataType.float32,
+  }) : gpu = gpu ?? DefaultMinigpu.instance,
+       size = shape.reduce((a, b) => a * b) {
+    _bufferFinalizer.attach(this, buffer);
+  }
 }

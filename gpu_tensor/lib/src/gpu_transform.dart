@@ -7,14 +7,16 @@ extension GpuFft on Tensor {
   /// Upgrades a real tensor to a complex one by interleaving a zero for the
   /// imaginary part using the GPU.
   /// For 1D tensors the output is flat ([N*2]), for others a new dimension is appended.
-  Future<Tensor> _upgradeRealToComplex() async {
+  Future<Tensor> upgradeRealToComplex() async {
     int total = shape.reduce((a, b) => a * b);
     // For 1D tensors, produce a flat complex tensor.
-    List<int> newShape =
-        (shape.length == 1) ? [total * 2] : (List.from(shape)..add(2));
+    List<int> newShape = (shape.length == 1)
+        ? [total * 2]
+        : (List.from(shape)..add(2));
     Tensor out = await Tensor.create(newShape, gpu: gpu);
 
-    final shaderTemplate = '''
+    final shaderTemplate =
+        '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -29,32 +31,38 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode =
-        prepareShader(shaderTemplate, dataType, {'total': total});
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'total': total,
+    });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', out.buffer);
     int workgroups = (total + 255) ~/ 256;
     await shader.dispatch(workgroups, 1, 1);
+    buffer.destroy();
     shader.destroy();
     return out;
   }
 
   /// A unified FFT that upgrades a real tensor if necessary and then calls the
   /// appropriate FFT method based on the tensor's dimensions.
-  Future<Tensor> fft() async {
+  Future<Tensor> fft({bool isRealInput = false}) async {
     // For 1D: if the tensor is real (length not even) upgrade to a flat complex tensor.
     if (shape.length == 1) {
-      if (shape[0] % 2 != 0) {
-        Tensor upgraded = await _upgradeRealToComplex();
+      if (isRealInput) {
+        print("Upgrading real 1D tensor to complex for FFT operation.");
+        // Input is real samples, upgrade to complex
+        Tensor upgraded = await upgradeRealToComplex();
         return upgraded.fft1d();
+      } else {
+        // Input is already complex pairs (existing behavior)
+        // Only upgrade if odd length (original logic)
+        if (shape[0] % 2 != 0) {
+          Tensor upgraded = await upgradeRealToComplex();
+          return upgraded.fft1d();
+        }
+        return fft1d();
       }
-      return fft1d();
-    }
-    // For multi-dimensional tensors, if last dimension isn’t 2, upgrade using GPU.
-    if (shape.isEmpty || shape.last != 2) {
-      Tensor upgraded = await _upgradeRealToComplex();
-      return upgraded.fft();
     }
     int dims = shape.length - 1;
     if (dims == 1) {
@@ -70,6 +78,56 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   /// Computes a 1D FFT on a tensor representing complex numbers in interleaved format.
   /// Expects a flat tensor ([N*2]) with an even number of elements.
+  /// Bit-reverse reordering for FFT output
+  Future<Tensor> bitReverseReorder(Tensor input) async {
+    final n = input.shape[0] ~/ 2; // number of complex points
+    if (n <= 1) return input;
+
+    final output = await Tensor.create(input.shape, gpu: gpu);
+
+    final shaderTemplate =
+        '''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+fn bitReverse(x: u32, bits: u32) -> u32 {
+  var result: u32 = 0u;
+  var temp: u32 = x;
+  for (var i: u32 = 0u; i < bits; i = i + 1u) {
+    result = (result << 1u) | (temp & 1u);
+    temp = temp >> 1u;
+  }
+  return result;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i: u32 = gid.x;
+  if (i >= ${n}u) { return; }
+  
+  let numBits: u32 = ${(math.log(n) / math.ln2).round()}u;
+  let j: u32 = bitReverse(i, numBits);
+  
+  let srcIdx: u32 = j * 2u;
+  let dstIdx: u32 = i * 2u;
+  
+  output[dstIdx] = input[srcIdx];
+  output[dstIdx + 1u] = input[srcIdx + 1u];
+}
+''';
+
+    final ComputeShader shader = gpu.createComputeShader();
+    final shaderCode = prepareShader(shaderTemplate, dataType, {'n': n});
+    shader.loadKernelString(shaderCode);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', output.buffer);
+
+    int workgroups = (n + 255) ~/ 256;
+    await shader.dispatch(workgroups, 1, 1);
+    shader.destroy();
+    return output;
+  }
+
   Future<Tensor> fft1d() async {
     if (shape.length != 1) {
       throw Exception("FFT supports 1D tensors only.");
@@ -80,20 +138,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     int n = totalFloats ~/ 2; // number of complex points
     if ((n & (n - 1)) != 0) {
+      print("actually n = $n");
       throw Exception("FFT size ($n) must be a power of 2.");
     }
     if (n == 1) return this; // FFT of a single point
 
     int stages = (math.log(n) / math.ln2).toInt();
-    Tensor ping = this;
+
+    // FIXED: Apply bit-reversal BEFORE FFT stages (input reordering)
+    Tensor bitReversedInput = await bitReverseReorder(this);
+
+    Tensor ping = bitReversedInput;
     Tensor pong = await Tensor.create(shape, gpu: gpu);
 
     for (int s = 0; s < stages; s++) {
       int m = 1 << (s + 1);
       int half = m >> 1;
-      int numOperations = n >> 1;
+      int numOperations = n >> 1; // REVERTED: This was correct
 
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -126,8 +190,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType,
-          {'half': half, 'm': m, 'numOperations': numOperations});
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'half': half,
+        'm': m,
+        'numOperations': numOperations,
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -139,6 +206,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       ping = pong;
       pong = temp;
     }
+
     return ping;
   }
 
@@ -152,7 +220,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         throw Exception("Both rows and cols must be powers of 2.");
       }
       // Use GPU to upgrade instead of CPU iteration.
-      final Tensor upgraded = await _upgradeRealToComplex();
+      final Tensor upgraded = await upgradeRealToComplex();
       return upgraded.fft2d();
     }
     if (shape.length != 3 || shape[2] != 2) {
@@ -172,7 +240,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = rows * (cols >> 1);
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -208,8 +277,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType,
-          {'half': half, 'm': m, 'numOperations': numOperations});
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'half': half,
+        'm': m,
+        'numOperations': numOperations,
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -227,7 +299,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = cols * (rows >> 1);
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -263,8 +336,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
       final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType,
-          {'half': half, 'm': m, 'numOperations': numOperations});
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'half': half,
+        'm': m,
+        'numOperations': numOperations,
+      });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
@@ -289,14 +365,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         throw Exception("D, R, and C must be powers of 2.");
       }
       // Upgrade on GPU.
-      final Tensor upgraded = await _upgradeRealToComplex();
+      final Tensor upgraded = await upgradeRealToComplex();
       return upgraded.fft3d();
     }
 
     // If already complex, expect shape [D, R, C, 2].
     if (shape.length != 4 || shape[3] != 2) {
       throw Exception(
-          "fft3d requires a tensor of shape [D,R,C,2] or a real tensor of shape [D,R,C].");
+        "fft3d requires a tensor of shape [D,R,C,2] or a real tensor of shape [D,R,C].",
+      );
     }
     int D = shape[0], R = shape[1], C = shape[2];
     bool isPow2(int x) => (x & (x - 1)) == 0;
@@ -313,7 +390,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = R * C * (D >> 1);
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -364,7 +442,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         'C': C,
         'm': m,
         'half': half,
-        'numOperations': numOperations
+        'numOperations': numOperations,
       });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
@@ -383,7 +461,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = D * C * (R >> 1);
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -434,7 +513,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         'C': C,
         'm': m,
         'half': half,
-        'numOperations': numOperations
+        'numOperations': numOperations,
       });
 
       shader.loadKernelString(shaderCode);
@@ -454,7 +533,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       int m = 1 << (s + 1);
       int half = m >> 1;
       int numOperations = D * R * (C >> 1);
-      final shaderTemplate = '''
+      final shaderTemplate =
+          '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
@@ -505,7 +585,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         'C': C,
         'm': m,
         'half': half,
-        'numOperations': numOperations
+        'numOperations': numOperations,
       });
       shader.loadKernelString(shaderCode);
       shader.setBuffer('input', ping.buffer);
