@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:typed_data';
 import 'package:gpu_tensor/src/gpu_helpers.dart';
 import 'package:minigpu/minigpu.dart';
 import '../gpu_tensor.dart';
@@ -9,10 +10,11 @@ extension GpuFft on Tensor {
   /// For 1D tensors the output is flat ([N*2]), for others a new dimension is appended.
   Future<Tensor> upgradeRealToComplex() async {
     int total = shape.reduce((a, b) => a * b);
-    // For 1D tensors, produce a flat complex tensor.
-    List<int> newShape = (shape.length == 1)
-        ? [total * 2]
-        : (List.from(shape)..add(2));
+
+    // For FFT, we need same number of complex points as real input
+    // 1024 real samples → 1024 complex samples (2048 floats)
+    List<int> newShape = [total * 2]; // Always double the size for complex
+
     Tensor out = await Tensor.create(newShape, gpu: gpu);
 
     final shaderTemplate =
@@ -30,16 +32,14 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[i * 2u + 1u] = 0.0;
 }
 ''';
+
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
-      'total': total,
-    });
-    shader.loadKernelString(shaderCode);
+    shader.loadKernelString(shaderTemplate);
     shader.setBuffer('input', buffer);
     shader.setBuffer('output', out.buffer);
+
     int workgroups = (total + 255) ~/ 256;
     await shader.dispatch(workgroups, 1, 1);
-    buffer.destroy();
     shader.destroy();
     return out;
   }
@@ -84,7 +84,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (n <= 1) return input;
 
     final output = await Tensor.create(input.shape, gpu: gpu);
+    final numBits = (math.log(n) / math.ln2).round();
 
+    // This should now work with correct input size
     final shaderTemplate =
         '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
@@ -100,13 +102,15 @@ fn bitReverse(x: u32, bits: u32) -> u32 {
   return result;
 }
 
+const N: u32 = ${n}u;
+const BITS: u32 = ${numBits}u;
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i: u32 = gid.x;
-  if (i >= ${n}u) { return; }
+  if (i >= N) { return; }
   
-  let numBits: u32 = ${(math.log(n) / math.ln2).round()}u;
-  let j: u32 = bitReverse(i, numBits);
+  let j: u32 = bitReverse(i, BITS);
   
   let srcIdx: u32 = j * 2u;
   let dstIdx: u32 = i * 2u;
@@ -117,8 +121,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ''';
 
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {'n': n});
-    shader.loadKernelString(shaderCode);
+    shader.loadKernelString(shaderTemplate);
     shader.setBuffer('input', input.buffer);
     shader.setBuffer('output', output.buffer);
 
@@ -136,76 +139,129 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (totalFloats % 2 != 0) {
       throw Exception("FFT tensor length must be even (for complex numbers).");
     }
-    int n = totalFloats ~/ 2; // number of complex points
+    int n = totalFloats ~/ 2;
     if ((n & (n - 1)) != 0) {
-      print("actually n = $n");
       throw Exception("FFT size ($n) must be a power of 2.");
     }
-    if (n == 1) return this; // FFT of a single point
+    if (n == 1) return this;
 
+    // Precompute all twiddle factors
+    final twiddleFactors = Float32List(n * 2);
+    for (int i = 0; i < n; i++) {
+      double angle = -2.0 * math.pi * i / n;
+      twiddleFactors[i * 2] = math.cos(angle);
+      twiddleFactors[i * 2 + 1] = math.sin(angle);
+    }
+
+    final Buffer twiddleBuffer = gpu.createBuffer(
+      n * 2 * 4,
+      BufferDataType.float32,
+    );
+    await twiddleBuffer.write(twiddleFactors, twiddleFactors.length);
+
+    // Add bit-reversal back
+    Tensor bitReversed = await bitReverseReorder(this);
     int stages = (math.log(n) / math.ln2).toInt();
 
-    // FIXED: Apply bit-reversal BEFORE FFT stages (input reordering)
-    Tensor bitReversedInput = await bitReverseReorder(this);
-
-    Tensor ping = bitReversedInput;
+    Tensor ping = bitReversed;
     Tensor pong = await Tensor.create(shape, gpu: gpu);
 
-    for (int s = 0; s < stages; s++) {
-      int m = 1 << (s + 1);
-      int half = m >> 1;
-      int numOperations = n >> 1; // REVERTED: This was correct
-
-      final shaderTemplate =
-          '''
+    // Optimized shader with precomputed twiddles
+    final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<storage, read_write> params: array<u32>; // [stage, n, m, half]
+@group(0) @binding(3) var<storage, read_write> twiddles: array<f32>;
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n: u32 = params[1];
+  let m: u32 = params[2];
+  let half: u32 = params[3];
+  let numOperations: u32 = n >> 1u;
+  
   let t: u32 = gid.x;
-  if (t >= ${numOperations}u) { return; }
-  let half: u32 = ${half}u;
-  let m: u32 = ${m}u;
+  if (t >= numOperations) { return; }
+  
   let group: u32 = t / half;
   let pos: u32 = t % half;
   let i0: u32 = group * m + pos;
   let i1: u32 = i0 + half;
+  
+  if (i1 >= n) { return; }
+  
   let idx0: u32 = i0 * 2u;
   let idx1: u32 = i1 * 2u;
+  
+  // Load complex numbers as vec2 for better performance
   let a: vec2<f32> = vec2<f32>(input[idx0], input[idx0 + 1u]);
   let b: vec2<f32> = vec2<f32>(input[idx1], input[idx1 + 1u]);
-  let angle: f32 = -6.28318530718 * f32(pos) / f32(m);
-  let w: vec2<f32> = vec2<f32>(cos(angle), sin(angle));
-  let b_twiddled: vec2<f32> = vec2<f32>(
+  
+  // Use precomputed twiddle factors
+  let twiddle_stride: u32 = n / m;
+  let twiddle_idx: u32 = pos * twiddle_stride * 2u;
+  let w: vec2<f32> = vec2<f32>(twiddles[twiddle_idx], twiddles[twiddle_idx + 1u]);
+  
+  // Complex multiplication: b * w
+  let b_w: vec2<f32> = vec2<f32>(
     b.x * w.x - b.y * w.y,
     b.x * w.y + b.y * w.x
   );
-  let temp1: vec2<f32> = a + b_twiddled;
-  let temp2: vec2<f32> = a - b_twiddled;
-  output[idx0] = temp1.x;
-  output[idx0 + 1u] = temp1.y;
-  output[idx1] = temp2.x;
-  output[idx1 + 1u] = temp2.y;
+  
+  // Butterfly operation
+  let result1: vec2<f32> = a + b_w;
+  let result2: vec2<f32> = a - b_w;
+  
+  // Store results
+  output[idx0] = result1.x;
+  output[idx0 + 1u] = result1.y;
+  output[idx1] = result2.x;
+  output[idx1 + 1u] = result2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'half': half,
-        'm': m,
-        'numOperations': numOperations,
-      });
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('input', ping.buffer);
-      shader.setBuffer('output', pong.buffer);
+    if (activeShader?.shaderCode != shaderTemplate) {
+      print("Creating new compute shader for FFT1D");
+      activeShader = gpu.createComputeShader();
+      activeShader!.loadKernelString(shaderTemplate);
+    }
+
+    final Buffer paramBuffer = gpu.createBuffer(16, BufferDataType.uint32);
+
+    for (int s = 0; s < stages; s++) {
+      int m = 1 << (s + 1);
+      int half = m >> 1;
+
+      final params = Uint32List(4);
+      params[0] = s; // stage
+      params[1] = n; // n
+      params[2] = m; // m
+      params[3] = half; // half
+      await paramBuffer.write(
+        params,
+        params.length,
+        dataType: BufferDataType.uint32,
+      );
+
+      activeShader!.setBuffer('input', ping.buffer);
+      activeShader!.setBuffer('output', pong.buffer);
+      activeShader!.setBuffer('params', paramBuffer);
+      activeShader!.setBuffer('twiddles', twiddleBuffer);
+
+      int numOperations = n >> 1;
       int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await activeShader!.dispatch(workgroups, 1, 1);
 
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
+
+    paramBuffer.destroy();
+    twiddleBuffer.destroy();
+    if (bitReversed != this) {
+      //  bitReversed.destroy();
+    }
+    pong.destroy();
 
     return ping;
   }

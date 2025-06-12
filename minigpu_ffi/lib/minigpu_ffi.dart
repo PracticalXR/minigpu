@@ -225,7 +225,7 @@ final class FfiBuffer implements PlatformBuffer {
       switch (dataType) {
         case BufferDataType.int8:
           {
-            ffi.mgpuReadBufferAsyncInt8(
+            ffi.mgpuReadAsyncInt8(
               _self,
               nativePtr.cast<Int8>(),
               elementsToRead,
@@ -251,7 +251,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int16:
           {
-            ffi.mgpuReadBufferAsyncInt16(
+            ffi.mgpuReadAsyncInt16(
               _self,
               nativePtr.cast<Int16>(),
               elementsToRead, // Pass ELEMENT count
@@ -278,7 +278,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int32:
           {
-            ffi.mgpuReadBufferAsyncInt32(
+            ffi.mgpuReadAsyncInt32(
               _self,
               nativePtr.cast<Int32>(),
               elementsToRead, // Pass ELEMENT count
@@ -305,7 +305,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int64:
           {
-            ffi.mgpuReadBufferAsyncInt64(
+            ffi.mgpuReadAsyncInt64(
               _self,
               nativePtr.cast<Int64>(),
               elementsToRead, // Pass ELEMENT count
@@ -332,7 +332,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint8:
           {
-            ffi.mgpuReadBufferAsyncUint8(
+            ffi.mgpuReadAsyncUint8(
               _self,
               nativePtr.cast<Uint8>(),
               elementsToRead, // ELEMENT count
@@ -355,7 +355,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint16:
           {
-            ffi.mgpuReadBufferAsyncUint16(
+            ffi.mgpuReadAsyncUint16(
               _self,
               nativePtr.cast<Uint16>(),
               elementsToRead, // Pass ELEMENT count
@@ -382,7 +382,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint32:
           {
-            ffi.mgpuReadBufferAsyncUint32(
+            ffi.mgpuReadAsyncUint32(
               _self,
               nativePtr.cast<Uint32>(),
               elementsToRead, // Pass ELEMENT count
@@ -409,7 +409,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint64:
           {
-            ffi.mgpuReadBufferAsyncUint64(
+            ffi.mgpuReadAsyncUint64(
               _self,
               nativePtr.cast<Uint64>(),
               elementsToRead, // ELEMENT count
@@ -440,7 +440,7 @@ final class FfiBuffer implements PlatformBuffer {
           );
         case BufferDataType.float32:
           {
-            ffi.mgpuReadBufferAsyncFloat(
+            ffi.mgpuReadAsyncFloat(
               _self,
               nativePtr.cast<Float>(),
               elementsToRead,
@@ -467,7 +467,7 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.float64:
           {
-            ffi.mgpuReadBufferAsyncDouble(
+            ffi.mgpuReadAsyncDouble(
               _self,
               nativePtr.cast<Double>(),
               elementsToRead, // Pass ELEMENT count
@@ -500,11 +500,11 @@ final class FfiBuffer implements PlatformBuffer {
   }
 
   @override
-  void setData(
+  Future<void> write(
     TypedData inputData,
     int elementCount, {
     BufferDataType dataType = BufferDataType.float32,
-  }) {
+  }) async {
     // Determine element size based on data type.
     final int elementSize;
     switch (dataType) {
@@ -543,7 +543,7 @@ final class FfiBuffer implements PlatformBuffer {
         break;
     }
     if (elementSize == 0) {
-      throw ArgumentError('Unsupported BufferDataType for setData: $dataType');
+      throw ArgumentError('Unsupported BufferDataType for write: $dataType');
     }
 
     // --- Input Validation ---
@@ -639,54 +639,38 @@ final class FfiBuffer implements PlatformBuffer {
       // Switch to call the proper native function
       switch (dataType) {
         case BufferDataType.int8:
-          ffi.mgpuSetBufferDataInt8(_self, nativePtr.cast<Int8>(), byteSize);
+          ffi.mgpuWriteInt8(_self, nativePtr.cast<Int8>(), byteSize);
           break;
         case BufferDataType.int16:
-          ffi.mgpuSetBufferDataInt16(_self, nativePtr.cast<Int16>(), byteSize);
+          ffi.mgpuWriteInt16(_self, nativePtr.cast<Int16>(), byteSize);
           break;
         case BufferDataType.int32:
-          ffi.mgpuSetBufferDataInt32(_self, nativePtr.cast<Int32>(), byteSize);
+          ffi.mgpuWriteInt32(_self, nativePtr.cast<Int32>(), byteSize);
           break;
         case BufferDataType.int64:
-          ffi.mgpuSetBufferDataInt64(_self, nativePtr.cast<Int64>(), byteSize);
+          ffi.mgpuWriteInt64(_self, nativePtr.cast<Int64>(), byteSize);
           break;
         case BufferDataType.uint8:
-          ffi.mgpuSetBufferDataUint8(_self, nativePtr.cast<Uint8>(), byteSize);
+          ffi.mgpuWriteUint8(_self, nativePtr.cast<Uint8>(), byteSize);
           break;
         case BufferDataType.uint16:
-          ffi.mgpuSetBufferDataUint16(
-            _self,
-            nativePtr.cast<Uint16>(),
-            byteSize,
-          );
+          ffi.mgpuWriteUint16(_self, nativePtr.cast<Uint16>(), byteSize);
           break;
         case BufferDataType.uint32:
-          ffi.mgpuSetBufferDataUint32(
-            _self,
-            nativePtr.cast<Uint32>(),
-            byteSize,
-          );
+          ffi.mgpuWriteUint32(_self, nativePtr.cast<Uint32>(), byteSize);
           break;
         case BufferDataType.uint64:
-          ffi.mgpuSetBufferDataUint64(
-            _self,
-            nativePtr.cast<Uint64>(),
-            byteSize,
-          );
+          ffi.mgpuWriteUint64(_self, nativePtr.cast<Uint64>(), byteSize);
           break;
         case BufferDataType.float16:
           throw UnimplementedError(
-            'BufferDataType.float16 setData is not implemented yet.',
+            'BufferDataType.float16 write is not implemented yet.',
           );
         case BufferDataType.float32:
-          ffi.mgpuSetBufferDataFloat(_self, nativePtr.cast<Float>(), byteSize);
+          ffi.mgpuWriteFloat(_self, nativePtr.cast<Float>(), byteSize);
           break;
         case BufferDataType.float64:
-          ffi.mgpuSetBufferDataDouble(
-            _self,
-            nativePtr.cast<Double>(),
-            byteSize,
-          );
+          ffi.mgpuWriteDouble(_self, nativePtr.cast<Double>(), byteSize);
           break;
       }
     } finally {

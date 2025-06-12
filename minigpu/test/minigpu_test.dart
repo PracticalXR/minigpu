@@ -22,9 +22,10 @@ void main() {
 
       // Create a buffer and set known data.
       final buffer = minigpu.createBuffer(memorySize, BufferDataType.float32);
-      final inputData =
-          Float32List.fromList(List.generate(bufferSize, (i) => i.toDouble()));
-      buffer.setData(inputData, bufferSize);
+      final inputData = Float32List.fromList(
+        List.generate(bufferSize, (i) => i.toDouble()),
+      );
+      buffer.write(inputData, bufferSize);
 
       // Read back the data.
       final outputData = Float32List(bufferSize);
@@ -42,18 +43,24 @@ void main() {
       final int memorySize = numFloats * 4;
 
       // Create input and output buffers.
-      final inputBuffer =
-          minigpu.createBuffer(memorySize, BufferDataType.float32);
-      final outputBuffer =
-          minigpu.createBuffer(memorySize, BufferDataType.float32);
+      final inputBuffer = minigpu.createBuffer(
+        memorySize,
+        BufferDataType.float32,
+      );
+      final outputBuffer = minigpu.createBuffer(
+        memorySize,
+        BufferDataType.float32,
+      );
 
       // Initialize input data.
-      final inputData =
-          Float32List.fromList(List.generate(numFloats, (i) => i.toDouble()));
-      inputBuffer.setData(inputData, numFloats);
+      final inputData = Float32List.fromList(
+        List.generate(numFloats, (i) => i.toDouble()),
+      );
+      inputBuffer.write(inputData, numFloats);
 
       // WGSL shader code which adds 0.2 to each input element.
-      final shaderCode = '''
+      final shaderCode =
+          '''
 const GELU_SCALING_FACTOR: f32 = 0.7978845608028654;
 @group(0) @binding(0) var<storage, read_write> inp: array<f32>;
 @group(0) @binding(1) var<storage, read_write> out: array<f32>;

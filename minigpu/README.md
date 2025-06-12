@@ -117,7 +117,7 @@ fn main(
   final outputBuffer = gpu.createBuffer(bufferSize, memSize);
 
 // Upload the input data.
-  inputBuffer.setData(inputData, bufferSize);
+ await inputBuffer.write(inputData, bufferSize);
 
 // Bind the buffers to the shader.
   shader.setBuffer('inp', inputBuffer);

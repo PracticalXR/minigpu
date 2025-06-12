@@ -157,7 +157,7 @@ abstract class PlatformBuffer {
     int byteOffset = 0,
     BufferDataType dataType = BufferDataType.float32,
   });
-  void setData(
+  Future<void> write(
     TypedData inputData,
     int size, {
     BufferDataType dataType = BufferDataType.float32,

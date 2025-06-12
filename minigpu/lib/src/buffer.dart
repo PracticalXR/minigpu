@@ -37,17 +37,17 @@ final class Buffer {
 
   /// Writes data to the buffer.
   /// Throws an error if the buffer has been destroyed.
-  void setData(
+  Future<void> write(
     TypedData inputData,
     int size, {
     // Note: This 'size' likely means element count based on previous context
     BufferDataType dataType = BufferDataType.float32,
-  }) {
+  }) async {
     if (!isValid) {
       throw StateError('Cannot write to a destroyed buffer.');
     }
     // Use the null assertion operator (!)
-    _platformBuffer!.setData(
+    await _platformBuffer!.write(
       inputData,
       size, // Pass element count
       dataType: dataType,

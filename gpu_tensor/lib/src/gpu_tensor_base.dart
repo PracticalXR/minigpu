@@ -44,6 +44,8 @@ class Tensor<T extends TypedData> {
   /// The underlying data type.
   final BufferDataType dataType;
 
+  ComputeShader? activeShader;
+
   // Private constructor.
   Tensor._(
     this.shape, {
@@ -60,29 +62,29 @@ class Tensor<T extends TypedData> {
           "Provided data length (${data.lengthInBytes ~/ _elementSize(dataType)}) does not match tensor size ($size)",
         );
       }
-      buffer.setData(data, size, dataType: dataType);
+      buffer.write(data, size, dataType: dataType);
     } else {
       // Initialize with zeros.
       if (T == TypedData) {
-        buffer.setData(Float32List(size), size, dataType: dataType);
+        buffer.write(Float32List(size), size, dataType: dataType);
       } else if (T == Int8List) {
-        buffer.setData(Int8List(size), size, dataType: dataType);
+        buffer.write(Int8List(size), size, dataType: dataType);
       } else if (T == Int16List) {
-        buffer.setData(Int16List(size), size, dataType: dataType);
+        buffer.write(Int16List(size), size, dataType: dataType);
       } else if (T == Int32List) {
-        buffer.setData(Int32List(size), size, dataType: dataType);
+        buffer.write(Int32List(size), size, dataType: dataType);
       } else if (T == Int64List) {
-        buffer.setData(Int64List(size), size, dataType: dataType);
+        buffer.write(Int64List(size), size, dataType: dataType);
       } else if (T == Uint8List) {
-        buffer.setData(Uint8List(size), size, dataType: dataType);
+        buffer.write(Uint8List(size), size, dataType: dataType);
       } else if (T == Uint16List) {
-        buffer.setData(Uint16List(size), size, dataType: dataType);
+        buffer.write(Uint16List(size), size, dataType: dataType);
       } else if (T == Uint32List) {
-        buffer.setData(Uint32List(size), size, dataType: dataType);
+        buffer.write(Uint32List(size), size, dataType: dataType);
       } else if (T == Float32List) {
-        buffer.setData(Float32List(size), size, dataType: dataType);
+        buffer.write(Float32List(size), size, dataType: dataType);
       } else if (T == Float64List) {
-        buffer.setData(Float64List(size), size, dataType: dataType);
+        buffer.write(Float64List(size), size, dataType: dataType);
       } else {
         throw Exception("Unsupported TypedData type: ${T.toString()}");
       }
@@ -134,8 +136,8 @@ class Tensor<T extends TypedData> {
   }
 
   /// Writes [data] of type T to the GPU buffer.
-  void setData(T data) {
-    buffer.setData(data, size, dataType: dataType);
+  Future<void> write(T data) async {
+    await buffer.write(data, size, dataType: dataType);
   }
 
   /// Destroys the tensor's GPU buffer.

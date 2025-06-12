@@ -12,10 +12,10 @@ Future<void> main() async {
 
       // Generate test signal
       for (int i = 0; i < 1024; i++) {
-        testData[i] = math.sin(2 * math.pi * i / 64).toFloat();
+        testData[i] = math.sin(2 * math.pi * i / 64).toDouble();
       }
 
-      tensor.buffer.setData(
+      await tensor.buffer.write(
         testData,
         testData.length,
         dataType: BufferDataType.float32,
@@ -51,13 +51,13 @@ Future<void> main() async {
 
       // Create test signal
       for (int i = 0; i < fftSize; i++) {
-        testData[i] = math.sin(2 * math.pi * i / 64).toFloat();
+        testData[i] = math.sin(2 * math.pi * i / 64).toDouble();
       }
 
       // Create multiple tensors (simulating multiple audio streams)
       for (int i = 0; i < numStreams; i++) {
         final tensor = await Tensor.create([fftSize]);
-        tensor.buffer.setData(
+        await tensor.buffer.write(
           testData,
           testData.length,
           dataType: BufferDataType.float32,
@@ -102,10 +102,10 @@ Future<void> main() async {
       final testData = Float32List(fftSize);
 
       for (int i = 0; i < fftSize; i++) {
-        testData[i] = math.sin(2 * math.pi * i / 256).toFloat();
+        testData[i] = math.sin(2 * math.pi * i / 256).toDouble();
       }
 
-      tensor.buffer.setData(
+      await tensor.buffer.write(
         testData,
         testData.length,
         dataType: BufferDataType.float32,
@@ -136,10 +136,10 @@ Future<void> main() async {
       final testData = Float32List(1024);
 
       for (int i = 0; i < 1024; i++) {
-        testData[i] = math.sin(2 * math.pi * i / 64).toFloat();
+        testData[i] = math.sin(2 * math.pi * i / 64).toDouble();
       }
 
-      tensor.buffer.setData(
+      await tensor.buffer.write(
         testData,
         testData.length,
         dataType: BufferDataType.float32,

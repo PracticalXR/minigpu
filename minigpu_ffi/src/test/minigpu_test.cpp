@@ -1,5 +1,7 @@
 #include "../include/minigpu.h"
 #include <iostream>
+#include <cassert>
+
 
 void testCreateContext() {
   std::cout << "Testing context creation..." << std::endl;
@@ -10,7 +12,7 @@ void testCreateContext() {
 
 void testCreateBuffer() {
   std::cout << "Testing buffer creation (1024 bytes)..." << std::endl;
-  MGPUBuffer *buffer = mgpuCreateBuffer(1024, gpu::kf32);
+  MGPUBuffer *buffer = mgpuCreateBuffer(1024, 1); // Use numeric value for kf32
   if (buffer) {
     std::cout << "Buffer created successfully." << std::endl;
     mgpuDestroyBuffer(buffer);
@@ -48,9 +50,9 @@ void testComputeShader() {
   // Create buffers for 100 floats.
   const int numFloats = 100;
   MGPUBuffer *inpBuffer =
-      mgpuCreateBuffer(numFloats * sizeof(float), gpu::kf32);
+      mgpuCreateBuffer(numFloats * sizeof(float), 1); // kf32 = 1
   MGPUBuffer *outBuffer =
-      mgpuCreateBuffer(numFloats * sizeof(float), gpu::kf32);
+      mgpuCreateBuffer(numFloats * sizeof(float), 1); // kf32 = 1
   if (!inpBuffer || !outBuffer) {
     std::cerr << "Failed to create one or more buffers." << std::endl;
     mgpuDestroyComputeShader(shader);
@@ -63,7 +65,7 @@ void testComputeShader() {
     inputData[i] = static_cast<float>(i);
   }
   // Use the API call to set buffer data.
-  mgpuSetBufferDataFloat(inpBuffer, inputData, numFloats * sizeof(float));
+  mgpuWriteFloat(inpBuffer, inputData, numFloats * sizeof(float));
 
   // Set buffers on the shader.
   // Here tag '0' for the input buffer and tag '1' for the output buffer.
@@ -76,7 +78,7 @@ void testComputeShader() {
 
   // Read the output data synchronously.
   float outputData[numFloats] = {0};
-  mgpuReadBufferSync(outBuffer, outputData, numFloats * sizeof(float), 0);
+  mgpuReadSync(outBuffer, outputData, numFloats * sizeof(float), 0);
 
   // Print output for verification.
   std::cout << "Buffer input values + 0.2 (expected results):" << std::endl;
@@ -100,18 +102,18 @@ void testUint8() {
   std::cout << "Testing uint8 buffer..." << std::endl;
   const int numElements = 10;
   // Create a buffer with 10 bytes.
-  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, gpu::ku8);
+  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, 7); // ku8 = 7
   assert(buffer && "Failed to create uint8 buffer");
 
   // Create input data (uint8_t).
   uint8_t inputData[numElements] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
 
   // Set data for the uint8 buffer.
-  mgpuSetBufferDataUint8(buffer, inputData, numElements);
+  mgpuWriteUint8(buffer, inputData, numElements);
 
   // Read back data.
   uint8_t outputData[numElements] = {0};
-  mgpuReadBufferSyncUint8(buffer, outputData, numElements, 0);
+  mgpuReadSyncUint8(buffer, outputData, numElements, 0);
 
   // Validate that the output data matches the input.
   if (memcmp(inputData, outputData, numElements) != 0) {
@@ -126,33 +128,41 @@ void testInt8() {
   std::cout << "Testing int8 buffer..." << std::endl;
   const int numElements = 10;
   // Create a buffer with 10 bytes.
-  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, gpu::ki8);
+  MGPUBuffer *buffer = mgpuCreateBuffer(numElements, 3); // ki8 = 3
   assert(buffer && "Failed to create int8 buffer");
 
   // Create input data (int8_t).
   int8_t inputData[numElements] = {-1, -2, -3, -4, -5, -6, -7, -8, -9, -10};
 
   // Set data for the int8 buffer.
-  mgpuSetBufferDataInt8(buffer, inputData, numElements);
+  mgpuWriteInt8(buffer, inputData, numElements);
 
   // Read back data.
   int8_t outputData[numElements] = {0};
-  mgpuReadBufferSyncInt8(buffer, outputData, numElements, 0);
+  mgpuReadSyncInt8(buffer, outputData, numElements, 0);
+
+  // Validate that the output data matches the input.
+  if (memcmp(inputData, outputData, numElements) != 0) {
+    std::cerr << "Int8 test failed: output does not match input." << std::endl;
+    exit(1);
+  }
+  std::cout << "Int8 test passed." << std::endl;
+  mgpuDestroyBuffer(buffer);
 }
 
 void testInt16() {
   std::cout << "Testing int16 buffer..." << std::endl;
   const int numElements = 10;
   MGPUBuffer *buffer = mgpuCreateBuffer(numElements * sizeof(int16_t),
-                                        3); // ki8 = 3, but we need ki16 = 4
+                                        4); // ki16 = 4
   assert(buffer && "Failed to create int16 buffer");
 
   int16_t inputData[numElements] = {-100, -200, -300, -400, -500,
                                     600,  700,  800,  900,  1000};
-  mgpuSetBufferDataInt16(buffer, inputData, numElements * sizeof(int16_t));
+  mgpuWriteInt16(buffer, inputData, numElements * sizeof(int16_t));
 
   int16_t outputData[numElements] = {0};
-  mgpuReadBufferSyncInt16(buffer, outputData, numElements, 0);
+  mgpuReadSyncInt16(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(int16_t)) != 0) {
     std::cerr << "Int16 test failed: output does not match input." << std::endl;
@@ -171,10 +181,10 @@ void testUint16() {
 
   uint16_t inputData[numElements] = {100, 200, 300, 400, 500,
                                      600, 700, 800, 900, 1000};
-  mgpuSetBufferDataUint16(buffer, inputData, numElements * sizeof(uint16_t));
+  mgpuWriteUint16(buffer, inputData, numElements * sizeof(uint16_t));
 
   uint16_t outputData[numElements] = {0};
-  mgpuReadBufferSyncUint16(buffer, outputData, numElements, 0);
+  mgpuReadSyncUint16(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(uint16_t)) != 0) {
     std::cerr << "Uint16 test failed: output does not match input."
@@ -194,10 +204,10 @@ void testInt32() {
 
   int32_t inputData[numElements] = {-1000, -2000, -3000, -4000, -5000,
                                     6000,  7000,  8000,  9000,  10000};
-  mgpuSetBufferDataInt32(buffer, inputData, numElements * sizeof(int32_t));
+  mgpuWriteInt32(buffer, inputData, numElements * sizeof(int32_t));
 
   int32_t outputData[numElements] = {0};
-  mgpuReadBufferSyncInt32(buffer, outputData, numElements, 0);
+  mgpuReadSyncInt32(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(int32_t)) != 0) {
     std::cerr << "Int32 test failed: output does not match input." << std::endl;
@@ -216,10 +226,10 @@ void testUint32() {
 
   uint32_t inputData[numElements] = {1000, 2000, 3000, 4000, 5000,
                                      6000, 7000, 8000, 9000, 10000};
-  mgpuSetBufferDataUint32(buffer, inputData, numElements * sizeof(uint32_t));
+  mgpuWriteUint32(buffer, inputData, numElements * sizeof(uint32_t));
 
   uint32_t outputData[numElements] = {0};
-  mgpuReadBufferSyncUint32(buffer, outputData, numElements, 0);
+  mgpuReadSyncUint32(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(uint32_t)) != 0) {
     std::cerr << "Uint32 test failed: output does not match input."
@@ -240,10 +250,10 @@ void testInt64() {
   int64_t inputData[numElements] = {-100000, -200000, -300000, -400000,
                                     -500000, 600000,  700000,  800000,
                                     900000,  1000000};
-  mgpuSetBufferDataInt64(buffer, inputData, numElements * sizeof(int64_t));
+  mgpuWriteInt64(buffer, inputData, numElements * sizeof(int64_t));
 
   int64_t outputData[numElements] = {0};
-  mgpuReadBufferSyncInt64(buffer, outputData, numElements, 0);
+  mgpuReadSyncInt64(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(int64_t)) != 0) {
     std::cerr << "Int64 test failed: output does not match input." << std::endl;
@@ -262,10 +272,10 @@ void testUint64() {
 
   uint64_t inputData[numElements] = {100000, 200000, 300000, 400000, 500000,
                                      600000, 700000, 800000, 900000, 1000000};
-  mgpuSetBufferDataUint64(buffer, inputData, numElements * sizeof(uint64_t));
+  mgpuWriteUint64(buffer, inputData, numElements * sizeof(uint64_t));
 
   uint64_t outputData[numElements] = {0};
-  mgpuReadBufferSyncUint64(buffer, outputData, numElements, 0);
+  mgpuReadSyncUint64(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(uint64_t)) != 0) {
     std::cerr << "Uint64 test failed: output does not match input."
@@ -285,10 +295,10 @@ void testFloat32() {
 
   float inputData[numElements] = {1.1f, 2.2f, 3.3f, 4.4f, 5.5f,
                                   6.6f, 7.7f, 8.8f, 9.9f, 10.0f};
-  mgpuSetBufferDataFloat(buffer, inputData, numElements * sizeof(float));
+  mgpuWriteFloat(buffer, inputData, numElements * sizeof(float));
 
   float outputData[numElements] = {0};
-  mgpuReadBufferSyncFloat32(buffer, outputData, numElements, 0);
+  mgpuReadSyncFloat32(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(float)) != 0) {
     std::cerr << "Float32 test failed: output does not match input."
@@ -308,10 +318,10 @@ void testFloat64() {
 
   double inputData[numElements] = {1.1, 2.2, 3.3, 4.4, 5.5,
                                    6.6, 7.7, 8.8, 9.9, 10.0};
-  mgpuSetBufferDataDouble(buffer, inputData, numElements * sizeof(double));
+  mgpuWriteDouble(buffer, inputData, numElements * sizeof(double));
 
   double outputData[numElements] = {0};
-  mgpuReadBufferSyncFloat64(buffer, outputData, numElements, 0);
+  mgpuReadSyncFloat64(buffer, outputData, numElements, 0);
 
   if (memcmp(inputData, outputData, numElements * sizeof(double)) != 0) {
     std::cerr << "Float64 test failed: output does not match input."

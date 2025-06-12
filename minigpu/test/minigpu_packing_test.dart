@@ -20,17 +20,25 @@ void main() {
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
-          byteSize, BufferDataType.float32); // Pass physical size
+        byteSize,
+        BufferDataType.float32,
+      ); // Pass physical size
 
       final Float32List input = Float32List.fromList(
         List.generate(count, (i) => i.toDouble() * 1.1),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.float32); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.float32,
+      ); // Pass element count
 
       final Float32List output = Float32List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.float32); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.float32,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -40,17 +48,25 @@ void main() {
       final int count = 17;
       // For i8, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
-          count, BufferDataType.int8); // Pass logical count
+        count,
+        BufferDataType.int8,
+      ); // Pass logical count
 
       final Int8List input = Int8List.fromList(
         List.generate(count, (i) => (i % 256) - 128),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.int8); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.int8,
+      ); // Pass element count
 
       final Int8List output = Int8List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.int8); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.int8,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -60,17 +76,25 @@ void main() {
       final int count = 17;
       // For i16, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
-          count, BufferDataType.int16); // Pass logical count
+        count,
+        BufferDataType.int16,
+      ); // Pass logical count
 
       final Int16List input = Int16List.fromList(
         List.generate(count, (i) => (i * 100) - 15000),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.int16); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.int16,
+      ); // Pass element count
 
       final Int16List output = Int16List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.int16); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.int16,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -80,17 +104,25 @@ void main() {
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int32); // Pass physical size
+        byteSize,
+        BufferDataType.int32,
+      ); // Pass physical size
 
       final Int32List input = Int32List.fromList(
         List.generate(count, (i) => (i * 100000) - 500000),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.int32); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.int32,
+      ); // Pass element count
 
       final Int32List output = Int32List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.int32); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.int32,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -100,17 +132,25 @@ void main() {
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int64); // Pass physical size
+        byteSize,
+        BufferDataType.int64,
+      ); // Pass physical size
 
       final Int64List input = Int64List.fromList(
         List.generate(count, (i) => (i - 8) * 0x100000000 + i),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.int64); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.int64,
+      ); // Pass element count
 
       final Int64List output = Int64List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.int64); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.int64,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -120,17 +160,25 @@ void main() {
       final int count = 17;
       // For u8, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
-          count, BufferDataType.uint8); // Pass logical count
+        count,
+        BufferDataType.uint8,
+      ); // Pass logical count
 
       final Uint8List input = Uint8List.fromList(
         List.generate(count, (i) => i % 256),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.uint8); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.uint8,
+      ); // Pass element count
 
       final Uint8List output = Uint8List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.uint8); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.uint8,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -140,17 +188,25 @@ void main() {
       final int count = 17;
       // For u16, createBuffer expects logical element count
       final buffer = minigpu.createBuffer(
-          count, BufferDataType.uint16); // Pass logical count
+        count,
+        BufferDataType.uint16,
+      ); // Pass logical count
 
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => (i * 100) % 65536),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.uint16); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.uint16,
+      ); // Pass element count
 
       final Uint16List output = Uint16List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.uint16); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.uint16,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -160,17 +216,25 @@ void main() {
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint32); // Pass physical size
+        byteSize,
+        BufferDataType.uint32,
+      ); // Pass physical size
 
       final Uint32List input = Uint32List.fromList(
         List.generate(count, (i) => (i + 1) * 100000),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.uint32); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.uint32,
+      ); // Pass element count
 
       final Uint32List output = Uint32List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.uint32); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.uint32,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -180,17 +244,25 @@ void main() {
       final int count = 16;
       final int byteSize = count * Uint64List.bytesPerElement; // Physical size
       final buffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint64); // Pass physical size
+        byteSize,
+        BufferDataType.uint64,
+      ); // Pass physical size
 
       final Uint64List input = Uint64List.fromList(
         List.generate(count, (i) => i * 0x100000000 + i),
       );
-      buffer.setData(input, count,
-          dataType: BufferDataType.uint64); // Pass element count
+      buffer.write(
+        input,
+        count,
+        dataType: BufferDataType.uint64,
+      ); // Pass element count
 
       final Uint64List output = Uint64List(count);
-      await buffer.read(output, count,
-          dataType: BufferDataType.uint64); // Pass element count
+      await buffer.read(
+        output,
+        count,
+        dataType: BufferDataType.uint64,
+      ); // Pass element count
 
       expect(output, equals(input));
       buffer.destroy();
@@ -213,13 +285,18 @@ void main() {
       final int count = 16;
       final int byteSize = count * Float32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.float32); // Pass physical size
+        byteSize,
+        BufferDataType.float32,
+      ); // Pass physical size
       final outputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.float32); // Pass physical size
+        byteSize,
+        BufferDataType.float32,
+      ); // Pass physical size
 
       final Float32List input = Float32List.fromList(
-          List.generate(count, (i) => i.toDouble() * 1.1, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.float32);
+        List.generate(count, (i) => i.toDouble() * 1.1, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.float32);
 
       final String shaderCode = '''
         @group(0) @binding(0) var<storage, read_write> inp: array<f32>;
@@ -257,10 +334,14 @@ void main() {
       final inputBuffer = minigpu.createBuffer(count, BufferDataType.float64);
       final outputBuffer = minigpu.createBuffer(count, BufferDataType.float64);
 
-      final Float64List input = Float64List.fromList(List.generate(
-          count, (i) => i.toDouble() * 1.23456789e10,
-          growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.float64);
+      final Float64List input = Float64List.fromList(
+        List.generate(
+          count,
+          (i) => i.toDouble() * 1.23456789e10,
+          growable: false,
+        ),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.float64);
 
       // Shader operates on the internal u32 pairs representation
       final int internalElementCount = count * 2; // u32 count
@@ -298,13 +379,18 @@ void main() {
       final int count = 7;
       // For i8, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
-          count, BufferDataType.int8); // Pass logical count
+        count,
+        BufferDataType.int8,
+      ); // Pass logical count
       final outputBuffer = minigpu.createBuffer(
-          count, BufferDataType.int8); // Pass logical count
+        count,
+        BufferDataType.int8,
+      ); // Pass logical count
 
       final Int8List input = Int8List.fromList(
-          List.generate(count, (i) => (i % 256) - 128, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.int8);
+        List.generate(count, (i) => (i % 256) - 128, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.int8);
 
       // Shader operates on internal i32 representation
       final int internalElementCount =
@@ -343,13 +429,18 @@ void main() {
       final int count = 17;
       // For i16, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
-          count, BufferDataType.int16); // Pass logical count
+        count,
+        BufferDataType.int16,
+      ); // Pass logical count
       final outputBuffer = minigpu.createBuffer(
-          count, BufferDataType.int16); // Pass logical count
+        count,
+        BufferDataType.int16,
+      ); // Pass logical count
 
       final Int16List input = Int16List.fromList(
-          List.generate(count, (i) => (i * 100) - 15000, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.int16);
+        List.generate(count, (i) => (i * 100) - 15000, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.int16);
 
       final String shaderCode = '''
         @group(0) @binding(0) var<storage, read_write> inp: array<i32>;
@@ -385,13 +476,18 @@ void main() {
       final int count = 16;
       final int byteSize = count * Int32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int32); // Pass physical size
+        byteSize,
+        BufferDataType.int32,
+      ); // Pass physical size
       final outputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int32); // Pass physical size
+        byteSize,
+        BufferDataType.int32,
+      ); // Pass physical size
 
       final Int32List input = Int32List.fromList(
-          List.generate(count, (i) => (i * 100000) - 500000, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.int32);
+        List.generate(count, (i) => (i * 100000) - 500000, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.int32);
 
       // Shader operates directly on i32
       final String shaderCode = '''
@@ -428,14 +524,18 @@ void main() {
       final int count = 16;
       final int byteSize = count * Int64List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int64); // Pass physical size
+        byteSize,
+        BufferDataType.int64,
+      ); // Pass physical size
       final outputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.int64); // Pass physical size
+        byteSize,
+        BufferDataType.int64,
+      ); // Pass physical size
 
-      final Int64List input = Int64List.fromList(List.generate(
-          count, (i) => (i - 8) * 0x100000000 + i,
-          growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.int64);
+      final Int64List input = Int64List.fromList(
+        List.generate(count, (i) => (i - 8) * 0x100000000 + i, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.int64);
 
       final String shaderCode = '''
         @group(0) @binding(0) var<storage, read_write> inp: array<i32>;
@@ -471,13 +571,18 @@ void main() {
       final int count = 17;
       // For u8, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
-          count, BufferDataType.uint8); // Pass logical count
+        count,
+        BufferDataType.uint8,
+      ); // Pass logical count
       final outputBuffer = minigpu.createBuffer(
-          count, BufferDataType.uint8); // Pass logical count
+        count,
+        BufferDataType.uint8,
+      ); // Pass logical count
 
       final Uint8List input = Uint8List.fromList(
-          List.generate(count, (i) => i % 256, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.uint8);
+        List.generate(count, (i) => i % 256, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.uint8);
 
       // Shader operates on internal u32 representation
       final int internalElementCount =
@@ -516,18 +621,24 @@ void main() {
       final int count = 17;
       // For u16, createBuffer expects logical element count
       final inputBuffer = minigpu.createBuffer(
-          count, BufferDataType.uint16); // Pass logical count
+        count,
+        BufferDataType.uint16,
+      ); // Pass logical count
       final outputBuffer = minigpu.createBuffer(
-          count, BufferDataType.uint16); // Pass logical count
+        count,
+        BufferDataType.uint16,
+      ); // Pass logical count
 
       final Uint16List input = Uint16List.fromList(
-          List.generate(count, (i) => (i * 100) % 65536, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.uint16);
+        List.generate(count, (i) => (i * 100) % 65536, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.uint16);
 
       // Shader operates on internal u32 representation
       final int internalElementCount =
           count; // u32 count matches logical u16 count
-      final String shaderCode = '''
+      final String shaderCode =
+          '''
         @group(0) @binding(0) var<storage, read_write> inp: array<u32>;
         @group(0) @binding(1) var<storage, read_write> out: array<u32>;
 
@@ -562,16 +673,22 @@ void main() {
       final int count = 16;
       final int byteSize = count * Uint32List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint32); // Pass physical size
+        byteSize,
+        BufferDataType.uint32,
+      ); // Pass physical size
       final outputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint32); // Pass physical size
+        byteSize,
+        BufferDataType.uint32,
+      ); // Pass physical size
 
       final Uint32List input = Uint32List.fromList(
-          List.generate(count, (i) => (i + 1) * 100000, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.uint32);
+        List.generate(count, (i) => (i + 1) * 100000, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.uint32);
 
       // Shader operates directly on u32
-      final String shaderCode = '''
+      final String shaderCode =
+          '''
         @group(0) @binding(0) var<storage, read_write> inp: array<u32>;
         @group(0) @binding(1) var<storage, read_write> out: array<u32>;
 
@@ -606,13 +723,18 @@ void main() {
       final int count = 16;
       final int byteSize = count * Uint64List.bytesPerElement; // Physical size
       final inputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint64); // Pass physical size
+        byteSize,
+        BufferDataType.uint64,
+      ); // Pass physical size
       final outputBuffer = minigpu.createBuffer(
-          byteSize, BufferDataType.uint64); // Pass physical size
+        byteSize,
+        BufferDataType.uint64,
+      ); // Pass physical size
 
       final Uint64List input = Uint64List.fromList(
-          List.generate(count, (i) => i * 0x100000000 + i, growable: false));
-      inputBuffer.setData(input, count, dataType: BufferDataType.uint64);
+        List.generate(count, (i) => i * 0x100000000 + i, growable: false),
+      );
+      inputBuffer.write(input, count, dataType: BufferDataType.uint64);
 
       final String shaderCode = '''
         @group(0) @binding(0) var<storage, read_write> inp: array<u32>;

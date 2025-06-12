@@ -8,7 +8,7 @@ void main() {
     test('Tensor with type Uint8List and nonzero input', () async {
       final shape = [2, 5];
 
-      // Provide nonzero data to check that FFI setData works.
+      // Provide nonzero data to check that FFI write works.
       final input = Int8List.fromList([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       Tensor<Int8List> tensor = await Tensor.create<Int8List>(
         shape,

@@ -17,7 +17,6 @@ endif()
 
 # Include Additional CMake Modules
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/dawn.cmake")
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/gpu.cmake")
 
 # Define Main Target Names and Paths
 if(NOT EMSCRIPTEN)
@@ -56,18 +55,32 @@ if(EMSCRIPTEN)
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
     if(EMSCRIPTEN_DEBUG)
         set(DEBUG_FLAGS "\
-            -g3 \
-            -O0 \
-            -sSTACK_OVERFLOW_CHECK=2 \
-            -sRUNTIME_DEBUG=1 \
-            -sWARN_ON_UNDEFINED_SYMBOLS=1 \
-            -sASSERTIONS=2 \
-            -fsanitize=address \
-            -sNO_DISABLE_EXCEPTION_CATCHING \
-            --source-map-base=http://localhost:8080/ \
-        ")
+        -g3 \
+        -O0 \
+        -sSTACK_OVERFLOW_CHECK=2 \
+        -sASSERTIONS=2 \
+        -sDISABLE_EXCEPTION_CATCHING=0 \
+        -sRUNTIME_DEBUG=1 \
+        -sWARN_ON_UNDEFINED_SYMBOLS=1 \
+        -sSAFE_HEAP=1 \
+        -sNO_DISABLE_EXCEPTION_CATCHING \
+        --source-map-base=http://localhost:8080/ \
+    ")
     else()
-        set(DEBUG_FLAGS "-O3")
+        # Release flags
+        set(DEBUG_FLAGS "\
+            -O3 \
+            -flto \
+            -ffast-math \
+            -DNDEBUG \
+            -sMINIFY_HTML=1 \
+            -sFILESYSTEM=0 \
+            -sENVIRONMENT=web \
+            -sMALLOC=emmalloc \
+            -sNO_EXIT_RUNTIME=1 \
+            -sTEXTDECODER=2 \
+            -sIGNORE_MISSING_MAIN=1 \
+        ")
     endif()
 
     # (Additional compile options could be added here)
@@ -77,23 +90,78 @@ if(EMSCRIPTEN)
         -sWASM=1 \
         -DDAWN_EMSCRIPTEN_TOOLCHAIN=${EMSCRIPTEN_DIR} \
         -sEXPORTED_FUNCTIONS=_malloc,_free,_memcpy \
-        -sEXPORTED_RUNTIME_METHODS=ccall \
+        -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
         -sUSE_GLFW=3 \
-        -sINITIAL_MEMORY=16MB \
+        -sINITIAL_MEMORY=256MB \
         -sMAXIMUM_MEMORY=2GB \
         -sALLOW_MEMORY_GROWTH=1 \
-        -sStackSize=16MB \
+        -sSTACK_SIZE=64MB \
         -sASYNCIFY \
-        -sASYNCIFY_STACK_SIZE=262144 \
+        -sASYNCIFY_STACK_SIZE=64MB \
         -sASYNCIFY_IGNORE_INDIRECT=1 \
-        -sRUNTIME_DEBUG=0 \
         -sEXIT_RUNTIME=0 \
+        -sWASM_BIGINT=1 \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_enum_tables.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_struct_info.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_sig_info.js \
         --js-library=${DAWN_DIR}/third_party/emdawnwebgpu/library_webgpu.js \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
     ")
+else()
+    # Compiler-specific optimizations
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${MAIN_LIB} PRIVATE 
+            -Wall -Werror
+            -march=native          # Use CPU-specific instructions
+            -mtune=native          # Optimize for current CPU
+            -ffast-math            # Aggressive floating-point optimizations
+            -flto                  # Link-time optimization
+        )
+        
+        # Release-specific flags
+        target_compile_options(${MAIN_LIB} PRIVATE 
+            "$<$<NOT:$<CONFIG:Debug>>:-O3>"
+            "$<$<NOT:$<CONFIG:Debug>>:-DNDEBUG>"
+            "$<$<NOT:$<CONFIG:Debug>>:-fomit-frame-pointer>"
+        )
+        
+        # Enable LTO for release builds
+        set_target_properties(${MAIN_LIB} PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE
+            INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE
+        )
+    elseif(MSVC)
+        target_compile_options(${MAIN_LIB} PRIVATE 
+            /fp:fast               # Fast floating-point model
+            /GL                    # Whole program optimization
+        )
+        
+        # Release-specific flags
+        target_compile_options(${MAIN_LIB} PRIVATE 
+            "$<$<NOT:$<CONFIG:Debug>>:/O2>"
+            "$<$<NOT:$<CONFIG:Debug>>:/Ob2>"    # Aggressive inlining
+            "$<$<NOT:$<CONFIG:Debug>>:/DNDEBUG>"
+        )
+        
+        # Link-time code generation for release
+        set_target_properties(${MAIN_LIB} PROPERTIES
+            LINK_FLAGS_RELEASE "/LTCG"
+            LINK_FLAGS_RELWITHDEBINFO "/LTCG"
+        )
+    endif()
+    
+    # Additional optimizations
+    target_compile_definitions(${MAIN_LIB} PRIVATE
+        "$<$<NOT:$<CONFIG:Debug>>:NDEBUG>"
+    )
+    
+endif()
+
+if(NOT EMSCRIPTEN)
+    target_include_directories(${MAIN_LIB} PUBLIC "${DAWN_BUILD_DIR}/gen/include/dawn/")
+else()
+    target_include_directories(${MAIN_LIB} PUBLIC "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/")
+    target_include_directories(${MAIN_LIB} PUBLIC "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/webgpu/")
 endif()
 
 # Add Test Target (Non-Emscripten Only)
@@ -102,20 +170,13 @@ if(NOT EMSCRIPTEN)
     add_executable(minigpu_test ${TEST_SOURCES})
     # For tests, you may also want to expose the test sources in the main target;
     # adjust the following as needed
-    target_link_libraries(minigpu_test PRIVATE gpu)
     target_link_libraries(minigpu_test PRIVATE ${MAIN_LIB})
     target_link_libraries(minigpu_test PRIVATE webgpu_dawn)
-    target_link_libraries(gpu PRIVATE webgpu_dawn)
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
+    target_compile_definitions(${MAIN_LIB} PRIVATE DART_SHARED_LIB_TEST)
 else()
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_web)
 endif()
-
-
-# Link Libraries 
-
-target_link_libraries(${MAIN_LIB} PRIVATE gpu)
-
 
 # EMSCRIPTEN: Copy JS Sources and Build Outputs to WEB_OUTPUT_DIR
 if(EMSCRIPTEN)

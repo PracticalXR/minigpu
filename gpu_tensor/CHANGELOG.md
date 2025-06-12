@@ -1,7 +1,13 @@
 # gpu_tensor
 
-## 1.1.8-WIP
+## 1.2.0-WIP
 
+## 1.1.9
+
+- fix pubspec version issue
+## 1.1.8
+
+- fixed concurrent buffer op crash
 ## 1.1.7
 
 - fixed fft operations for 1D tensors

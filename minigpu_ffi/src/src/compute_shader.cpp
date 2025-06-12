@@ -1,222 +1,379 @@
 #include "../include/compute_shader.h"
-#include "../include/buffer.h" // Include buffer.h for Buffer definition
+#include "../include/buffer.h"
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
-#include <vector> // Include vector for std::vector
+#include <vector>
 
-using namespace gpu;
+enum LogLevel { kError = 0, kWarning = 1, kInfo = 2, kDebug = 3 };
+
+const char *kDefLog = "ComputeShader";
 
 namespace mgpu {
 
 ComputeShader::ComputeShader(MGPU &mgpu) : mgpu(mgpu) {}
 
 ComputeShader::~ComputeShader() {
-  LOG(kDefLog, kInfo, "ComputeShader destructor: Cleaning up cached kernel.");
-  destroyCachedKernel();
-}
-
-size_t ComputeShader::calculateBindingsHash() const {
-  size_t hash = bindings.size();
-  for (const auto &binding : bindings) {
-    // Simple hash based on buffer pointer and shape
-    hash ^= reinterpret_cast<size_t>(binding.data.buffer) + 0x9e3779b9 +
-            (hash << 6) + (hash >> 2);
-    if (!binding.shape.data.empty()) {
-      hash ^= binding.shape[0] + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+  // safe to do immediately since it's on the right
+  // thread
+  auto cleanupTask = [computePipeline = this->computePipeline,
+                      bindGroup = this->bindGroup,
+                      bindGroupLayout = this->bindGroupLayout,
+                      pipelineLayout = this->pipelineLayout,
+                      shaderModule = this->shaderModule]() {
+    if (computePipeline) {
+      wgpuComputePipelineRelease(computePipeline);
     }
-  }
-  return hash;
-}
-
-bool ComputeShader::needsKernelRecreation(int groupsX, int groupsY,
-                                          int groupsZ) const {
-  if (!cachedKernel.has_value()) {
-    return true; // No cached kernel
-  }
-
-  if (lastGroupSize[0] != static_cast<size_t>(groupsX) ||
-      lastGroupSize[1] != static_cast<size_t>(groupsY) ||
-      lastGroupSize[2] != static_cast<size_t>(groupsZ)) {
-    return true; // Group size changed
-  }
-
-  size_t currentHash = calculateBindingsHash();
-  if (lastBindingsHash != currentHash) {
-    return true; // Bindings changed
-  }
-
-  if (lastShaderCode != code.data) {
-    return true; // Shader code changed
-  }
-
-  return false; // Can reuse cached kernel
-}
-
-void ComputeShader::destroyCachedKernel() {
-  if (cachedKernel.has_value()) {
-    LOG(kDefLog, kInfo,
-        "Destroying cached kernel and releasing WebGPU resources.");
-
-    // Get reference to kernel before destroying it
-    auto kernel = cachedKernel.value();
-
-    if (kernel->bindGroup) {
-      wgpuBindGroupRelease(kernel->bindGroup);
-      kernel->bindGroup = nullptr;
+    if (bindGroup) {
+      wgpuBindGroupRelease(bindGroup);
     }
+    if (bindGroupLayout) {
+      wgpuBindGroupLayoutRelease(bindGroupLayout);
+    }
+    if (pipelineLayout) {
+      wgpuPipelineLayoutRelease(pipelineLayout);
+    }
+    if (shaderModule) {
+      wgpuShaderModuleRelease(shaderModule);
+    }
+  };
 
-    // Now reset the cached kernel
-    cachedKernel.reset();
-    lastBindingsHash = 0;
-
-    LOG(kDefLog, kInfo,
-        "Cached kernel destroyed and WebGPU resources released.");
+  try {
+    mgpu.getWebGPUThread().enqueueAsync(cleanupTask);
+  } catch (...) {
+    // If GPU thread is shutdown, ignore cleanup
   }
+}
+
+void ComputeShader::cleanup() {
+  // defer to destructor
 }
 
 void ComputeShader::loadKernelString(const std::string &kernelString) {
-  // Assuming default workgroup size and type for now, might need adjustment
-  code = KernelCode{kernelString, Shape{256, 1, 1}, ki32};
-  LOG(kDefLog, kInfo, "Loaded kernel string.");
+  if (kernelString.empty() || shaderCode == kernelString) {
+    return; // No change, skip
+  }
+
+  shaderCode = kernelString;
+  pipelineDirty = true;
 }
 
 void ComputeShader::loadKernelFile(const std::string &path) {
   std::ifstream file(path);
   if (!file.is_open()) {
-    LOG(kDefLog, kError, "Failed to open kernel file: %s", path.c_str());
     throw std::runtime_error("Failed to open kernel file: " + path);
   }
+
   std::string kernelString((std::istreambuf_iterator<char>(file)),
                            std::istreambuf_iterator<char>());
   loadKernelString(kernelString);
-  LOG(kDefLog, kInfo, "Loaded kernel file: %s", path.c_str());
 }
 
-bool ComputeShader::hasKernel() const { return !code.data.empty(); }
+bool ComputeShader::hasKernel() const { return !shaderCode.empty(); }
 
 void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
-  if (tag < 0) {
-    LOG(kDefLog, kError, "setBuffer: Invalid negative tag %d.", tag);
-    return;
-  }
-  if (buffer.bufferData.buffer == nullptr) {
-    LOG(kDefLog, kError,
-        "setBuffer: Attempted to set buffer with tag %d, but buffer is null.",
-        tag);
+  if (tag < 0 || buffer.bufferData.buffer == nullptr) {
     return;
   }
 
-  if (tag >= static_cast<int>(bindings.size())) {
-    bindings.resize(tag + 1); // Resize to accommodate the new tag
+  // Resize if needed
+  if (tag >= static_cast<int>(buffers.size())) {
+    buffers.resize(tag + 1);
   }
 
-  // Check if buffer is already bound to avoid unnecessary work
-  if (bindings[tag].data.buffer == buffer.bufferData.buffer &&
-      bindings[tag].shape.data.size() > 0 &&
-      bindings[tag].shape[0] == buffer.length) {
-    LOG(kDefLog, kInfo,
-        "setBuffer: Tag=%d already bound to same buffer, skipping.", tag);
-    return;
+  // only check pointer, not size
+  if (buffers[tag].buffer == buffer.bufferData.buffer) {
+    return; // No change
   }
 
-  // --- Shape Calculation ---
-  size_t logicalNumElements = buffer.length;
+  buffers[tag] =
+      BufferBinding{buffer.bufferData.buffer, buffer.bufferData.size, 0};
 
-  // Log buffer details for debugging
-  LOG(kDefLog, kInfo,
-      "setBuffer: Tag=%d, BufferType=%d, IsPacked=%d, LogicalLength=%zu, "
-      "PhysicalSize=%zu bytes",
-      tag, buffer.bufferType, buffer.isPacked, logicalNumElements,
-      buffer.bufferData.size);
+  bindingsDirty = true;
+}
 
-  // The Shape for the Tensor binding should reflect the logical element count.
-  Shape shape{logicalNumElements};
-  LOG(kDefLog, kInfo, "setBuffer: Tag=%d, Setting Tensor shape: [%zu]", tag,
-      shape[0]);
-
-  // Create the Tensor binding using the buffer's data and the logical shape.
-  bindings[tag] = Tensor{.data = buffer.bufferData, .shape = shape};
-
-  // Invalidate cached kernel when bindings change
-  size_t newHash = calculateBindingsHash();
-  if (newHash != lastBindingsHash) {
-    LOG(kDefLog, kInfo, "Buffer binding changed, invalidating cached kernel.");
-    destroyCachedKernel();
+size_t ComputeShader::calculateBindingsHash() const {
+  // just use buffer count and first buffer pointer
+  size_t hash = buffers.size();
+  if (!buffers.empty() && buffers[0].buffer) {
+    hash ^= reinterpret_cast<size_t>(buffers[0].buffer);
   }
+  return hash;
+}
+
+bool ComputeShader::createShaderModule() {
+  // only recreate if shader actually changed
+  if (shaderModule && !pipelineDirty) {
+    return true; // Reuse existing module
+  }
+
+  if (shaderModule) {
+    wgpuShaderModuleRelease(shaderModule);
+    shaderModule = nullptr;
+  }
+
+  WGPUShaderSourceWGSL wgslDesc = {};
+  wgslDesc.chain.sType = WGPUSType_ShaderSourceWGSL;
+  wgslDesc.code.data = shaderCode.c_str();
+  wgslDesc.code.length = shaderCode.length();
+
+  WGPUShaderModuleDescriptor shaderModuleDesc = {};
+  shaderModuleDesc.nextInChain = &wgslDesc.chain;
+
+  shaderModule =
+      wgpuDeviceCreateShaderModule(mgpu.getDevice(), &shaderModuleDesc);
+  return shaderModule != nullptr;
+}
+
+bool ComputeShader::createBindGroupLayout() {
+
+  if (bindGroupLayout && !bindingsDirty) {
+    return true; // Reuse existing layout
+  }
+
+  if (bindGroupLayout) {
+    wgpuBindGroupLayoutRelease(bindGroupLayout);
+    bindGroupLayout = nullptr;
+  }
+
+  //  assume all buffers are storage buffers
+  std::vector<WGPUBindGroupLayoutEntry> layoutEntries;
+  layoutEntries.reserve(buffers.size());
+
+  for (size_t i = 0; i < buffers.size(); ++i) {
+    if (buffers[i].buffer) {
+      WGPUBindGroupLayoutEntry entry = {};
+      entry.binding = static_cast<uint32_t>(i);
+      entry.visibility = WGPUShaderStage_Compute;
+      entry.buffer.type = WGPUBufferBindingType_Storage;
+      entry.buffer.minBindingSize = 0;
+      layoutEntries.push_back(entry);
+    }
+  }
+
+  if (layoutEntries.empty()) {
+    return false;
+  }
+
+  WGPUBindGroupLayoutDescriptor layoutDesc = {};
+  layoutDesc.entryCount = static_cast<uint32_t>(layoutEntries.size());
+  layoutDesc.entries = layoutEntries.data();
+
+  bindGroupLayout =
+      wgpuDeviceCreateBindGroupLayout(mgpu.getDevice(), &layoutDesc);
+  return bindGroupLayout != nullptr;
+}
+
+bool ComputeShader::createPipelineLayout() {
+  if (pipelineLayout && !pipelineDirty) {
+    return true; // Reuse existing layout
+  }
+
+  if (pipelineLayout) {
+    wgpuPipelineLayoutRelease(pipelineLayout);
+    pipelineLayout = nullptr;
+  }
+
+  WGPUPipelineLayoutDescriptor pipelineLayoutDesc = {};
+  pipelineLayoutDesc.bindGroupLayoutCount = 1;
+  pipelineLayoutDesc.bindGroupLayouts = &bindGroupLayout;
+
+  pipelineLayout =
+      wgpuDeviceCreatePipelineLayout(mgpu.getDevice(), &pipelineLayoutDesc);
+  return pipelineLayout != nullptr;
+}
+
+bool ComputeShader::createComputePipeline() {
+  if (computePipeline && !pipelineDirty) {
+    return true; // Reuse existing pipeline
+  }
+
+  if (computePipeline) {
+    wgpuComputePipelineRelease(computePipeline);
+    computePipeline = nullptr;
+  }
+
+  WGPUComputePipelineDescriptor pipelineDesc = {};
+  pipelineDesc.layout = pipelineLayout;
+  pipelineDesc.compute.module = shaderModule;
+  pipelineDesc.compute.entryPoint.data = "main";
+  pipelineDesc.compute.entryPoint.length = 4;
+
+  computePipeline =
+      wgpuDeviceCreateComputePipeline(mgpu.getDevice(), &pipelineDesc);
+  return computePipeline != nullptr;
+}
+
+bool ComputeShader::createBindGroup() {
+  if (bindGroup && !bindingsDirty) {
+    return true; // Reuse existing bind group
+  }
+
+  if (bindGroup) {
+    wgpuBindGroupRelease(bindGroup);
+    bindGroup = nullptr;
+  }
+
+  std::vector<WGPUBindGroupEntry> bindGroupEntries;
+  bindGroupEntries.reserve(buffers.size());
+
+  for (size_t i = 0; i < buffers.size(); ++i) {
+    if (buffers[i].buffer) {
+      WGPUBindGroupEntry entry = {};
+      entry.binding = static_cast<uint32_t>(i);
+      entry.buffer = buffers[i].buffer;
+      entry.offset = 0;  
+      entry.size = WGPU_WHOLE_SIZE;
+      bindGroupEntries.push_back(entry);
+    }
+  }
+
+  if (bindGroupEntries.empty()) {
+    return false;
+  }
+
+  WGPUBindGroupDescriptor bindGroupDesc = {};
+  bindGroupDesc.layout = bindGroupLayout;
+  bindGroupDesc.entryCount = static_cast<uint32_t>(bindGroupEntries.size());
+  bindGroupDesc.entries = bindGroupEntries.data();
+
+  bindGroup = wgpuDeviceCreateBindGroup(mgpu.getDevice(), &bindGroupDesc);
+  return bindGroup != nullptr;
+}
+
+bool ComputeShader::updatePipelineIfNeeded() {
+  //  only rebuild what's actually dirty
+  if (pipelineDirty) {
+    if (!createShaderModule() || !createBindGroupLayout() ||
+        !createPipelineLayout() || !createComputePipeline()) {
+      return false;
+    }
+    pipelineDirty = false;
+    bindingsDirty = true; // Force bind group recreation since layout changed
+  }
+
+  if (bindingsDirty) {
+    if (!createBindGroup()) {
+      return false;
+    }
+    bindingsDirty = false;
+  }
+
+  return true;
 }
 
 void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
-  if (!hasKernel()) {
-    LOG(kDefLog, kError, "dispatch: No kernel loaded.");
-    return;
-  }
-  if (groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
-    LOG(kDefLog, kError,
-        "dispatch: Invalid group dimensions (%d, %d, %d). Must be positive.",
-        groupsX, groupsY, groupsZ);
-    return;
-  }
-
-  // Ensure all bindings are valid
-  for (size_t i = 0; i < bindings.size(); ++i) {
-    if (bindings[i].data.buffer == nullptr) {
-      LOG(kDefLog, kError,
-          "dispatch: Binding at tag %zu is null. Cannot dispatch.", i);
+  // async dispatch, returns immediately
+  auto dispatchTask = [this, groupsX, groupsY, groupsZ]() {
+    if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
       return;
     }
-  }
 
-  // Only create kernel if needed
-  if (needsKernelRecreation(groupsX, groupsY, groupsZ)) {
-    LOG(kDefLog, kInfo,
-        "Creating new kernel for dispatch (%d, %d, %d) with %zu bindings.",
-        groupsX, groupsY, groupsZ, bindings.size());
+    if (!updatePipelineIfNeeded()) {
+      return;
+    }
 
-    destroyCachedKernel(); // Clean up old kernel first
+    WGPUCommandEncoder commandEncoder =
+        wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
 
-    std::vector<size_t> viewOffsets(bindings.size(), 0);
+    if (!commandEncoder) {
+      return;
+    }
 
-    cachedKernel = createKernel(mgpu.getContext(), code, bindings.data(),
-                                bindings.size(), viewOffsets.data(),
-                                {static_cast<size_t>(groupsX),
-                                 static_cast<size_t>(groupsY),
-                                 static_cast<size_t>(groupsZ)});
+    WGPUComputePassEncoder computePassEncoder =
+        wgpuCommandEncoderBeginComputePass(commandEncoder, nullptr);
 
-    // Update cache state
-    lastGroupSize = {static_cast<size_t>(groupsX), static_cast<size_t>(groupsY),
-                     static_cast<size_t>(groupsZ)};
-    lastBindingsHash = calculateBindingsHash();
-    lastShaderCode = code.data;
+    if (!computePassEncoder) {
+      wgpuCommandEncoderRelease(commandEncoder);
+      return;
+    }
 
-    LOG(kDefLog, kInfo, "Cached new kernel.");
-  } else {
-    LOG(kDefLog, kInfo, "Reusing cached kernel for dispatch.");
-  }
+    wgpuComputePassEncoderSetPipeline(computePassEncoder, computePipeline);
+    wgpuComputePassEncoderSetBindGroup(computePassEncoder, 0, bindGroup, 0,
+                                       nullptr);
+    wgpuComputePassEncoderDispatchWorkgroups(
+        computePassEncoder, static_cast<uint32_t>(groupsX),
+        static_cast<uint32_t>(groupsY), static_cast<uint32_t>(groupsZ));
 
-// Dispatch with cached kernel
-#ifdef __EMSCRIPTEN__
-  // In WebAssembly, we use async dispatch to avoid blocking the main thread
-  dispatchKernelAsync(mgpu.getContext(), cachedKernel.value());
-#else
-  dispatchKernel(mgpu.getContext(), cachedKernel.value());
-#endif
-  LOG(kDefLog, kInfo, "Kernel dispatch complete (cached).");
+    wgpuComputePassEncoderEnd(computePassEncoder);
+    wgpuComputePassEncoderRelease(computePassEncoder);
+
+    WGPUCommandBuffer commandBuffer =
+        wgpuCommandEncoderFinish(commandEncoder, nullptr);
+    wgpuCommandEncoderRelease(commandEncoder);
+
+    if (commandBuffer) {
+      wgpuQueueSubmit(mgpu.getQueue(), 1, &commandBuffer);
+      wgpuCommandBufferRelease(commandBuffer);
+    }
+  };
+
+  mgpu.getWebGPUThread().enqueueAsync(dispatchTask);
 }
+
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
                                   std::function<void()> callback) {
-  LOG(kDefLog, kInfo,
-      "dispatchAsync called. Dispatching synchronously then calling callback.");
-  try {
-    dispatch(groupsX, groupsY, groupsZ);
+  auto dispatchTask = [this, groupsX, groupsY, groupsZ, callback]() {
+     #ifndef __EMSCRIPTEN__
+  std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
+  #endif
+
+    if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+      if (callback)
+        callback();
+      return;
+    }
+
+    if (!updatePipelineIfNeeded()) {
+      if (callback)
+        callback();
+      return;
+    }
+
+    WGPUCommandEncoder commandEncoder =
+        wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
+
+    if (!commandEncoder) {
+      if (callback)
+        callback();
+      return;
+    }
+
+    WGPUComputePassEncoder computePassEncoder =
+        wgpuCommandEncoderBeginComputePass(commandEncoder, nullptr);
+
+    if (!computePassEncoder) {
+      wgpuCommandEncoderRelease(commandEncoder);
+      if (callback)
+        callback();
+      return;
+    }
+
+    wgpuComputePassEncoderSetPipeline(computePassEncoder, computePipeline);
+    wgpuComputePassEncoderSetBindGroup(computePassEncoder, 0, bindGroup, 0,
+                                       nullptr);
+    wgpuComputePassEncoderDispatchWorkgroups(
+        computePassEncoder, static_cast<uint32_t>(groupsX),
+        static_cast<uint32_t>(groupsY), static_cast<uint32_t>(groupsZ));
+
+    wgpuComputePassEncoderEnd(computePassEncoder);
+    wgpuComputePassEncoderRelease(computePassEncoder);
+
+    WGPUCommandBuffer commandBuffer =
+        wgpuCommandEncoderFinish(commandEncoder, nullptr);
+    wgpuCommandEncoderRelease(commandEncoder);
+
+    if (commandBuffer) {
+      wgpuQueueSubmit(mgpu.getQueue(), 1, &commandBuffer);
+      wgpuCommandBufferRelease(commandBuffer);
+    }
+
     if (callback) {
-      LOG(kDefLog, kInfo, "dispatchAsync: Invoking callback.");
       callback();
     }
-  } catch (const std::exception &e) {
-    LOG(kDefLog, kError, "dispatchAsync: Exception during dispatch: %s",
-        e.what());
-  } catch (...) {
-    LOG(kDefLog, kError, "dispatchAsync: Unknown exception during dispatch.");
-  }
+  };
+
+  mgpu.getWebGPUThread().enqueueAsync(dispatchTask);
 }
+
 } // namespace mgpu

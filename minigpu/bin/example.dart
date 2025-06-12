@@ -18,7 +18,7 @@ Future<void> main() async {
   // Initialize input data.
   List<double> data = List.generate(bufferSize, (i) => i / 10.0);
   final Float32List inputData = Float32List.fromList(data);
-  inputBuffer.setData(inputData, bufferSize);
+  await inputBuffer.write(inputData, bufferSize);
 
   // WGSL shader code from the Flutter example.
   final shaderCode = '''

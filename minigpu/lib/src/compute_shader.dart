@@ -7,10 +7,13 @@ final class ComputeShader {
 
   final PlatformComputeShader _shader;
   final Map<String, int> _kernelTags = {};
+  String? shaderCode;
 
   /// Loads a kernel string into the shader.
-  void loadKernelString(String kernelString) =>
-      _shader.loadKernelString(kernelString);
+  void loadKernelString(String kernelString) {
+    shaderCode = kernelString;
+    return _shader.loadKernelString(kernelString);
+  }
 
   /// Checks if the shader has a kernel loaded.
   bool hasKernel() => _shader.hasKernel();

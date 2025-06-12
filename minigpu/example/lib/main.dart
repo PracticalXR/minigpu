@@ -349,7 +349,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(-128, 127).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -361,7 +361,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(0, 255).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -373,7 +373,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(-32768, 32767).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -385,7 +385,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(0, 65535).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -397,7 +397,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(-2147483648, 2147483647).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -409,7 +409,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(0, 4294967295).toInt();
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -421,7 +421,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(-3.4028235e38, 3.4028235e38);
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -433,7 +433,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i];
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: _currentType.type);
         setState(() {
           _fullInputData = List.from(typedData);
@@ -445,7 +445,7 @@ class TypeTestingExampleState extends State<TypeTestingExample>
         for (int i = 0; i < _bufferSize; i++) {
           typedData[i] = validData[i].clamp(-3.4028235e38, 3.4028235e38);
         }
-        _inputBuffer?.setData(typedData, _bufferSize,
+        _inputBuffer?.write(typedData, _bufferSize,
             dataType: BufferDataType.float32);
         setState(() {
           _fullInputData = typedData.map((e) => e.toDouble()).toList();
@@ -1160,7 +1160,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData; // Feed back for next execution
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1177,7 +1177,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1194,7 +1194,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1211,7 +1211,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
         case BufferDataType.int32:
@@ -1227,7 +1227,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
         case BufferDataType.uint32:
@@ -1243,7 +1243,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1260,7 +1260,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1277,7 +1277,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: _currentType.type);
           break;
 
@@ -1294,7 +1294,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             _fullInputData = resultData;
           });
 
-          _inputBuffer?.setData(outputData, _bufferSize,
+          _inputBuffer?.write(outputData, _bufferSize,
               dataType: BufferDataType.float32);
       }
 
