@@ -299,11 +299,38 @@ def add_changelog_message(content, message, version=None):
     if target_line_idx == -1:
         return content 
     
+    # Find where to insert the message
     insert_message_at = target_line_idx + 1
+    
+    # Skip any existing blank lines after the header
     while insert_message_at < len(lines) and lines[insert_message_at].strip() == '':
         insert_message_at += 1
     
-    lines.insert(insert_message_at, f"- {message}")
+    # Check if there are already bullet points (list items) in this section
+    has_existing_bullets = False
+    check_idx = insert_message_at
+    while check_idx < len(lines):
+        line = lines[check_idx].strip()
+        if line.startswith('##'):  # Hit next section
+            break
+        if line.startswith('- '):  # Found existing bullet
+            has_existing_bullets = True
+            break
+        if line:  # Non-empty, non-bullet line - this section has other content
+            break
+        check_idx += 1
+    
+    # Insert the message with proper spacing
+    if has_existing_bullets:
+        # Just add the bullet point where other bullets are
+        lines.insert(insert_message_at, f"- {message}")
+    else:
+        # First bullet in this section - ensure blank line before and after the list
+        # Insert blank line, bullet, blank line
+        lines.insert(insert_message_at, "")  # Blank line before list
+        lines.insert(insert_message_at + 1, f"- {message}")  # The bullet
+        lines.insert(insert_message_at + 2, "")  # Blank line after list
+    
     return '\n'.join(lines)
 
 def remove_wip_from_version(content, version_without_wip):

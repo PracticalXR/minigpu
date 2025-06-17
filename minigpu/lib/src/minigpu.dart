@@ -1,6 +1,7 @@
 import 'package:minigpu/src/buffer.dart';
 import 'package:minigpu/src/compute_shader.dart';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
+import 'dart:convert';
 
 /// Controls the initialization and destruction of the minigpu context.
 final class Minigpu {
@@ -11,7 +12,7 @@ final class Minigpu {
   static final _finalizer = Finalizer<MinigpuPlatform>(
     (platform) => platform.destroyContext(),
   );
-  static final _shaderFinalizer = Finalizer<ComputeShader>(
+  static final _shaderFinalizer = Finalizer<PlatformComputeShader>(
     (shader) => shader.destroy(),
   );
   static final _bufferFinalizer = Finalizer<Buffer>(
@@ -20,6 +21,9 @@ final class Minigpu {
 
   final _platform = MinigpuPlatform.instance;
   bool isInitialized = false;
+
+  // Internal shader cache: code hash -> shader
+  final Map<String, ComputeShader> _shaderCache = {};
 
   /// Initializes the minigpu context.
   Future<void> init() async {
@@ -33,6 +37,7 @@ final class Minigpu {
   Future<void> destroy() async {
     if (!isInitialized) throw MinigpuNotInitializedError();
 
+    _clearShaderCache();
     await _platform.destroyContext();
     isInitialized = false;
   }
@@ -40,8 +45,23 @@ final class Minigpu {
   /// Creates a compute shader.
   ComputeShader createComputeShader() {
     final platformShader = _platform.createComputeShader();
+    final shader = CachedComputeShader(platformShader, this);
+    return shader;
+  }
+
+  /// Internal method to get or create cached shader by code
+  ComputeShader getOrCreateCachedShader(String shaderCode) {
+    // Simple hash using built-in hashCode
+    final codeHash = shaderCode.hashCode.toString();
+
+    if (_shaderCache.containsKey(codeHash)) {
+      return _shaderCache[codeHash]!;
+    }
+
+    final platformShader = _platform.createComputeShader();
     final shader = ComputeShader(platformShader);
-    _shaderFinalizer.attach(this, shader);
+    shader.loadKernelString(shaderCode);
+    _shaderCache[codeHash] = shader;
     return shader;
   }
 
@@ -49,7 +69,14 @@ final class Minigpu {
   Buffer createBuffer(int bufferSize, BufferDataType dataType) {
     final platformBuffer = _platform.createBuffer(bufferSize, dataType);
     final buff = Buffer(platformBuffer);
-    _bufferFinalizer.attach(this, buff);
     return buff;
+  }
+
+  /// Clear shader cache (internal)
+  void _clearShaderCache() {
+    for (final shader in _shaderCache.values) {
+      shader.destroy();
+    }
+    _shaderCache.clear();
   }
 }

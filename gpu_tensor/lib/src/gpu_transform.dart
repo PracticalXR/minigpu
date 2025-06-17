@@ -32,15 +32,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[i * 2u + 1u] = 0.0;
 }
 ''';
-
-    final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderTemplate);
-    shader.setBuffer('input', buffer);
-    shader.setBuffer('output', out.buffer);
+    if (activeShader?.shaderCode != shaderTemplate) {
+      activeShader = gpu.createComputeShader();
+      activeShader!.loadKernelString(shaderTemplate);
+    }
+    activeShader!.loadKernelString(shaderTemplate);
+    activeShader!.setBuffer('input', buffer);
+    activeShader!.setBuffer('output', out.buffer);
 
     int workgroups = (total + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await activeShader!.dispatch(workgroups, 1, 1);
     return out;
   }
 
@@ -220,7 +221,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     if (activeShader?.shaderCode != shaderTemplate) {
-      print("Creating new compute shader for FFT1D");
       activeShader = gpu.createComputeShader();
       activeShader!.loadKernelString(shaderTemplate);
     }

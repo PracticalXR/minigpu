@@ -38,6 +38,9 @@ class Tensor<T extends TypedData> {
   /// Total number of elements.
   final int size;
   int get rank => shape.length;
+  int get elementSize => _elementSize(dataType);
+  int get byteSize => size * elementSize;
+  int get elementCount => shape.reduce((a, b) => a * b);
   final Minigpu gpu;
   late Buffer buffer;
 

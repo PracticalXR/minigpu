@@ -705,7 +705,6 @@ Future<void> main() async {
 
       var tensor = await Tensor.create([fftSize], data: inputData);
 
-      // **DO IT THE VISUALIZER WAY**
       var upgraded = await tensor.upgradeRealToComplex();
       var fftResult = await upgraded.fft1d(); // Direct call
       var resultData = await fftResult.getData() as Float32List;

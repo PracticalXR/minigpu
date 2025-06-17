@@ -1,6 +1,6 @@
 name: minigpu_web
 description: A web library for minigpu wasm. A library to brings multiplatform GPU compute to Dart and Flutter using GPU.cpp and Google Dawn.
-version: 1.2.0
+version: 1.2.2-dev
 publish_to: none
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu_web
 

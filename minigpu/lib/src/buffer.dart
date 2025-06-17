@@ -1,10 +1,15 @@
 import 'dart:typed_data';
-
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
 /// A buffer.
 final class Buffer {
-  Buffer(PlatformBuffer buffer) : _platformBuffer = buffer;
+  Buffer(PlatformBuffer buffer) : _platformBuffer = buffer {
+    _finalizer.attach(this, buffer, detach: this);
+  }
+
+  static final Finalizer<PlatformBuffer> _finalizer = Finalizer(
+    (platformBuffer) => platformBuffer.destroy(),
+  );
 
   // Store the platform-specific buffer implementation. Marked as potentially nullable
   // if we consider the buffer invalid after destruction.
@@ -58,6 +63,7 @@ final class Buffer {
   /// Can be called multiple times safely.
   void destroy() {
     if (_isValid && _platformBuffer != null) {
+      _finalizer.detach(this);
       _platformBuffer!.destroy();
       _platformBuffer = null; // Release the reference
       _isValid = false; // Mark as destroyed

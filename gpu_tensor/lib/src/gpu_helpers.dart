@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:gpu_tensor/gpu_tensor.dart';
 import 'package:minigpu/minigpu.dart';
 
 /// Returns the element (as num) at [index] for a TypedData, if supported.
@@ -32,7 +33,10 @@ T getTypedDataSublist<T extends TypedData>(T data, int start, int end) {
 }
 
 String prepareShader(
-    String template, BufferDataType dataType, Map<String, dynamic> values) {
+  String template,
+  BufferDataType dataType,
+  Map<String, dynamic> values,
+) {
   String result = template;
   values.forEach((key, value) {
     String valueString;
@@ -40,8 +44,9 @@ String prepareShader(
       valueString = '${value}u'; // Format as WGSL unsigned integer literal
     } else if (value is double) {
       // Ensure float format for WGSL f32 literal
-      valueString =
-          value.toString().contains('.') ? value.toString() : '$value.0';
+      valueString = value.toString().contains('.')
+          ? value.toString()
+          : '$value.0';
       // Optionally add 'f' suffix if needed: valueString = '${valueString}f';
     } else {
       valueString = value.toString(); // Default string conversion
@@ -54,4 +59,17 @@ String prepareShader(
     result = result.replaceAll('array<u32>', 'array<$wgslType>');
   });
   return result;
+}
+
+extension TesorHelper<T extends TypedData> on Tensor<T> {
+  /// _shapesCompatible checks if two shapes are compatible for broadcasting.
+  bool shapesCompatible(List<int> shape1, List<int> shape2) {
+    if (shape1.length != shape2.length) return false;
+    for (int i = 0; i < shape1.length; i++) {
+      if (shape1[i] != shape2[i] && shape1[i] != 1 && shape2[i] != 1) {
+        return false;
+      }
+    }
+    return true;
+  }
 }

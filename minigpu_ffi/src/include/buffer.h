@@ -111,7 +111,7 @@ public:
 private:
   std::unique_ptr<Context> ctx;
   std::mutex gpuOperationMutex;
-  WebGPUThread webgpuThread; // **SINGLE THREAD FOR ALL GPU OPERATIONS**
+  WebGPUThread webgpuThread;
 };
 class Buffer {
 public:

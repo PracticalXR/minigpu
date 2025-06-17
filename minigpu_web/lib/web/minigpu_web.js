@@ -2590,7 +2590,7 @@ async function createWasm() {
   Disabled:3,
   },
   state:0,
-  StackSize:67108864,
+  StackSize:4096,
   currData:null,
   handleSleepReturnValue:0,
   exportCallStack:[],

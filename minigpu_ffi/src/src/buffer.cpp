@@ -306,7 +306,6 @@ void MGPU::ensureDeviceValid() {
   }
 }
 
-// **BUFFER IMPLEMENTATION**
 Buffer::Buffer(MGPU &mgpu_ref) : mgpu(mgpu_ref) {}
 
 Buffer::~Buffer() { release(); }
@@ -431,7 +430,6 @@ void Buffer::release() {
   }
 }
 
-// **BUFFER IMPLEMENTATION - releaseInternal**
 void Buffer::releaseInternal() {
   if (bufferData.buffer) {
     try {
@@ -482,7 +480,6 @@ bool Buffer::needsPacking(BufferDataType type) const {
          type == kInt64 || type == kUInt64 || type == kFloat64;
 }
 
-// **DATA UPLOAD METHODS**
 void Buffer::write(const float *inputData, size_t elementCount) {
   size_t byteSize = elementCount * sizeof(float);
   LOG_INFO("write(float): elementCount=%zu, byteSize=%zu", elementCount,
@@ -563,7 +560,6 @@ void Buffer::write(const uint64_t *inputData, size_t elementCount) {
   }
 }
 
-// **SYNC READ METHODS**
 void Buffer::read(float *outputData, size_t elementCount, size_t offset) {
   readDirect(outputData, elementCount, offset);
 }
@@ -632,7 +628,6 @@ void Buffer::read(uint64_t *outputData, size_t elementCount, size_t offset) {
   }
 }
 
-// **ASYNC READ METHODS**
 void Buffer::readAsync(float *outputData, size_t elementCount, size_t offset,
                        std::function<void()> callback) {
   readAsyncImpl(outputData, elementCount, offset, kFloat32, callback);
@@ -1047,7 +1042,6 @@ void Buffer::readAsyncImpl(T *outputData, size_t elementCount, size_t offset,
       });
 }
 
-// **EXPLICIT TEMPLATE INSTANTIATIONS**
 template void Buffer::writeDirect<int8_t>(const int8_t *, size_t,
                                           BufferDataType);
 template void Buffer::writeDirect<uint8_t>(const uint8_t *, size_t,
