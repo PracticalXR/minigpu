@@ -7,7 +7,7 @@ include(FetchContent)
 
 # Optionally try to find an existing Dawn build.
 set(ENABLE_DAWN_FIND ON CACHE BOOL "Attempt to find an existing Dawn build" FORCE)
-set(DAWN_BUILD_FOUND OFF BOOL "Dawn build found")
+set(DAWN_BUILD_FOUND OFF CACHE BOOL "Dawn build found" FORCE)
 
 
 # Setup directories and basic paths
