@@ -7,13 +7,15 @@ extern "C" {
 
 MGPU minigpu;
 
+mgpu::LogLevel level = mgpu::LOG_NONE;
+
 void mgpuInitializeContext() {
-  SET_LOG_LEVEL(mgpu::LOG_NONE);
+  SET_LOG_LEVEL(level);
   minigpu.initializeContext();
 }
 
 void mgpuInitializeContextAsync(MGPUCallback callback) {
-  SET_LOG_LEVEL(mgpu::LOG_NONE);
+  SET_LOG_LEVEL(level);
   minigpu.initializeContextAsync(callback);
 }
 

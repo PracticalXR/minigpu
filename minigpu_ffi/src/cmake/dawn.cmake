@@ -5,6 +5,10 @@ include(FetchContent)
 
 # include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/print_target.cmake")
 
+# Optionally try to find an existing Dawn build.
+set(ENABLE_DAWN_FIND ON CACHE BOOL "Attempt to find an existing Dawn build" FORCE)
+set(DAWN_BUILD_FOUND OFF BOOL "Dawn build found")
+
 
 # Setup directories and basic paths
 set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external")
@@ -35,11 +39,6 @@ include_directories(BEFORE PUBLIC
   "${DAWN_BUILD_DIR}/src/dawn/native/Debug"
   "${DAWN_BUILD_DIR}/src/dawn/native/Release"
 )
-
-
-# Optionally try to find an existing Dawn build.
-set(ENABLE_DAWN_FIND OFF CACHE BOOL "Attempt to find an existing Dawn build" FORCE)
-set(DAWN_BUILD_FOUND OFF CACHE BOOL "Dawn build found" FORCE)
 
 if(ENABLE_DAWN_FIND)
     message(STATUS "Attempting to find an existing Dawn build...")

@@ -282,14 +282,40 @@ void MGPU::destroyContext() {
   ctx.reset();
 }
 
-WGPUDevice MGPU::getDevice() const { return ctx ? ctx->device : nullptr; }
+WGPUDevice MGPU::getDevice() const {
+  if (!ctx || !ctx->initialized || !ctx->device) {
+    LOG_WARN("Device invalid, attempting to reinitialize context");
+    // Cast away const to allow reinitialization
+    const_cast<MGPU *>(this)->initializeContext();
+  }
+  return ctx ? ctx->device : nullptr;
+}
 
-WGPUQueue MGPU::getQueue() const { return ctx ? ctx->queue : nullptr; }
+WGPUQueue MGPU::getQueue() const {
+  if (!ctx || !ctx->initialized || !ctx->queue) {
+    LOG_WARN("Queue invalid, attempting to reinitialize context");
+    // Cast away const to allow reinitialization
+    const_cast<MGPU *>(this)->initializeContext();
+  }
+  return ctx ? ctx->queue : nullptr;
+}
 
-WGPUInstance MGPU::getInstance() const { return ctx ? ctx->instance : nullptr; }
+WGPUInstance MGPU::getInstance() const {
+  if (!ctx || !ctx->instance) {
+    LOG_WARN("Instance invalid, attempting to reinitialize context");
+    // Cast away const to allow reinitialization
+    const_cast<MGPU *>(this)->initializeContext();
+  }
+  return ctx ? ctx->instance : nullptr;
+}
 
 bool MGPU::isDeviceValid() {
-  return ctx && ctx->initialized && ctx->device && ctx->queue;
+  if (!ctx || !ctx->initialized || !ctx->device || !ctx->queue) {
+    LOG_WARN("Device/context invalid, attempting to reinitialize");
+    initializeContext();
+    return ctx && ctx->initialized && ctx->device && ctx->queue;
+  }
+  return true;
 }
 
 void MGPU::ensureDeviceValid() {
@@ -337,86 +363,95 @@ void Buffer::createBuffer(size_t sizeParam, BufferDataType dataType) {
   LOG_INFO("createBuffer called: sizeParam=%zu, dataType=%d", sizeParam,
            (int)dataType);
 
-  // Validate device before proceeding
-  WGPUDevice device = mgpu.getDevice();
-  if (!device) {
-    throw std::runtime_error("WebGPU device not initialized");
-  }
-
-  this->dataType = dataType;
-  this->isPacked = needsPacking(dataType);
-
-  LOG_INFO("isPacked=%s", isPacked ? "true" : "false");
-
-  size_t physicalByteSize;
-
-  if (isPacked) {
-    // For PACKED types, sizeParam is ELEMENT COUNT
-    this->elementCount = sizeParam;
-    LOG_INFO("Packed type: elementCount=%zu", elementCount);
-
-    switch (dataType) {
-    case kInt8:
-    case kUInt8:
-      physicalByteSize = ((elementCount + 3) / 4) * 4;
-      LOG_INFO("8-bit packed: physicalByteSize=%zu", physicalByteSize);
-      break;
-    case kInt16:
-    case kUInt16:
-      physicalByteSize = ((elementCount + 1) / 2) * 4;
-      LOG_INFO("16-bit packed: physicalByteSize=%zu", physicalByteSize);
-      break;
-    case kInt64:
-    case kUInt64:
-    case kFloat64:
-      physicalByteSize = elementCount * 8;
-      LOG_INFO("64-bit packed: physicalByteSize=%zu", physicalByteSize);
-      break;
-    default:
-      physicalByteSize = elementCount * getElementSize(dataType);
-      LOG_INFO("Default packed: physicalByteSize=%zu", physicalByteSize);
-      break;
-    }
-  } else {
-    // For DIRECT types, sizeParam is BYTE SIZE
-    physicalByteSize = sizeParam;
-    size_t elementSize = getElementSize(dataType);
-    this->elementCount = elementSize > 0 ? physicalByteSize / elementSize : 0;
-    LOG_INFO(
-        "Direct type: physicalByteSize=%zu, elementSize=%zu, elementCount=%zu",
-        physicalByteSize, elementSize, elementCount);
-  }
-
-  // Apply WebGPU requirements
-  size_t originalSize = physicalByteSize;
-  bufferData.size = std::max<size_t>(physicalByteSize, 4);
-  bufferData.size = (bufferData.size + 3) & ~3;
-
-  LOG_INFO("Buffer size: original=%zu, aligned=%zu", originalSize,
-           bufferData.size);
-
-  // Create the buffer
-  bufferData.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst |
-                     WGPUBufferUsage_CopySrc;
-
-  WGPUBufferDescriptor bufferDesc = {};
-  bufferDesc.nextInChain = nullptr;
-  bufferDesc.size = bufferData.size;
-  bufferDesc.usage = bufferData.usage;
-  bufferDesc.mappedAtCreation = false;
-
   try {
-    bufferData.buffer = wgpuDeviceCreateBuffer(device, &bufferDesc);
-    if (!bufferData.buffer) {
+
+    // Validate device before proceeding
+    WGPUDevice device = mgpu.getDevice();
+    if (!device) {
+      throw std::runtime_error("WebGPU device not initialized");
+    }
+
+    this->dataType = dataType;
+    this->isPacked = needsPacking(dataType);
+
+    LOG_INFO("isPacked=%s", isPacked ? "true" : "false");
+
+    size_t physicalByteSize;
+
+    if (isPacked) {
+      // For PACKED types, sizeParam is ELEMENT COUNT
+      this->elementCount = sizeParam;
+      LOG_INFO("Packed type: elementCount=%zu", elementCount);
+
+      switch (dataType) {
+      case kInt8:
+      case kUInt8:
+        physicalByteSize = ((elementCount + 3) / 4) * 4;
+        LOG_INFO("8-bit packed: physicalByteSize=%zu", physicalByteSize);
+        break;
+      case kInt16:
+      case kUInt16:
+        physicalByteSize = ((elementCount + 1) / 2) * 4;
+        LOG_INFO("16-bit packed: physicalByteSize=%zu", physicalByteSize);
+        break;
+      case kInt64:
+      case kUInt64:
+      case kFloat64:
+        physicalByteSize = elementCount * 8;
+        LOG_INFO("64-bit packed: physicalByteSize=%zu", physicalByteSize);
+        break;
+      default:
+        physicalByteSize = elementCount * getElementSize(dataType);
+        LOG_INFO("Default packed: physicalByteSize=%zu", physicalByteSize);
+        break;
+      }
+    } else {
+      // For DIRECT types, sizeParam is BYTE SIZE
+      physicalByteSize = sizeParam;
+      size_t elementSize = getElementSize(dataType);
+      this->elementCount = elementSize > 0 ? physicalByteSize / elementSize : 0;
+      LOG_INFO("Direct type: physicalByteSize=%zu, elementSize=%zu, "
+               "elementCount=%zu",
+               physicalByteSize, elementSize, elementCount);
+    }
+
+    // Apply WebGPU requirements
+    size_t originalSize = physicalByteSize;
+    bufferData.size = std::max<size_t>(physicalByteSize, 4);
+    bufferData.size = (bufferData.size + 3) & ~3;
+
+    LOG_INFO("Buffer size: original=%zu, aligned=%zu", originalSize,
+             bufferData.size);
+
+    // Create the buffer
+    bufferData.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst |
+                       WGPUBufferUsage_CopySrc;
+
+    WGPUBufferDescriptor bufferDesc = {};
+    bufferDesc.nextInChain = nullptr;
+    bufferDesc.size = bufferData.size;
+    bufferDesc.usage = bufferData.usage;
+    bufferDesc.mappedAtCreation = false;
+
+    try {
+      bufferData.buffer = wgpuDeviceCreateBuffer(device, &bufferDesc);
+      if (!bufferData.buffer) {
+        throw std::runtime_error("Failed to create WebGPU buffer");
+      }
+      LOG_INFO("Buffer created successfully: buffer=%p, size=%zu",
+               bufferData.buffer, bufferData.size);
+    } catch (const std::exception &e) {
+      LOG_ERROR("Exception creating buffer: %s", e.what());
+      throw;
+    } catch (...) {
+      LOG_ERROR("Unknown exception creating buffer");
       throw std::runtime_error("Failed to create WebGPU buffer");
     }
-    LOG_INFO("Buffer created successfully: buffer=%p, size=%zu",
-             bufferData.buffer, bufferData.size);
   } catch (const std::exception &e) {
-    LOG_ERROR("Exception creating buffer: %s", e.what());
+    LOG_ERROR("Exception in createBuffer: %s", e.what());
     throw;
   } catch (...) {
-    LOG_ERROR("Unknown exception creating buffer");
+    LOG_ERROR("Unknown exception in createBuffer");
     throw std::runtime_error("Failed to create WebGPU buffer");
   }
 }
@@ -906,16 +941,16 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   // Process events until mapping completes
   int attempts = 0;
   const int maxAttempts = 1000;
-  #ifndef __EMSCRIPTEN__
+#ifndef __EMSCRIPTEN__
   while (!readState.completed && attempts < maxAttempts) {
     platformSleep(1, instance);
     attempts++;
   }
-  #else
+#else
   while (!readState.completed) {
     platformSleep(5, instance);
   }
-  #endif
+#endif
 
   if (attempts >= maxAttempts) {
     LOG_ERROR("Buffer mapping timed out");

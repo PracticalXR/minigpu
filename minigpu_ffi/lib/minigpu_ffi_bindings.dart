@@ -16,9 +16,7 @@ import 'dart:ffi' as ffi;
 external void mgpuInitializeContext();
 
 @ffi.Native<ffi.Void Function(MGPUCallback)>()
-external void mgpuInitializeContextAsync(
-  MGPUCallback callback,
-);
+external void mgpuInitializeContextAsync(MGPUCallback callback);
 
 @ffi.Native<ffi.Void Function()>()
 external void mgpuDestroyContext();
@@ -27,36 +25,32 @@ external void mgpuDestroyContext();
 external ffi.Pointer<MGPUComputeShader> mgpuCreateComputeShader();
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUComputeShader>)>()
-external void mgpuDestroyComputeShader(
-  ffi.Pointer<MGPUComputeShader> shader,
-);
+external void mgpuDestroyComputeShader(ffi.Pointer<MGPUComputeShader> shader);
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Pointer<ffi.Char>)>()
+  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Pointer<ffi.Char>)
+>()
 external void mgpuLoadKernel(
   ffi.Pointer<MGPUComputeShader> shader,
   ffi.Pointer<ffi.Char> kernelString,
 );
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MGPUComputeShader>)>()
-external int mgpuHasKernel(
-  ffi.Pointer<MGPUComputeShader> shader,
-);
+external int mgpuHasKernel(ffi.Pointer<MGPUComputeShader> shader);
 
 @ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int, ffi.Int)>()
-external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(
-  int bufferSize,
-  int dataType,
-);
+external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(int bufferSize, int dataType);
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUBuffer>)>()
-external void mgpuDestroyBuffer(
-  ffi.Pointer<MGPUBuffer> buffer,
-);
+external void mgpuDestroyBuffer(ffi.Pointer<MGPUBuffer> buffer);
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Pointer<MGPUBuffer>)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Pointer<MGPUBuffer>,
+  )
+>()
 external void mgpuSetBuffer(
   ffi.Pointer<MGPUComputeShader> shader,
   int tag,
@@ -64,8 +58,8 @@ external void mgpuSetBuffer(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)>()
+  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)
+>()
 external void mgpuCreateKernel(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -74,8 +68,8 @@ external void mgpuCreateKernel(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)>()
+  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)
+>()
 external void mgpuDispatch(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -84,8 +78,14 @@ external void mgpuDispatch(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int,
-        MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    MGPUCallback,
+  )
+>()
 external void mgpuDispatchAsync(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -95,8 +95,14 @@ external void mgpuDispatchAsync(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int8>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> outputData,
@@ -106,8 +112,14 @@ external void mgpuReadAsyncInt8(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int16>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> outputData,
@@ -117,8 +129,14 @@ external void mgpuReadAsyncInt16(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int32>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> outputData,
@@ -128,8 +146,14 @@ external void mgpuReadAsyncInt32(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int64>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> outputData,
@@ -139,8 +163,14 @@ external void mgpuReadAsyncInt64(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> outputData,
@@ -150,8 +180,14 @@ external void mgpuReadAsyncUint8(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>,
-        ffi.Size, ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint16>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> outputData,
@@ -161,8 +197,14 @@ external void mgpuReadAsyncUint16(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>,
-        ffi.Size, ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> outputData,
@@ -172,8 +214,14 @@ external void mgpuReadAsyncUint32(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>,
-        ffi.Size, ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> outputData,
@@ -183,8 +231,14 @@ external void mgpuReadAsyncUint64(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size,
-        ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Float>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncFloat(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> outputData,
@@ -194,8 +248,14 @@ external void mgpuReadAsyncFloat(
 );
 
 @ffi.Native<
-    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>,
-        ffi.Size, ffi.Size, MGPUCallback)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Double>,
+    ffi.Size,
+    ffi.Size,
+    MGPUCallback,
+  )
+>()
 external void mgpuReadAsyncDouble(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> outputData,
@@ -205,8 +265,13 @@ external void mgpuReadAsyncDouble(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Void>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Void>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSync(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Void> outputData,
@@ -215,8 +280,13 @@ external void mgpuReadSync(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int8>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> outputData,
@@ -225,8 +295,13 @@ external void mgpuReadSyncInt8(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> outputData,
@@ -235,8 +310,13 @@ external void mgpuReadSyncUint8(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int16>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> outputData,
@@ -245,8 +325,13 @@ external void mgpuReadSyncInt16(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint16>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> outputData,
@@ -255,8 +340,13 @@ external void mgpuReadSyncUint16(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int32>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> outputData,
@@ -265,8 +355,13 @@ external void mgpuReadSyncInt32(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> outputData,
@@ -275,8 +370,13 @@ external void mgpuReadSyncUint32(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Int64>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> outputData,
@@ -285,8 +385,13 @@ external void mgpuReadSyncInt64(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> outputData,
@@ -295,8 +400,13 @@ external void mgpuReadSyncUint64(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Float>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncFloat32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> outputData,
@@ -305,8 +415,13 @@ external void mgpuReadSyncFloat32(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size, ffi.Size)>()
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Double>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
 external void mgpuReadSyncFloat64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> outputData,
@@ -315,8 +430,8 @@ external void mgpuReadSyncFloat64(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size)
+>()
 external void mgpuWriteInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> inputData,
@@ -324,8 +439,8 @@ external void mgpuWriteInt8(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size)
+>()
 external void mgpuWriteInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> inputData,
@@ -333,8 +448,8 @@ external void mgpuWriteInt16(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size)
+>()
 external void mgpuWriteInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> inputData,
@@ -342,8 +457,8 @@ external void mgpuWriteInt32(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size)
+>()
 external void mgpuWriteInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> inputData,
@@ -351,8 +466,8 @@ external void mgpuWriteInt64(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size)
+>()
 external void mgpuWriteUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> inputData,
@@ -360,8 +475,8 @@ external void mgpuWriteUint8(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size)
+>()
 external void mgpuWriteUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> inputData,
@@ -369,8 +484,8 @@ external void mgpuWriteUint16(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size)
+>()
 external void mgpuWriteUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> inputData,
@@ -378,8 +493,8 @@ external void mgpuWriteUint32(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size)
+>()
 external void mgpuWriteUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> inputData,
@@ -387,8 +502,8 @@ external void mgpuWriteUint64(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size)
+>()
 external void mgpuWriteFloat(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> inputData,
@@ -396,8 +511,8 @@ external void mgpuWriteFloat(
 );
 
 @ffi.Native<
-    ffi.Void Function(
-        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size)>()
+  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size)
+>()
 external void mgpuWriteDouble(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> inputData,

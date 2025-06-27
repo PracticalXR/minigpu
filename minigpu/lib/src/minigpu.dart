@@ -67,6 +67,8 @@ final class Minigpu {
 
   /// Creates a buffer.
   Buffer createBuffer(int bufferSize, BufferDataType dataType) {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+
     final platformBuffer = _platform.createBuffer(bufferSize, dataType);
     final buff = Buffer(platformBuffer);
     return buff;

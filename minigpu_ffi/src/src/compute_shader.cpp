@@ -222,7 +222,7 @@ bool ComputeShader::createBindGroup() {
       WGPUBindGroupEntry entry = {};
       entry.binding = static_cast<uint32_t>(i);
       entry.buffer = buffers[i].buffer;
-      entry.offset = 0;  
+      entry.offset = 0;
       entry.size = WGPU_WHOLE_SIZE;
       bindGroupEntries.push_back(entry);
     }
@@ -273,6 +273,10 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
       return;
     }
 
+    if (!computePipeline || !bindGroup) {
+      return;
+    }
+
     WGPUCommandEncoder commandEncoder =
         wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
 
@@ -314,9 +318,9 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
                                   std::function<void()> callback) {
   auto dispatchTask = [this, groupsX, groupsY, groupsZ, callback]() {
-     #ifndef __EMSCRIPTEN__
-  std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
-  #endif
+#ifndef __EMSCRIPTEN__
+    std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
+#endif
 
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
       if (callback)

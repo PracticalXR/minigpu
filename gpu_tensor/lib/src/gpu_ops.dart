@@ -395,6 +395,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
   /// Adds a scalar value to every element in the tensor.
   Future<Tensor<T>> addScalar(double scalar) async {
+    print('Adding scalar ENTRY');
     Tensor<T> result = await Tensor.create<T>(
       shape,
       gpu: gpu,
@@ -408,7 +409,7 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   let i: u32 = gid.x;
   if (i < ${size}u) {
-    B[i] = A[i] + $scalar;
+    B[i] = A[i] + ${scalar}f;
   }
 }
 ''';
@@ -416,11 +417,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
+    print('Adding scalar to tensor: $scalar, shader code: \n$shaderCode');
     shader.loadKernelString(shaderCode);
+    print('Shader loaded, setting buffers');
+    print('Buffer A: ${size} bytes isValid: ${buffer.isValid} ');
+    print('Buffer B: ${result.size} bytes isValid: ${result.buffer.isValid}');
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
+    print('Buffers set, dispatching shader');
     int workgroups = (size + 255) ~/ 256;
     await shader.dispatch(workgroups, 1, 1);
+    print('Shader dispatched, destroying shader');
     shader.destroy();
     return result;
   }
@@ -476,10 +483,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 }
 ''';
+
     final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
+    print('Multiplying tensor by scalar: $scalar, shader code: $shaderCode');
     shader.loadKernelString(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);

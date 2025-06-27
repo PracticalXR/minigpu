@@ -41,7 +41,7 @@ String prepareShader(
   values.forEach((key, value) {
     String valueString;
     if (value is int) {
-      valueString = '${value}u'; // Format as WGSL unsigned integer literal
+      valueString = '${value}'; // Format as WGSL unsigned integer literal
     } else if (value is double) {
       // Ensure float format for WGSL f32 literal
       valueString = value.toString().contains('.')
@@ -59,6 +59,78 @@ String prepareShader(
     result = result.replaceAll('array<u32>', 'array<$wgslType>');
   });
   return result;
+}
+
+// Helper functions for type-conscious shader generation
+String getZeroValue(BufferDataType dataType) {
+  switch (dataType) {
+    case BufferDataType.float32:
+    case BufferDataType.float64:
+    case BufferDataType.float16:
+      return '0.0';
+    case BufferDataType.int8:
+    case BufferDataType.int16:
+    case BufferDataType.int32:
+    case BufferDataType.int64:
+      return '0i';
+    case BufferDataType.uint8:
+    case BufferDataType.uint16:
+    case BufferDataType.uint32:
+    case BufferDataType.uint64:
+      return '0u';
+  }
+}
+
+String getCastExpression(String value, BufferDataType dataType) {
+  switch (dataType) {
+    case BufferDataType.float32:
+    case BufferDataType.float64:
+    case BufferDataType.float16:
+      return value; // Already float
+    case BufferDataType.int8:
+    case BufferDataType.int16:
+    case BufferDataType.int32:
+    case BufferDataType.int64:
+      return 'i32($value)';
+    case BufferDataType.uint8:
+    case BufferDataType.uint16:
+    case BufferDataType.uint32:
+    case BufferDataType.uint64:
+      return 'u32($value)';
+  }
+}
+
+String getByteConversionCode(BufferDataType dataType) {
+  switch (dataType) {
+    case BufferDataType.float32:
+      return '''
+        let byte_index = i * 4u;
+        let b0 = (input_bytes[byte_index / 4u] >> ((byte_index % 4u) * 8u)) & 0xFFu;
+        let b1 = (input_bytes[(byte_index + 1u) / 4u] >> (((byte_index + 1u) % 4u) * 8u)) & 0xFFu;
+        let b2 = (input_bytes[(byte_index + 2u) / 4u] >> (((byte_index + 2u) % 4u) * 8u)) & 0xFFu;
+        let b3 = (input_bytes[(byte_index + 3u) / 4u] >> (((byte_index + 3u) % 4u) * 8u)) & 0xFFu;
+        let bits = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+        output[i] = bitcast<f32>(bits);
+      ''';
+    case BufferDataType.int32:
+      return '''
+        let byte_index = i * 4u;
+        let b0 = (input_bytes[byte_index / 4u] >> ((byte_index % 4u) * 8u)) & 0xFFu;
+        let b1 = (input_bytes[(byte_index + 1u) / 4u] >> (((byte_index + 1u) % 4u) * 8u)) & 0xFFu;
+        let b2 = (input_bytes[(byte_index + 2u) / 4u] >> (((byte_index + 2u) % 4u) * 8u)) & 0xFFu;
+        let b3 = (input_bytes[(byte_index + 3u) / 4u] >> (((byte_index + 3u) % 4u) * 8u)) & 0xFFu;
+        let packed = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+        output[i] = i32(packed);
+      ''';
+    case BufferDataType.uint8:
+      return '''
+        let byte_index = i;
+        let packed = (input_bytes[byte_index / 4u] >> ((byte_index % 4u) * 8u)) & 0xFFu;
+        output[i] = u32(packed);
+      ''';
+    default:
+      return 'output[i] = input_bytes[i];';
+  }
 }
 
 extension TesorHelper<T extends TypedData> on Tensor<T> {

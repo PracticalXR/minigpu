@@ -13,6 +13,216 @@ void main() {
 
   tearDownAll(() async {});
 
+  group('Buffer Binding State Crash Tests', () {
+    test('rapid buffer binding changes - crash reproduction', () async {
+      const size = 1024;
+
+      print('Testing rapid buffer binding changes that cause crashes...');
+
+      final inputBuffer = gpu.createBuffer(size * 4, BufferDataType.float32);
+      final outputBuffer = gpu.createBuffer(size * 4, BufferDataType.float32);
+
+      // Fill input with test data
+      final inputData = Float32List.fromList(
+        List.generate(size, (i) => i.toDouble()),
+      );
+      inputBuffer.write(
+        inputData,
+        inputData.length,
+        dataType: BufferDataType.float32,
+      );
+
+      final shaderCode = '''
+@group(0) @binding(0) var<storage, read_write> input_0: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= arrayLength(&input_0)) { return; }
+    output_0[i] = input_0[i] * 2.0;
+}
+''';
+
+      final shader = gpu.createComputeShader();
+      shader.loadKernelString(shaderCode);
+
+      // This pattern mimics what happens in the GPU pipeline
+      print('  Setting initial buffers...');
+      shader.setBuffer('input_0', inputBuffer);
+      shader.setBuffer('output_0', outputBuffer);
+
+      print('  First dispatch...');
+      await shader.dispatch(4, 1, 1);
+
+      // Now reset bindings - this might trigger the crash
+      print('  Resetting same buffers (this might crash)...');
+      shader.setBuffer('input_0', inputBuffer); // Same buffer, same tag
+      shader.setBuffer('output_0', outputBuffer); // Same buffer, same tag
+
+      print('  Second dispatch (crash likely here)...');
+      await shader.dispatch(4, 1, 1);
+
+      shader.destroy();
+      inputBuffer.destroy();
+      outputBuffer.destroy();
+    });
+
+    test(
+      'string tag buffer binding with same pointers - crash scenario',
+      () async {
+        const size = 512;
+
+        print('Testing string tag binding with pointer reuse...');
+
+        final buffer1 = gpu.createBuffer(size * 4, BufferDataType.float32);
+        final buffer2 = gpu.createBuffer(size * 4, BufferDataType.float32);
+
+        final shaderCode = '''
+@group(0) @binding(0) var<storage, read_write> input_0: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= arrayLength(&input_0)) { return; }
+    output_0[i] = input_0[i] + 1.0;
+}
+''';
+
+        final shader = gpu.createComputeShader();
+        shader.loadKernelString(shaderCode);
+
+        // Scenario 1: Set buffers first time
+        print('  Initial binding...');
+        shader.setBuffer('input_0', buffer1);
+        shader.setBuffer('output_0', buffer2);
+        await shader.dispatch(8, 1, 1);
+
+        // Scenario 2: Set same tag with same buffer (early return in C++)
+        print('  Same buffer, same tag (should early return)...');
+        shader.setBuffer('input_0', buffer1); // Same pointer - early return
+
+        // Scenario 3: Different buffer, same tag (binding update)
+        print('  Different buffer, same tag...');
+        shader.setBuffer(
+          'input_0',
+          buffer2,
+        ); // Different pointer - update binding
+
+        // Scenario 4: Back to original buffer (this is where crash happens)
+        print('  Back to original buffer (crash point)...');
+        shader.setBuffer('input_0', buffer1); // Back to original - crash here
+
+        print('  Final dispatch (likely crashes)...');
+        await shader.dispatch(8, 1, 1);
+
+        shader.destroy();
+        buffer1.destroy();
+        buffer2.destroy();
+      },
+    );
+
+    test('kernel tags map corruption - exact crash reproduction', () async {
+      const size = 256;
+
+      print('Testing kernel tags map corruption...');
+
+      final inputBuffer = gpu.createBuffer(size * 4, BufferDataType.float32);
+      final outputBuffer = gpu.createBuffer(size * 4, BufferDataType.float32);
+
+      final shaderCode = '''
+@group(0) @binding(0) var<storage, read_write> input_0: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= arrayLength(&input_0)) { return; }
+    output_0[i] = input_0[i] * 1.5;
+}
+''';
+
+      final shader = gpu.createComputeShader();
+      shader.loadKernelString(shaderCode);
+
+      // This exactly replicates the crash scenario from the logs
+      print('  🔧 Setting buffer input_0...');
+      shader.setBuffer('input_0', inputBuffer);
+
+      print('  🔧 Setting buffer output_0...');
+      shader.setBuffer('output_0', outputBuffer);
+
+      print('  🔧 First dispatch...');
+      await shader.dispatch(1, 1, 1);
+
+      // Now simulate what happens in merged processing
+      print('  🔧 Re-setting input_0 (same buffer)...');
+      shader.setBuffer('input_0', inputBuffer);
+
+      print('  🔧 Re-setting output_0 (same buffer)...');
+      shader.setBuffer('output_0', outputBuffer);
+
+      print('  🔧 Crash dispatch...');
+      await shader.dispatch(1, 1, 1); // This should crash
+
+      shader.destroy();
+      inputBuffer.destroy();
+      outputBuffer.destroy();
+    });
+
+    test('buffer binding state after multiple operations', () async {
+      const size = 128;
+
+      print('Testing buffer binding state persistence...');
+
+      // Create buffers that will be reused
+      final inputA = gpu.createBuffer(size * 4, BufferDataType.float32);
+      final inputB = gpu.createBuffer(size * 4, BufferDataType.float32);
+      final output = gpu.createBuffer(size * 4, BufferDataType.float32);
+
+      final shaderCode = '''
+@group(0) @binding(0) var<storage, read_write> input_0: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
+
+@compute @workgroup_size(32)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= arrayLength(&input_0)) { return; }
+    output_0[i] = input_0[i] + 10.0;
+}
+''';
+
+      final shader = gpu.createComputeShader();
+      shader.loadKernelString(shaderCode);
+
+      // Pattern that leads to crash:
+      // 1. Set initial bindings
+      shader.setBuffer('input_0', inputA);
+      shader.setBuffer('output_0', output);
+      await shader.dispatch(4, 1, 1);
+
+      // 2. Change input buffer
+      shader.setBuffer('input_0', inputB);
+      await shader.dispatch(4, 1, 1);
+
+      // 3. Change back to original (this corrupts binding state)
+      shader.setBuffer('input_0', inputA);
+
+      // 4. Reset output buffer too (double corruption)
+      shader.setBuffer('output_0', output);
+
+      // 5. This dispatch crashes due to corrupted WebGPU binding state
+      print('  Final dispatch (should crash)...');
+      await shader.dispatch(4, 1, 1);
+
+      shader.destroy();
+      inputA.destroy();
+      inputB.destroy();
+      output.destroy();
+    });
+  });
+
   group('Rapid Dispatch Crash Test', () {
     test('rapid sequential dispatches - spectrogram scenario', () async {
       const width = 200;

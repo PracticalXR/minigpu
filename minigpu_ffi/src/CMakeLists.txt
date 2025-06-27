@@ -92,8 +92,12 @@ if(EMSCRIPTEN)
         -sEXPORTED_FUNCTIONS=_malloc,_free,_memcpy \
         -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
         -sUSE_GLFW=3 \
+        -sINITIAL_MEMORY=256MB \
+        -sSTACK_SIZE=64MB \
         -sALLOW_MEMORY_GROWTH=1 \
+        -sMAXIMUM_MEMORY=2GB \
         -sASYNCIFY \
+        -sASYNCIFY_STACK_SIZE=64MB \
         -sASYNCIFY_IGNORE_INDIRECT=1 \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
