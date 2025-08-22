@@ -48,7 +48,7 @@ if(EMSCRIPTEN)
     include_directories(BEFORE "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/")
 
     # Create a helper library for WebGPU (from Dawn)
-    add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/webgpu.cpp")
+    add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/webgpu.cpp")
 
     set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
 
@@ -104,7 +104,7 @@ if(EMSCRIPTEN)
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_enum_tables.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_struct_info.js \
         --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_sig_info.js \
-        --js-library=${DAWN_DIR}/third_party/emdawnwebgpu/library_webgpu.js \
+        --js-library=${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/library_webgpu.js \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
     ")
 else()

@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+#include "./mutex.h"
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -50,7 +52,7 @@ class WebGPUThread {
 private:
   std::thread worker;
   std::queue<std::function<void()>> tasks;
-  std::mutex queueMutex;
+  mgpu::mutex queueMutex;
   std::condition_variable condition;
   std::atomic<bool> stop{false};
 
@@ -106,11 +108,11 @@ public:
   WGPUQueue getQueue() const;
   WGPUInstance getInstance() const;
 
-  std::mutex &getGpuMutex() { return gpuOperationMutex; }
+  mgpu::mutex &getGpuMutex() { return gpuOperationMutex; }
 
 private:
   std::unique_ptr<Context> ctx;
-  std::mutex gpuOperationMutex;
+  mgpu::mutex gpuOperationMutex;
   WebGPUThread webgpuThread;
 };
 class Buffer {
@@ -124,7 +126,7 @@ public:
   Buffer(const Buffer &) = delete;
   Buffer &operator=(const Buffer &) = delete;
 
-  void createBuffer(size_t elementCount, BufferDataType dataType);
+  void createBuffer(size_t byteSize, BufferDataType dataType);
 
   void write(const float *inputData, size_t elementCount);
   void write(const int32_t *inputData, size_t elementCount);

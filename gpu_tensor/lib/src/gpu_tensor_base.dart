@@ -107,7 +107,8 @@ class Tensor<T extends TypedData> {
       print("Initializing GPU context...");
       await gpu.init();
     }
-    return Tensor._(shape, gpu: gpu, data: data, dataType: dataType);
+    final effectiveType = _inferDataTypeFor<T>(dataType);
+    return Tensor<T>._(shape, gpu: gpu, data: data, dataType: effectiveType);
   }
 
   /// Returns the data from the GPU buffer as type T.
@@ -174,8 +175,10 @@ class Tensor<T extends TypedData> {
       await gpu.init();
     }
 
-    // Use private constructor with explicit cast
-    final tensor = Tensor._(shape, gpu: gpu, dataType: dataType) as Tensor<T>;
+    final effectiveType = _inferDataTypeFor<T>(dataType);
+
+    // Use private constructor with explicit generic type
+    final tensor = Tensor<T>._(shape, gpu: gpu, dataType: effectiveType);
     final size = tensor.size;
 
     final shaderTemplate = '''
@@ -190,9 +193,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ''';
 
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
+    final shaderCode = prepareShader(shaderTemplate, effectiveType, {
       'size': size,
-      'zeroValue': getZeroValue(dataType),
+      'zeroValue': getZeroValue(effectiveType),
     });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('output', tensor.buffer);
@@ -218,7 +221,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       await gpu.init();
     }
 
-    final tensor = Tensor._(shape, gpu: gpu, dataType: dataType) as Tensor<T>;
+    final effectiveType = _inferDataTypeFor<T>(dataType);
+
+    final tensor = Tensor<T>._(shape, gpu: gpu, dataType: effectiveType);
     final size = tensor.size;
     final actualSeed = seed ?? DateTime.now().millisecondsSinceEpoch;
 
@@ -244,12 +249,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ''';
 
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
+    final shaderCode = prepareShader(shaderTemplate, effectiveType, {
       'size': size,
       'seed': actualSeed,
       'min': min,
       'range': max - min,
-      'castValue': getCastExpression('scaled_val', dataType),
+      'castValue': getCastExpression('scaled_val', effectiveType),
     });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('output', tensor.buffer);
@@ -261,9 +266,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 
   /// Creates a tensor from byte data using GPU shader for type conversion.
-  /// The byte data format should be: [rank][dim1][dim2]...[dimN][data...]
-  /// where rank is 4 bytes (int32), each dimension is 4 bytes (int32),
-  /// followed by the actual tensor data.
   static Future<Tensor<T>> fromBytes<T extends TypedData>(
     Uint8List bytes, {
     Minigpu? gpu,
@@ -315,8 +317,8 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 
     // Create tensor
-    final tensor =
-        Tensor<T>._(shape, gpu: gpu, dataType: dataType) as Tensor<T>;
+    final effectiveType = _inferDataTypeFor<T>(dataType);
+    final tensor = Tensor<T>._(shape, gpu: gpu, dataType: effectiveType);
 
     // Extract data portion
     final dataBytes = bytes.sublist(headerSize);
@@ -343,9 +345,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 ''';
 
     final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
+    final shaderCode = prepareShader(shaderTemplate, effectiveType, {
       'size': size,
-      'conversionCode': getByteConversionCode(dataType),
+      'conversionCode': getByteConversionCode(effectiveType),
     });
     shader.loadKernelString(shaderCode);
     shader.setBuffer('input_bytes', byteBuffer);
@@ -385,5 +387,25 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     result.setRange(headerSize, totalSize, dataBytes);
 
     return result;
+  }
+
+  static BufferDataType _inferDataTypeFor<T extends TypedData>(
+    BufferDataType requested,
+  ) {
+    // Honor explicit non-default request
+    if (requested != BufferDataType.float32) return requested;
+
+    // Infer from T when caller didn't override (default was float32)
+    if (T == Int8List) return BufferDataType.int8;
+    if (T == Uint8List) return BufferDataType.uint8;
+    if (T == Int16List) return BufferDataType.int16;
+    if (T == Uint16List) return BufferDataType.uint16;
+    if (T == Int32List) return BufferDataType.int32;
+    if (T == Uint32List) return BufferDataType.uint32;
+    if (T == Float32List) return BufferDataType.float32;
+    if (T == Float64List) return BufferDataType.float64;
+
+    // Fallback
+    return requested;
   }
 }

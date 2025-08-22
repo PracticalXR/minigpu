@@ -7,6 +7,8 @@
 #include <iomanip>
 #include <sstream>
 
+#include "../include/mutex.h"
+
 namespace mgpu {
 
 enum LogLevel {
@@ -25,7 +27,7 @@ public:
     }
 
     void setLevel(LogLevel level) {
-        std::lock_guard<std::mutex> lock(mutex_);
+        mgpu::lock_guard<mgpu::mutex> lock(mutex_);
         level_ = level;
     }
 
@@ -33,7 +35,7 @@ public:
     void log(LogLevel level, const char* file, int line, const char* format, Args... args) {
         if (level_ == LOG_NONE || level < level_) return;
 
-        std::lock_guard<std::mutex> lock(mutex_);
+        mgpu::lock_guard<mgpu::mutex> lock(mutex_);
         
         auto now = std::chrono::system_clock::now();
         auto time_t = std::chrono::system_clock::to_time_t(now);
@@ -64,7 +66,7 @@ private:
     ~Logger() = default;
 
     LogLevel level_;
-    std::mutex mutex_;
+    mgpu::mutex mutex_;
 };
 
 } // namespace mgpu

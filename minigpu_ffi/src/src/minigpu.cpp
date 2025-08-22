@@ -117,20 +117,22 @@ size_t getElementSize(BufferDataType dataType) {
   }
 }
 
-MGPUBuffer *mgpuCreateBuffer(int elementCount, int dataType) {
-  LOG_INFO("mgpuCreateBuffer: elementCount=%d, dataType=%d", elementCount,
+MGPUBuffer *mgpuCreateBuffer(int byteSize, int dataType) {
+  LOG_INFO("mgpuCreateBuffer: byteSize=%d, dataType=%d", byteSize,
            dataType);
 
   BufferDataType mappedType = mapIntToBufferDataType(dataType);
   LOG_INFO("mappedType=%d", (int)mappedType);
 
+  size_t elementSize = getElementSize(mappedType);
+  size_t elementCount = byteSize / elementSize;
+
   auto *buf = new mgpu::Buffer(minigpu);
   try {
     if (needsPacking(mappedType)) {
-      LOG_INFO("Creating packed buffer with elementCount=%d", elementCount);
-      buf->createBuffer(static_cast<size_t>(elementCount), mappedType);
+      LOG_INFO("Creating packed buffer with byteSize=%d", byteSize);
+      buf->createBuffer(static_cast<size_t>(byteSize), mappedType);
     } else {
-      size_t byteSize = elementCount;
       LOG_INFO("Creating direct buffer with byteSize=%zu (elementCount=%d * "
                "elementSize=%zu)",
                byteSize, elementCount, getElementSize(mappedType));

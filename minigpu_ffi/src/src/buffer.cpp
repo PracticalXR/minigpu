@@ -1,6 +1,7 @@
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
 #include "../include/log.h"
+#include "../include/mutex.h"
 #include "../include/platform_sleep.h"
 #include <algorithm>
 #include <chrono>
@@ -17,7 +18,7 @@ WebGPUThread::WebGPUThread() {
     while (true) {
       std::function<void()> task;
       {
-        std::unique_lock<std::mutex> lock(queueMutex);
+        mgpu::unique_lock<mgpu::mutex> lock(queueMutex);
         condition.wait(lock, [this] { return !tasks.empty() || stop; });
 
         if (stop && tasks.empty())
@@ -35,7 +36,7 @@ WebGPUThread::WebGPUThread() {
 WebGPUThread::~WebGPUThread() {
 #ifndef __EMSCRIPTEN__
   {
-    std::lock_guard<std::mutex> lock(queueMutex);
+    mgpu::lock_guard<mgpu::mutex> lock(queueMutex);
     stop = true;
   }
   condition.notify_all();
@@ -54,7 +55,7 @@ void WebGPUThread::enqueueAsync(std::function<void()> task) {
 #else
   // Native platforms: use actual thread
   {
-    std::lock_guard<std::mutex> lock(queueMutex);
+    mgpu::lock_guard<mgpu::mutex> lock(queueMutex);
     tasks.push(std::move(task));
   }
   condition.notify_one();
@@ -87,7 +88,7 @@ void MGPU::initializeContext() {
   struct AdapterRequestState {
     WGPUAdapter adapter = nullptr;
     bool completed = false;
-    std::mutex mutex;
+    mgpu::mutex mutex;
     std::condition_variable cv;
   };
 
@@ -102,17 +103,13 @@ void MGPU::initializeContext() {
                                     WGPUAdapter adapter, WGPUStringView message,
                                     void *userdata1, void *userdata2) {
     AdapterRequestState *state = static_cast<AdapterRequestState *>(userdata1);
-#ifndef __EMSCRIPTEN__
-    std::lock_guard<std::mutex> lock(state->mutex);
-#endif
+    mgpu::lock_guard<mgpu::mutex> lock(state->mutex);
 
     if (status == WGPURequestAdapterStatus_Success) {
       state->adapter = adapter;
     }
     state->completed = true;
-#ifndef __EMSCRIPTEN__
     state->cv.notify_one();
-#endif
   };
   adapterCallbackInfo.userdata1 = &adapterState;
 
@@ -153,9 +150,6 @@ void MGPU::initializeContext() {
         case WGPUDeviceLostReason_Destroyed:
           reasonStr = "Destroyed";
           break;
-        case WGPUDeviceLostReason_InstanceDropped:
-          reasonStr = "Instance Dropped";
-          break;
         case WGPUDeviceLostReason_FailedCreation:
           reasonStr = "Failed Creation";
           break;
@@ -177,7 +171,7 @@ void MGPU::initializeContext() {
   struct DeviceRequestState {
     WGPUDevice device = nullptr;
     bool completed = false;
-    std::mutex mutex;
+    mgpu::mutex mutex;
     std::condition_variable cv;
   };
 
@@ -190,17 +184,13 @@ void MGPU::initializeContext() {
                                    WGPUDevice device, WGPUStringView message,
                                    void *userdata1, void *userdata2) {
     DeviceRequestState *state = static_cast<DeviceRequestState *>(userdata1);
-#ifndef __EMSCRIPTEN__
-    std::lock_guard<std::mutex> lock(state->mutex);
-#endif
+    mgpu::lock_guard<mgpu::mutex> lock(state->mutex);
 
     if (status == WGPURequestDeviceStatus_Success) {
       state->device = device;
     }
     state->completed = true;
-#ifndef __EMSCRIPTEN__
     state->cv.notify_one();
-#endif
   };
   deviceCallbackInfo.userdata1 = &deviceState;
 
@@ -359,8 +349,8 @@ Buffer &Buffer::operator=(Buffer &&other) noexcept {
   return *this;
 }
 
-void Buffer::createBuffer(size_t sizeParam, BufferDataType dataType) {
-  LOG_INFO("createBuffer called: sizeParam=%zu, dataType=%d", sizeParam,
+void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
+  LOG_INFO("createBuffer called: byteSize=%zu, dataType=%d", byteSize,
            (int)dataType);
 
   try {
@@ -373,14 +363,14 @@ void Buffer::createBuffer(size_t sizeParam, BufferDataType dataType) {
 
     this->dataType = dataType;
     this->isPacked = needsPacking(dataType);
+    this->elementCount = byteSize / getElementSize(dataType);
 
     LOG_INFO("isPacked=%s", isPacked ? "true" : "false");
 
     size_t physicalByteSize;
 
     if (isPacked) {
-      // For PACKED types, sizeParam is ELEMENT COUNT
-      this->elementCount = sizeParam;
+      // For PACKED types, byteSize is ELEMENT COUNT
       LOG_INFO("Packed type: elementCount=%zu", elementCount);
 
       switch (dataType) {
@@ -406,13 +396,11 @@ void Buffer::createBuffer(size_t sizeParam, BufferDataType dataType) {
         break;
       }
     } else {
-      // For DIRECT types, sizeParam is BYTE SIZE
-      physicalByteSize = sizeParam;
       size_t elementSize = getElementSize(dataType);
-      this->elementCount = elementSize > 0 ? physicalByteSize / elementSize : 0;
-      LOG_INFO("Direct type: physicalByteSize=%zu, elementSize=%zu, "
-               "elementCount=%zu",
-               physicalByteSize, elementSize, elementCount);
+      physicalByteSize = elementCount * elementSize;
+      LOG_INFO("Direct type: elementCount=%zu, elementSize=%zu, "
+               "physicalByteSize=%zu",
+               elementCount, elementSize, physicalByteSize);
     }
 
     // Apply WebGPU requirements
@@ -734,10 +722,8 @@ void Buffer::writeDirect(const T *inputData, size_t byteSize,
   LOG_INFO("setDataDirect: byteSize=%zu, bufferSize=%zu, inputData=%p",
            byteSize, bufferData.size, inputData);
 
-// Acquire WebGPU operation lock to prevent conflicts with compute dispatch
-#ifndef __EMSCRIPTEN__
-  std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
-#endif
+  // Acquire WebGPU operation lock to prevent conflicts with compute dispatch
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
   WGPUDevice device = mgpu.getDevice();
   WGPUQueue queue = mgpu.getQueue();
@@ -834,7 +820,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   LOG_INFO("readDirect: elementCount=%zu, offset=%zu, sizeof(T)=%zu",
            elementCount, offset, sizeof(T));
 
-  size_t elementSize = sizeof(T);
+  size_t elementSize = getElementSize(dataType);
   size_t byteOffset = offset * elementSize;
   size_t readBytes = elementCount * elementSize;
 
@@ -853,9 +839,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   }
 
   // Acquire WebGPU operation lock to prevent conflicts with compute dispatch
-#ifndef __EMSCRIPTEN__
-  std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
-#endif
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
   WGPUDevice device = mgpu.getDevice();
   WGPUQueue queue = mgpu.getQueue();
@@ -907,8 +891,8 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   struct ReadState {
     bool completed = false;
     WGPUMapAsyncStatus status = WGPUMapAsyncStatus_Success;
+    mgpu::mutex mutex;
 #ifndef __EMSCRIPTEN__
-    std::mutex mutex;
     std::condition_variable cv;
 #endif
   };
@@ -921,9 +905,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
                                 WGPUStringView message, void *userdata1,
                                 void *userdata2) {
     ReadState *state = static_cast<ReadState *>(userdata1);
-#ifndef __EMSCRIPTEN__
-    std::lock_guard<std::mutex> lock(state->mutex);
-#endif
+    mgpu::lock_guard<mgpu::mutex> lock(state->mutex);
     state->status = status;
     state->completed = true;
 
@@ -933,28 +915,24 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   };
   mapCallbackInfo.userdata1 = &readState;
 
-  wgpuBufferMapAsync(stagingBuffer, WGPUMapMode_Read, 0, readBytes,
+    auto future = wgpuBufferMapAsync(stagingBuffer, WGPUMapMode_Read, 0, readBytes,
                      mapCallbackInfo);
 
   WGPUInstance instance = mgpu.getInstance();
 
-  // Process events until mapping completes
-  int attempts = 0;
-  const int maxAttempts = 1000;
-#ifndef __EMSCRIPTEN__
-  while (!readState.completed && attempts < maxAttempts) {
-    platformSleep(1, instance);
-    attempts++;
+  // Wait for the map operation
+  WGPUFutureWaitInfo waitInfo = {};
+  waitInfo.future = future;
+  wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+  if (waitInfo.completed != true) {
+    LOG_WARN("wgpuInstanceWaitAny returned status %d, falling back to polling",
+             (int)waitInfo.completed);
+    while (!readState.completed) {
+      platformSleep(1, instance);
+    }
   }
-#else
-  while (!readState.completed) {
-    platformSleep(5, instance);
-  }
-#endif
 
-  if (attempts >= maxAttempts) {
-    LOG_ERROR("Buffer mapping timed out");
-  } else if (readState.status == WGPUMapAsyncStatus_Success) {
+  if (readState.status == WGPUMapAsyncStatus_Success) {
     const void *mappedData =
         wgpuBufferGetConstMappedRange(stagingBuffer, 0, readBytes);
     if (mappedData) {

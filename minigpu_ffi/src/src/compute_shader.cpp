@@ -1,5 +1,6 @@
 #include "../include/compute_shader.h"
 #include "../include/buffer.h"
+#include "../include/mutex.h"
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -318,9 +319,7 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
                                   std::function<void()> callback) {
   auto dispatchTask = [this, groupsX, groupsY, groupsZ, callback]() {
-#ifndef __EMSCRIPTEN__
-    std::lock_guard<std::mutex> lock(mgpu.getGpuMutex());
-#endif
+    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
       if (callback)

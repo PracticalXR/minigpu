@@ -67,7 +67,7 @@ if(NOT DAWN_BUILD_FOUND)
 
   # Force Dawn build options.
   set(DAWN_ALWAYS_ASSERT           OFF CACHE INTERNAL "Always assert in Dawn" FORCE)
-  set(DAWN_BUILD_MONOLITHIC_LIBRARY ON CACHE INTERNAL "Build Dawn monolithically" FORCE)
+  set(DAWN_BUILD_MONOLITHIC_LIBRARY OFF CACHE INTERNAL "Build Dawn monolithically" FORCE)
   set(DAWN_BUILD_EXAMPLES          OFF CACHE INTERNAL "Build Dawn examples" FORCE)
   set(DAWN_BUILD_SAMPLES           OFF CACHE INTERNAL "Build Dawn samples" FORCE)
   set(DAWN_BUILD_TESTS             OFF CACHE INTERNAL "Build Dawn tests" FORCE)
@@ -78,7 +78,7 @@ if(NOT DAWN_BUILD_FOUND)
   set(TINT_BUILD_CMD_TOOLS         OFF CACHE INTERNAL "Build Tint command line tools" FORCE)
   set(DAWN_EMSCRIPTEN_TOOLCHAIN    ${EMSCRIPTEN_DIR} CACHE INTERNAL "Emscripten toolchain" FORCE)
 
-  set(DAWN_COMMIT "66d57f910357befb441b91162f29a97f687af6d9" CACHE STRING "Dawn commit to checkout" FORCE)
+  set(DAWN_COMMIT "af771226e2ea32c0816418103f28d52b149d5af4" CACHE STRING "Dawn commit to checkout" FORCE)
   
   file(MAKE_DIRECTORY ${DAWN_DIR})
   # Initialize Git and set/update remote.

@@ -56,8 +56,8 @@ Future<void> mgpuInitializeContext() async {
   await ccall(
     "mgpuInitializeContext".toJS,
     "void".toJS,
-    <JSAny>[].toJSDeep,
-    <JSAny>[].toJSDeep,
+    <JSAny>[].toJS,
+    <JSAny>[].toJS,
     {"async": true}.toJSDeep,
   ).toDart;
 }
@@ -66,8 +66,8 @@ Future<void> mgpuDestroyContext() async {
   await ccall(
     "mgpuDestroyContext".toJS,
     "void".toJS,
-    <JSAny>[].toJSDeep,
-    <JSAny>[].toJSDeep,
+    <JSAny>[].toJS,
+    <JSAny>[].toJS,
     {"async": true}.toJSDeep,
   ).toDart;
 }
@@ -116,15 +116,18 @@ void mgpuLoadKernel(MGPUComputeShader shader, String kernelString) {
 
   _heapU8.setRange(startIndex, startIndex + kernelBytes.length, kernelBytes);
   _mgpuLoadKernel(shader, ptr);
-
+  if (!mgpuHasKernel(shader)) {
+    _free(ptr);
+    throw StateError('Kernel not accepted by native layer');
+  }
   _free(ptr);
 }
 
 @JS('_mgpuHasKernel')
-external JSBoolean _mgpuHasKernel(MGPUComputeShader shader);
+external JSNumber _mgpuHasKernel(MGPUComputeShader shader);
 
 bool mgpuHasKernel(MGPUComputeShader shader) {
-  return _mgpuHasKernel(shader).dartify() as bool;
+  return _mgpuHasKernel(shader).toDartInt == 1 ? true : false;
 }
 
 // Buffer functions
@@ -165,8 +168,9 @@ Future<void> mgpuDispatch(
     await ccall(
       "mgpuDispatch".toJS,
       "void".toJS,
-      ["number", "number", "number", "number", "number"].toJSDeep,
-      [shader, groupsX.toJS, groupsY.toJS, groupsZ.toJS].toJSDeep,
+      // FIX: argTypes length must match args length (4)
+      ["number", "number", "number", "number"].toJS,
+      [shader, groupsX.toJS, groupsY.toJS, groupsZ.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
   } finally {}
@@ -219,8 +223,8 @@ Future<void> mgpuReadAsyncInt8(
     await ccall(
       "mgpuReadSyncInt8".toJS, // Use sync C++ function
       "void".toJS, // C++ function returns void
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -266,8 +270,8 @@ Future<void> mgpuReadAsyncInt16(
     await ccall(
       "mgpuReadSyncInt16".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -311,8 +315,8 @@ Future<void> mgpuReadAsyncInt32(
     await ccall(
       "mgpuReadSyncInt32".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -350,8 +354,8 @@ Future<void> mgpuReadAsyncInt64(
     await ccall(
       "mgpuReadSyncInt64".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -432,8 +436,8 @@ Future<void> mgpuReadAsyncUint8(
     await ccall(
       "mgpuReadSyncUint8".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -476,8 +480,8 @@ Future<void> mgpuReadAsyncUint16(
     await ccall(
       "mgpuReadSyncUint16".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -520,8 +524,8 @@ Future<void> mgpuReadAsyncUint32(
     await ccall(
       "mgpuReadSyncUint32".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -555,20 +559,11 @@ Future<void> mgpuReadAsyncUint64(
   final int startByteIndex = ptr.toDartInt; // Byte index
 
   try {
-    // Add bounds check for the heap access
-    if (startByteIndex < 0 ||
-        startByteIndex + sizeToAllocate > _heapU8.length) {
-      throw StateError(
-        'Uint64 buffer read would exceed heap bounds: '
-        'trying to read $elementsToRead elements at index $startByteIndex '
-        'but heap size is ${_heapU8.length}',
-      );
-    }
     await ccall(
       "mgpuReadSyncUint64".toJS, // Use sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -653,8 +648,8 @@ Future<void> mgpuReadAsyncFloat(
     await ccall(
       "mgpuReadSyncFloat32".toJS,
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -703,8 +698,8 @@ Future<void> mgpuReadAsyncDouble(
     await ccall(
       "mgpuReadSyncFloat64".toJS, // Use specific sync C++ function
       "void".toJS,
-      ["number", "number", "number", "number"].toJSDeep,
-      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJSDeep,
+      ["number", "number", "number", "number"].toJS,
+      [buffer, ptr, elementsToRead.toJS, elementOffset.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
 
@@ -723,14 +718,17 @@ external void _mgpuWriteInt8(
 );
 
 void mgpuWriteInt8(MGPUBuffer buffer, Int8List inputData, int size) {
-  final int elementsToWrite = size > 0 ? size : inputData.length;
-  final int byteSize = elementsToWrite * Int8List.bytesPerElement;
+  final int elementsRequested = size > 0 ? size : inputData.length;
+  final int actualElements = elementsRequested <= inputData.length
+      ? elementsRequested
+      : inputData.length;
+  final int byteSize = actualElements * Int8List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
   final int startIndex = ptr.toDartInt;
   try {
-    final int actualElements = elementsToWrite <= inputData.length
-        ? elementsToWrite
-        : inputData.length;
+    if (startIndex < 0 || startIndex + actualElements > _heapU8.length) {
+      throw StateError('Int8 write would exceed heap bounds');
+    }
     _heapU8.setRange(
       startIndex,
       startIndex + actualElements,
@@ -816,12 +814,27 @@ external void _mgpuWriteInt64(
 );
 
 void mgpuWriteInt64(MGPUBuffer buffer, Int64List inputData, int size) {
-  final int byteSize = size * Int64List.bytesPerElement;
+  final int elementsRequested = size > 0 ? size : inputData.length;
+  final int actualElements = elementsRequested <= inputData.length
+      ? elementsRequested
+      : inputData.length;
+  final int byteSize = actualElements * Int64List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt ~/ Int64List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
+    if (startByteIndex % 8 != 0) {
+      throw StateError('Int64 pointer not 8-byte aligned');
+    }
+    final startElementIndex = startByteIndex ~/ Int64List.bytesPerElement;
     final heapInt64 = _heapU8.buffer.asInt64List();
-    heapInt64.setRange(startIndex, startIndex + inputData.length, inputData);
+    if (startElementIndex + actualElements > heapInt64.length) {
+      throw StateError('Int64 write would exceed heap bounds');
+    }
+    heapInt64.setRange(
+      startElementIndex,
+      startElementIndex + actualElements,
+      inputData.sublist(0, actualElements),
+    );
     _mgpuWriteInt64(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -836,14 +849,17 @@ external void _mgpuWriteUint8(
 );
 
 void mgpuWriteUint8(MGPUBuffer buffer, Uint8List inputData, int size) {
-  final int elementsToWrite = size > 0 ? size : inputData.length;
-  final int byteSize = elementsToWrite * Uint8List.bytesPerElement;
+  final int elementsRequested = size > 0 ? size : inputData.length;
+  final int actualElements = elementsRequested <= inputData.length
+      ? elementsRequested
+      : inputData.length;
+  final int byteSize = actualElements * Uint8List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
   final int startIndex = ptr.toDartInt;
   try {
-    final int actualElements = elementsToWrite <= inputData.length
-        ? elementsToWrite
-        : inputData.length;
+    if (startIndex < 0 || startIndex + actualElements > _heapU8.length) {
+      throw StateError('Uint8 write would exceed heap bounds');
+    }
     _heapU8.setRange(
       startIndex,
       startIndex + actualElements,
@@ -863,20 +879,23 @@ external void _mgpuWriteUint16(
 );
 
 void mgpuWriteUint16(MGPUBuffer buffer, Uint16List inputData, int size) {
-  final int byteSize = size * Uint16List.bytesPerElement;
+  final int elementsRequested = size > 0 ? size : inputData.length;
+  final int actualElements = elementsRequested <= inputData.length
+      ? elementsRequested
+      : inputData.length;
+  final int byteSize = actualElements * Uint16List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
   final int startByteIndex = ptr.toDartInt;
   try {
     final int startElementIndex = startByteIndex ~/ Uint16List.bytesPerElement;
-
-    if (startElementIndex + inputData.length > _heapU16.length) {
-      throw StateError('Uint16 buffer allocation would exceed heap bounds');
+    if (startElementIndex < 0 ||
+        startElementIndex + actualElements > _heapU16.length) {
+      throw StateError('Uint16 write would exceed heap bounds');
     }
-
     _heapU16.setRange(
       startElementIndex,
-      startElementIndex + inputData.length,
-      inputData,
+      startElementIndex + actualElements,
+      inputData.sublist(0, actualElements),
     );
     _mgpuWriteUint16(buffer, ptr, byteSize.toJS);
   } finally {
@@ -925,12 +944,27 @@ external void _mgpuWriteUint64(
 );
 
 void mgpuWriteUint64(MGPUBuffer buffer, Uint64List inputData, int size) {
-  final int byteSize = size * Uint64List.bytesPerElement;
+  final int elementsRequested = size > 0 ? size : inputData.length;
+  final int actualElements = elementsRequested <= inputData.length
+      ? elementsRequested
+      : inputData.length;
+  final int byteSize = actualElements * Uint64List.bytesPerElement;
   final JSNumber ptr = _malloc(byteSize.toJS);
-  final int startIndex = ptr.toDartInt ~/ Uint64List.bytesPerElement;
+  final int startByteIndex = ptr.toDartInt;
   try {
+    if (startByteIndex % 8 != 0) {
+      throw StateError('Uint64 pointer not 8-byte aligned');
+    }
+    final startElementIndex = startByteIndex ~/ Uint64List.bytesPerElement;
     final heapUint64 = _heapU8.buffer.asUint64List();
-    heapUint64.setRange(startIndex, startIndex + inputData.length, inputData);
+    if (startElementIndex + actualElements > heapUint64.length) {
+      throw StateError('Uint64 write would exceed heap bounds');
+    }
+    heapUint64.setRange(
+      startElementIndex,
+      startElementIndex + actualElements,
+      inputData.sublist(0, actualElements),
+    );
     _mgpuWriteUint64(buffer, ptr, byteSize.toJS);
   } finally {
     _free(ptr);
@@ -973,8 +1007,8 @@ Future<void> mgpuWriteFloat(
     await ccall(
       "mgpuWriteFloat".toJS,
       "void".toJS,
-      ["number", "number", "number"].toJSDeep,
-      [buffer, ptr, byteSize.toJS].toJSDeep,
+      ["number", "number", "number"].toJS,
+      [buffer, ptr, byteSize.toJS].toJS,
       {"async": true}.toJSDeep,
     ).toDart;
   } finally {
