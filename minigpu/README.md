@@ -39,7 +39,11 @@ to your web/index.html file.
 
 ### Installation
 
-Make sure you're running Dart SDK >=3.9.0-21.0.dev or greater.
+Make sure you have:
+
+- Dart SDK >=3.9.0-21.0.dev or greater.
+- Emscripten 4.0.10 or greater for web support.
+- CMake 3.22 or greater.
 
 Add the following to your `pubspec.yaml`:
 

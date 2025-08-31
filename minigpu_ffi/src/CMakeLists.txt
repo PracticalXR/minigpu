@@ -51,7 +51,7 @@ if(EMSCRIPTEN)
     add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/webgpu.cpp")
 
     set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
-
+    message(STATUS "Needs Emscripten 4.0.10+, please upgrade if you face issues.")
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
     if(EMSCRIPTEN_DEBUG)
         set(DEBUG_FLAGS "\
