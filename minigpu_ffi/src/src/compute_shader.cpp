@@ -77,6 +77,9 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
     return;
   }
 
+  // Synchronize with dispatch/update on GPU thread
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+
   // Resize if needed
   if (tag >= static_cast<int>(buffers.size())) {
     buffers.resize(tag + 1);
@@ -266,6 +269,9 @@ bool ComputeShader::updatePipelineIfNeeded() {
 void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
   // async dispatch, returns immediately
   auto dispatchTask = [this, groupsX, groupsY, groupsZ]() {
+    // Ensure consistency with concurrent setBuffer calls
+    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
       return;
     }

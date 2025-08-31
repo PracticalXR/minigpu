@@ -26,18 +26,15 @@ var ENVIRONMENT_IS_SHELL = false;
 // refer to Module (if they choose; they can also define Module)
 
 
-// Sometimes an existing Module object exists with properties
-// meant to overwrite the default module functionality. Here
-// we collect those properties and reapply _after_ we configure
-// the current environment's defaults to avoid having to be so
-// defensive during initialization.
-var moduleOverrides = {...Module};
-
 var arguments_ = [];
 var thisProgram = './this.program';
 var quit_ = (status, toThrow) => {
   throw toThrow;
 };
+
+// In MODULARIZE mode _scriptName needs to be captured already at the very top of the page immediately when the page is parsed, so it is generated there
+// before the page load. In non-MODULARIZE modes generate it here.
+var _scriptName = typeof document != 'undefined' ? document.currentScript?.src : undefined;
 
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
@@ -55,21 +52,11 @@ var readAsync, readBinary;
 // Node.js workers are detected as a combination of ENVIRONMENT_IS_WORKER and
 // ENVIRONMENT_IS_NODE.
 if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
-  if (ENVIRONMENT_IS_WORKER) { // Check worker, not web, since window could be polyfilled
-    scriptDirectory = self.location.href;
-  } else if (typeof document != 'undefined' && document.currentScript) { // web
-    scriptDirectory = document.currentScript.src;
-  }
-  // blob urls look like blob:http://site.com/etc/etc and we cannot infer anything from them.
-  // otherwise, slice off the final part of the url to find the script directory.
-  // if scriptDirectory does not contain a slash, lastIndexOf will return -1,
-  // and scriptDirectory will correctly be replaced with an empty string.
-  // If scriptDirectory contains a query (starting with ?) or a fragment (starting with #),
-  // they are removed because they could contain a slash.
-  if (scriptDirectory.startsWith('blob:')) {
-    scriptDirectory = '';
-  } else {
-    scriptDirectory = scriptDirectory.slice(0, scriptDirectory.replace(/[?#].*/, '').lastIndexOf('/')+1);
+  try {
+    scriptDirectory = new URL('.', _scriptName).href; // includes trailing slash
+  } catch {
+    // Must be a `blob:` or `data:` URL (e.g. `blob:http://site.com/etc/etc`), we cannot
+    // infer anything from them.
   }
 
   {
@@ -87,25 +74,9 @@ readAsync = async (url) => {
 {
 }
 
-var out = Module['print'] || console.log.bind(console);
-var err = Module['printErr'] || console.error.bind(console);
+var out = console.log.bind(console);
+var err = console.error.bind(console);
 
-// Merge back in the overrides
-Object.assign(Module, moduleOverrides);
-// Free the object hierarchy contained in the overrides, this lets the GC
-// reclaim data used.
-moduleOverrides = null;
-
-// Emit code to handle expected values on the Module object. This applies Module.x
-// to the proper local x. This has two benefits: first, we only emit it if it is
-// expected to arrive, and second, by using a local everywhere else that can be
-// minified.
-
-if (Module['arguments']) arguments_ = Module['arguments'];
-
-if (Module['thisProgram']) thisProgram = Module['thisProgram'];
-
-// perform assertions in shell.js after we set up out() and err(), as otherwise if an assertion fails it cannot print the message
 // end include: shell.js
 
 // include: preamble.js
@@ -119,11 +90,9 @@ if (Module['thisProgram']) thisProgram = Module['thisProgram'];
 // An online HTML version (which may be of a different version of Emscripten)
 //    is up at http://kripken.github.io/emscripten-site/docs/api_reference/preamble.js.html
 
-var wasmBinary = Module['wasmBinary'];
+var wasmBinary;
 
 // Wasm globals
-
-var wasmMemory;
 
 //========================================
 // Runtime essentials
@@ -152,9 +121,24 @@ function assert(condition, text) {
   }
 }
 
+/**
+ * Indicates whether filename is delivered via file protocol (as opposed to http/https)
+ * @noinline
+ */
+var isFileURI = (filename) => filename.startsWith('file://');
+
+// include: runtime_common.js
+// include: runtime_stack_check.js
+// end include: runtime_stack_check.js
+// include: runtime_exceptions.js
+// end include: runtime_exceptions.js
+// include: runtime_debug.js
+// end include: runtime_debug.js
 // Memory management
 
-var HEAP,
+var wasmMemory;
+
+var
 /** @type {!Int8Array} */
   HEAP8,
 /** @type {!Uint8Array} */
@@ -169,32 +153,19 @@ var HEAP,
   HEAPU32,
 /** @type {!Float32Array} */
   HEAPF32,
-/* BigInt64Array type is not correctly defined in closure
-/** not-@type {!BigInt64Array} */
-  HEAP64,
-/* BigUint64Array type is not correctly defined in closure
-/** not-t@type {!BigUint64Array} */
-  HEAPU64,
 /** @type {!Float64Array} */
   HEAPF64;
 
+// BigInt64Array type is not correctly defined in closure
+var
+/** not-@type {!BigInt64Array} */
+  HEAP64,
+/* BigUint64Array type is not correctly defined in closure
+/** not-@type {!BigUint64Array} */
+  HEAPU64;
+
 var runtimeInitialized = false;
 
-/**
- * Indicates whether filename is delivered via file protocol (as opposed to http/https)
- * @noinline
- */
-var isFileURI = (filename) => filename.startsWith('file://');
-
-// include: runtime_shared.js
-// include: runtime_stack_check.js
-// end include: runtime_stack_check.js
-// include: runtime_exceptions.js
-// end include: runtime_exceptions.js
-// include: runtime_debug.js
-// end include: runtime_debug.js
-// include: memoryprofiler.js
-// end include: memoryprofiler.js
 
 
 function updateMemoryViews() {
@@ -207,11 +178,13 @@ function updateMemoryViews() {
   Module['HEAPU32'] = HEAPU32 = new Uint32Array(b);
   Module['HEAPF32'] = HEAPF32 = new Float32Array(b);
   Module['HEAPF64'] = HEAPF64 = new Float64Array(b);
-  Module['HEAP64'] = HEAP64 = new BigInt64Array(b);
-  Module['HEAPU64'] = HEAPU64 = new BigUint64Array(b);
+  HEAP64 = new BigInt64Array(b);
+  HEAPU64 = new BigUint64Array(b);
 }
 
-// end include: runtime_shared.js
+// include: memoryprofiler.js
+// end include: memoryprofiler.js
+// end include: runtime_common.js
 function preRun() {
   if (Module['preRun']) {
     if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
@@ -219,20 +192,23 @@ function preRun() {
       addOnPreRun(Module['preRun'].shift());
     }
   }
+  // Begin ATPRERUNS hooks
   callRuntimeCallbacks(onPreRuns);
+  // End ATPRERUNS hooks
 }
 
 function initRuntime() {
   runtimeInitialized = true;
 
-  
+  // No ATINITS hooks
 
   wasmExports['__wasm_call_ctors']();
 
-  
+  // No ATPOSTCTORS hooks
 }
 
 function postRun() {
+   // PThreads reuse the runtime from the main thread.
 
   if (Module['postRun']) {
     if (typeof Module['postRun'] == 'function') Module['postRun'] = [Module['postRun']];
@@ -241,7 +217,9 @@ function postRun() {
     }
   }
 
+  // Begin ATPOSTRUNS hooks
   callRuntimeCallbacks(onPostRuns);
+  // End ATPOSTRUNS hooks
 }
 
 // A counter of dependencies for calling run(). If we need to
@@ -253,10 +231,6 @@ function postRun() {
 // the dependencies are met.
 var runDependencies = 0;
 var dependenciesFulfilled = null; // overridden to take different actions when all run dependencies are fulfilled
-
-function getUniqueRunDependency(id) {
-  return id;
-}
 
 function addRunDependency(id) {
   runDependencies++;
@@ -359,7 +333,7 @@ async function instantiateArrayBuffer(binaryFile, imports) {
 }
 
 async function instantiateAsync(binary, binaryFile, imports) {
-  if (!binary && typeof WebAssembly.instantiateStreaming == 'function'
+  if (!binary
      ) {
     try {
       var response = fetch(binaryFile, { credentials: 'same-origin' });
@@ -402,6 +376,7 @@ async function createWasm() {
     
     updateMemoryViews();
 
+    assignWasmExports(wasmExports);
     removeRunDependency('wasm-instantiate');
     return wasmExports;
   }
@@ -428,16 +403,15 @@ async function createWasm() {
   if (Module['instantiateWasm']) {
     return new Promise((resolve, reject) => {
         Module['instantiateWasm'](info, (mod, inst) => {
-          receiveInstance(mod, inst);
-          resolve(mod.exports);
+          resolve(receiveInstance(mod, inst));
         });
     });
   }
 
   wasmBinaryFile ??= findWasmBinary();
-    var result = await instantiateAsync(wasmBinary, wasmBinaryFile, info);
-    var exports = receiveInstantiationResult(result);
-    return exports;
+  var result = await instantiateAsync(wasmBinary, wasmBinaryFile, info);
+  var exports = receiveInstantiationResult(result);
+  return exports;
 }
 
 // end include: preamble.js
@@ -460,11 +434,28 @@ async function createWasm() {
       }
     };
   var onPostRuns = [];
-  var addOnPostRun = (cb) => onPostRuns.unshift(cb);
+  var addOnPostRun = (cb) => onPostRuns.push(cb);
 
   var onPreRuns = [];
-  var addOnPreRun = (cb) => onPreRuns.unshift(cb);
+  var addOnPreRun = (cb) => onPreRuns.push(cb);
 
+
+  var dynCalls = {
+  };
+  var dynCallLegacy = (sig, ptr, args) => {
+      sig = sig.replace(/p/g, 'i')
+      var f = dynCalls[sig];
+      return f(ptr, ...args);
+    };
+  var dynCall = (sig, ptr, args = [], promising = false) => {
+      var rtn = dynCallLegacy(sig, ptr, args);
+  
+      function convert(rtn) {
+        return rtn;
+      }
+  
+      return convert(rtn);
+    };
 
   
     /**
@@ -486,7 +477,7 @@ async function createWasm() {
     }
   }
 
-  var noExitRuntime = Module['noExitRuntime'] || true;
+  var noExitRuntime = true;
 
   
     /**
@@ -515,6 +506,17 @@ async function createWasm() {
 
   var UTF8Decoder = new TextDecoder();
   
+  var findStringEnd = (heapOrArray, idx, maxBytesToRead, ignoreNul) => {
+      var maxIdx = idx + maxBytesToRead;
+      if (ignoreNul) return maxIdx;
+      // TextDecoder needs to know the byte length in advance, it doesn't stop on
+      // null terminator by itself.
+      // As a tiny code save trick, compare idx against maxIdx using a negation,
+      // so that maxBytesToRead=undefined/NaN means Infinity.
+      while (heapOrArray[idx] && !(idx >= maxIdx)) ++idx;
+      return idx;
+    };
+  
     /**
      * Given a pointer 'ptr' to a null-terminated UTF8-encoded string in the
      * emscripten HEAP, returns a copy of that string as a Javascript String object.
@@ -524,16 +526,13 @@ async function createWasm() {
      *   maximum number of bytes to read. You can omit this parameter to scan the
      *   string until the first 0 byte. If maxBytesToRead is passed, and the string
      *   at [ptr, ptr+maxBytesToReadr[ contains a null byte in the middle, then the
-     *   string will cut short at that byte index (i.e. maxBytesToRead will not
-     *   produce a string of exact length [ptr, ptr+maxBytesToRead[) N.B. mixing
-     *   frequent uses of UTF8ToString() with and without maxBytesToRead may throw
-     *   JS JIT optimizations off, so it is worth to consider consistently using one
+     *   string will cut short at that byte index.
+     * @param {boolean=} ignoreNul - If true, the function will not stop on a NUL character.
      * @return {string}
      */
-  var UTF8ToString = (ptr, maxBytesToRead) => {
+  var UTF8ToString = (ptr, maxBytesToRead, ignoreNul) => {
       if (!ptr) return '';
-      var maxPtr = ptr + maxBytesToRead;
-      for (var end = ptr; !(end >= maxPtr) && HEAPU8[end];) ++end;
+      var end = findStringEnd(HEAPU8, ptr, maxBytesToRead, ignoreNul);
       return UTF8Decoder.decode(HEAPU8.subarray(ptr, end));
     };
   var ___assert_fail = (condition, filename, line, func) =>
@@ -746,18 +745,10 @@ async function createWasm() {
       var startIdx = outIdx;
       var endIdx = outIdx + maxBytesToWrite - 1; // -1 for string null terminator.
       for (var i = 0; i < str.length; ++i) {
-        // Gotcha: charCodeAt returns a 16-bit word that is a UTF-16 encoded code
-        // unit, not a Unicode code point of the character! So decode
-        // UTF16->UTF32->UTF8.
-        // See http://unicode.org/faq/utf_bom.html#utf16-3
         // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description
         // and https://www.ietf.org/rfc/rfc2279.txt
         // and https://tools.ietf.org/html/rfc3629
-        var u = str.charCodeAt(i); // possibly a lead surrogate
-        if (u >= 0xD800 && u <= 0xDFFF) {
-          var u1 = str.charCodeAt(++i);
-          u = 0x10000 + ((u & 0x3FF) << 10) | (u1 & 0x3FF);
-        }
+        var u = str.codePointAt(i);
         if (u <= 0x7F) {
           if (outIdx >= endIdx) break;
           heap[outIdx++] = u;
@@ -776,6 +767,9 @@ async function createWasm() {
           heap[outIdx++] = 0x80 | ((u >> 12) & 63);
           heap[outIdx++] = 0x80 | ((u >> 6) & 63);
           heap[outIdx++] = 0x80 | (u & 63);
+          // Gotcha: if codePoint is over 0xFFFF, it is represented as a surrogate pair in UTF-16.
+          // We need to manually skip over the second code unit for correct iteration.
+          i++;
         }
       }
       // Null-terminate the pointer to the buffer.
@@ -878,8 +872,8 @@ async function createWasm() {
     };
   
   var growMemory = (size) => {
-      var b = wasmMemory.buffer;
-      var pages = ((size - b.byteLength + 65535) / 65536) | 0;
+      var oldHeapSize = wasmMemory.buffer.byteLength;
+      var pages = ((size - oldHeapSize + 65535) / 65536) | 0;
       try {
         // round size grow request up to wasm page size (fixed 64KB per spec)
         wasmMemory.grow(pages); // .grow() takes a delta compared to the previous size
@@ -948,13 +942,7 @@ async function createWasm() {
         callUserCallback(func);
       }, timeout);
     };
-  var _emscripten_sleep = (ms) => {
-      // emscripten_sleep() does not return a value, but we still need a |return|
-      // here for stack switching support (ASYNCIFY=2). In that mode this function
-      // returns a Promise instead of nothing, and that Promise is what tells the
-      // wasm VM to pause the stack.
-      return Asyncify.handleSleep((wakeUp) => safeSetTimeout(wakeUp, ms));
-    };
+  var _emscripten_sleep = (ms) => Asyncify.handleSleep((wakeUp) => safeSetTimeout(wakeUp, ms));
   _emscripten_sleep.isAsync = true;
 
   
@@ -1613,7 +1601,6 @@ async function createWasm() {
   18:"subgroups",
   19:"texture-formats-tier1",
   20:"texture-formats-tier2",
-  21:"primitive-index",
   327692:"chromium-experimental-unorm16-texture-formats",
   327693:"chromium-experimental-snorm16-texture-formats",
   327732:"chromium-experimental-multi-draw-indirect",
@@ -2042,7 +2029,7 @@ async function createWasm() {
       if (!getEnvStrings.strings) {
         // Default values.
         // Browser language detection #8751
-        var lang = ((typeof navigator == 'object' && navigator.languages && navigator.languages[0]) || 'C').replace('-', '_') + '.UTF-8';
+        var lang = ((typeof navigator == 'object' && navigator.language) || 'C').replace('-', '_') + '.UTF-8';
         var env = {
           'USER': 'web_user',
           'LOGNAME': 'web_user',
@@ -2069,29 +2056,26 @@ async function createWasm() {
       return getEnvStrings.strings;
     };
   
-  var stringToAscii = (str, buffer) => {
-      for (var i = 0; i < str.length; ++i) {
-        HEAP8[buffer++] = str.charCodeAt(i);
-      }
-      // Null-terminate the string
-      HEAP8[buffer] = 0;
-    };
   var _environ_get = (__environ, environ_buf) => {
       var bufSize = 0;
-      getEnvStrings().forEach((string, i) => {
+      var envp = 0;
+      for (var string of getEnvStrings()) {
         var ptr = environ_buf + bufSize;
-        HEAPU32[(((__environ)+(i*4))>>2)] = ptr;
-        stringToAscii(string, ptr);
-        bufSize += string.length + 1;
-      });
+        HEAPU32[(((__environ)+(envp))>>2)] = ptr;
+        bufSize += stringToUTF8(string, ptr, Infinity) + 1;
+        envp += 4;
+      }
       return 0;
     };
 
+  
   var _environ_sizes_get = (penviron_count, penviron_buf_size) => {
       var strings = getEnvStrings();
       HEAPU32[((penviron_count)>>2)] = strings.length;
       var bufSize = 0;
-      strings.forEach((string) => bufSize += string.length + 1);
+      for (var string of strings) {
+        bufSize += lengthBytesUTF8(string) + 1;
+      }
       HEAPU32[((penviron_buf_size)>>2)] = bufSize;
       return 0;
     };
@@ -2115,6 +2099,7 @@ async function createWasm() {
   var printCharBuffers = [null,[],[]];
   
   
+  
     /**
      * Given a pointer 'idx' to a null-terminated UTF8-encoded string in the given
      * array that contains uint8 values, returns a copy of that string as a
@@ -2122,17 +2107,12 @@ async function createWasm() {
      * heapOrArray is either a regular array, or a JavaScript typed array view.
      * @param {number=} idx
      * @param {number=} maxBytesToRead
+     * @param {boolean=} ignoreNul - If true, the function will not stop on a NUL character.
      * @return {string}
      */
-  var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead = NaN) => {
-      var endIdx = idx + maxBytesToRead;
-      var endPtr = idx;
-      // TextDecoder needs to know the byte length in advance, it doesn't stop on
-      // null terminator by itself.  Also, use the length info to avoid running tiny
-      // strings through TextDecoder, since .subarray() allocates garbage.
-      // (As a tiny code save trick, compare endPtr against endIdx using a negation,
-      // so that undefined/NaN means Infinity)
-      while (heapOrArray[endPtr] && !(endPtr >= endIdx)) ++endPtr;
+  var UTF8ArrayToString = (heapOrArray, idx = 0, maxBytesToRead, ignoreNul) => {
+  
+      var endPtr = findStringEnd(heapOrArray, idx, maxBytesToRead, ignoreNul);
   
       return UTF8Decoder.decode(heapOrArray.buffer ? heapOrArray.subarray(idx, endPtr) : new Uint8Array(heapOrArray.slice(idx, endPtr)));
     };
@@ -2503,25 +2483,6 @@ async function createWasm() {
     };
   
   
-  var sigToWasmTypes = (sig) => {
-      var typeNames = {
-        'i': 'i32',
-        'j': 'i64',
-        'f': 'f32',
-        'd': 'f64',
-        'e': 'externref',
-        'p': 'i32',
-      };
-      var type = {
-        parameters: [],
-        results: sig[0] == 'v' ? [] : [typeNames[sig[0]]]
-      };
-      for (var i = 1; i < sig.length; ++i) {
-        type.parameters.push(typeNames[sig[i]]);
-      }
-      return type;
-    };
-  
   var runtimeKeepalivePush = () => {
       runtimeKeepaliveCounter += 1;
     };
@@ -2541,22 +2502,29 @@ async function createWasm() {
           }
         }
       },
+  instrumentFunction(original) {
+        var wrapper = (...args) => {
+          Asyncify.exportCallStack.push(original);
+          try {
+            return original(...args);
+          } finally {
+            if (!ABORT) {
+              var top = Asyncify.exportCallStack.pop();
+              Asyncify.maybeStopUnwind();
+            }
+          }
+        };
+        Asyncify.funcWrappers.set(original, wrapper);
+        return wrapper;
+      },
   instrumentWasmExports(exports) {
         var ret = {};
         for (let [x, original] of Object.entries(exports)) {
           if (typeof original == 'function') {
-            ret[x] = (...args) => {
-              Asyncify.exportCallStack.push(x);
-              try {
-                return original(...args);
-              } finally {
-                if (!ABORT) {
-                  var y = Asyncify.exportCallStack.pop();
-                  Asyncify.maybeStopUnwind();
-                }
-              }
-            };
-          } else {
+            var wrapper = Asyncify.instrumentFunction(original);
+            ret[x] = wrapper;
+  
+         } else {
             ret[x] = original;
           }
         }
@@ -2573,21 +2541,19 @@ async function createWasm() {
   currData:null,
   handleSleepReturnValue:0,
   exportCallStack:[],
-  callStackNameToId:{
-  },
-  callStackIdToName:{
-  },
+  callstackFuncToId:new Map,
+  callStackIdToFunc:new Map,
+  funcWrappers:new Map,
   callStackId:0,
   asyncPromiseHandlers:null,
   sleepCallbacks:[],
-  getCallStackId(funcName) {
-        var id = Asyncify.callStackNameToId[funcName];
-        if (id === undefined) {
-          id = Asyncify.callStackId++;
-          Asyncify.callStackNameToId[funcName] = id;
-          Asyncify.callStackIdToName[id] = funcName;
+  getCallStackId(func) {
+        if (!Asyncify.callstackFuncToId.has(func)) {
+          var id = Asyncify.callStackId++;
+          Asyncify.callstackFuncToId.set(func, id);
+          Asyncify.callStackIdToFunc.set(id, func);
         }
-        return id;
+        return Asyncify.callstackFuncToId.get(func);
       },
   maybeStopUnwind() {
         if (Asyncify.currData &&
@@ -2616,7 +2582,7 @@ async function createWasm() {
         // An asyncify data structure has three fields:
         //  0  current stack pos
         //  4  max stack pos
-        //  8  id of function at bottom of the call stack (callStackIdToName[id] == name of js function)
+        //  8  id of function at bottom of the call stack (callStackIdToFunc[id] == wasm func)
         //
         // The Asyncify ABI only interprets the first two fields, the rest is for the runtime.
         // We also embed a stack in the same memory region here, right next to the structure.
@@ -2635,18 +2601,14 @@ async function createWasm() {
         var rewindId = Asyncify.getCallStackId(bottomOfCallStack);
         HEAP32[(((ptr)+(8))>>2)] = rewindId;
       },
-  getDataRewindFuncName(ptr) {
+  getDataRewindFunc(ptr) {
         var id = HEAP32[(((ptr)+(8))>>2)];
-        var name = Asyncify.callStackIdToName[id];
-        return name;
-      },
-  getDataRewindFunc(name) {
-        var func = wasmExports[name];
+        var func = Asyncify.callStackIdToFunc.get(id);
         return func;
       },
   doRewind(ptr) {
-        var name = Asyncify.getDataRewindFuncName(ptr);
-        var func = Asyncify.getDataRewindFunc(name);
+        var original = Asyncify.getDataRewindFunc(ptr);
+        var func = Asyncify.funcWrappers.get(original);
         // Once we have rewound and the stack we no longer need to artificially
         // keep the runtime alive.
         
@@ -2734,12 +2696,10 @@ async function createWasm() {
         }
         return Asyncify.handleSleepReturnValue;
       },
-  handleAsync(startAsync) {
-        return Asyncify.handleSleep((wakeUp) => {
-          // TODO: add error handling as a second param when handleSleep implements it.
-          startAsync().then(wakeUp);
-        });
-      },
+  handleAsync:(startAsync) => Asyncify.handleSleep((wakeUp) => {
+        // TODO: add error handling as a second param when handleSleep implements it.
+        startAsync().then(wakeUp);
+      }),
   };
 
   var getCFunc = (ident) => {
@@ -2761,7 +2721,7 @@ async function createWasm() {
     /**
      * @param {string|null=} returnType
      * @param {Array=} argTypes
-     * @param {Arguments|Array=} args
+     * @param {Array=} args
      * @param {Object=} opts
      */
   var ccall = (ident, returnType, argTypes, args, opts) => {
@@ -2848,6 +2808,257 @@ async function createWasm() {
     };
 // End JS library code
 
+// include: postlibrary.js
+// This file is included after the automatically-generated JS library code
+// but before the wasm module is created.
+
+{
+
+  // Begin ATMODULES hooks
+  if (Module['noExitRuntime']) noExitRuntime = Module['noExitRuntime'];
+if (Module['print']) out = Module['print'];
+if (Module['printErr']) err = Module['printErr'];
+if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
+  // End ATMODULES hooks
+
+  if (Module['arguments']) arguments_ = Module['arguments'];
+  if (Module['thisProgram']) thisProgram = Module['thisProgram'];
+
+}
+
+// Begin runtime exports
+  Module['ccall'] = ccall;
+  Module['cwrap'] = cwrap;
+  // End runtime exports
+  // Begin JS library exports
+  // End JS library exports
+
+// end include: postlibrary.js
+
+
+// Imports from the Wasm binary.
+var _mgpuInitializeContext,
+  _mgpuInitializeContextAsync,
+  _mgpuDestroyContext,
+  _mgpuCreateComputeShader,
+  _mgpuDestroyComputeShader,
+  _mgpuLoadKernel,
+  _mgpuHasKernel,
+  _mgpuCreateBuffer,
+  _mgpuDestroyBuffer,
+  _mgpuSetBuffer,
+  _mgpuDispatch,
+  _mgpuDispatchAsync,
+  _mgpuReadSync,
+  _mgpuReadAsyncFloat,
+  _mgpuReadAsyncInt8,
+  _mgpuReadAsyncUint8,
+  _mgpuReadAsyncInt16,
+  _mgpuReadAsyncUint16,
+  _mgpuReadAsyncInt32,
+  _mgpuReadAsyncUint32,
+  _mgpuReadAsyncInt64,
+  _mgpuReadAsyncUint64,
+  _mgpuWriteFloat,
+  _mgpuReadAsyncDouble,
+  _mgpuReadSyncInt8,
+  _mgpuReadSyncUint8,
+  _mgpuReadSyncInt16,
+  _mgpuReadSyncUint16,
+  _mgpuReadSyncInt32,
+  _mgpuReadSyncUint32,
+  _mgpuReadSyncInt64,
+  _mgpuReadSyncUint64,
+  _mgpuReadSyncFloat32,
+  _mgpuReadSyncFloat64,
+  _mgpuWriteInt8,
+  _mgpuWriteInt16,
+  _mgpuWriteInt32,
+  _mgpuWriteInt64,
+  _mgpuWriteUint8,
+  _mgpuWriteUint16,
+  _mgpuWriteUint32,
+  _mgpuWriteUint64,
+  _mgpuWriteDouble,
+  _emwgpuCreateBindGroup,
+  _emwgpuCreateBindGroupLayout,
+  _emwgpuCreateCommandBuffer,
+  _emwgpuCreateCommandEncoder,
+  _emwgpuCreateComputePassEncoder,
+  _emwgpuCreateComputePipeline,
+  _emwgpuCreatePipelineLayout,
+  _emwgpuCreateQuerySet,
+  _emwgpuCreateRenderBundle,
+  _emwgpuCreateRenderBundleEncoder,
+  _emwgpuCreateRenderPassEncoder,
+  _emwgpuCreateRenderPipeline,
+  _emwgpuCreateSampler,
+  _emwgpuCreateSurface,
+  _emwgpuCreateTexture,
+  _emwgpuCreateTextureView,
+  _emwgpuCreateAdapter,
+  _emwgpuCreateBuffer,
+  _emwgpuCreateDevice,
+  _emwgpuCreateQueue,
+  _emwgpuCreateShaderModule,
+  _emwgpuOnCompilationInfoCompleted,
+  _emwgpuOnCreateComputePipelineCompleted,
+  _emwgpuOnCreateRenderPipelineCompleted,
+  _emwgpuOnDeviceLostCompleted,
+  _emwgpuOnMapAsyncCompleted,
+  _emwgpuOnPopErrorScopeCompleted,
+  _emwgpuOnRequestAdapterCompleted,
+  _emwgpuOnRequestDeviceCompleted,
+  _emwgpuOnWorkDoneCompleted,
+  _emwgpuOnUncapturedError,
+  _free,
+  _memcpy,
+  __emscripten_timeout,
+  _memalign,
+  _malloc,
+  __emscripten_stack_restore,
+  __emscripten_stack_alloc,
+  _emscripten_stack_get_current,
+  ___cxa_increment_exception_refcount,
+  dynCall_ii,
+  dynCall_vi,
+  dynCall_viiii,
+  dynCall_viiiii,
+  dynCall_vii,
+  dynCall_iii,
+  dynCall_v,
+  dynCall_viji,
+  dynCall_iidiiii,
+  dynCall_iiii,
+  dynCall_jiji,
+  dynCall_viijii,
+  dynCall_iiiii,
+  dynCall_iiiiii,
+  dynCall_iiiiiiiii,
+  dynCall_iiiiiii,
+  dynCall_iiiiij,
+  dynCall_iiiiid,
+  dynCall_iiiiijj,
+  dynCall_iiiiiiii,
+  dynCall_iiiiiijj,
+  dynCall_viiiiii,
+  _asyncify_start_unwind,
+  _asyncify_stop_unwind,
+  _asyncify_start_rewind,
+  _asyncify_stop_rewind;
+
+
+function assignWasmExports(wasmExports) {
+  Module['_mgpuInitializeContext'] = _mgpuInitializeContext = wasmExports['mgpuInitializeContext'];
+  Module['_mgpuInitializeContextAsync'] = _mgpuInitializeContextAsync = wasmExports['mgpuInitializeContextAsync'];
+  Module['_mgpuDestroyContext'] = _mgpuDestroyContext = wasmExports['mgpuDestroyContext'];
+  Module['_mgpuCreateComputeShader'] = _mgpuCreateComputeShader = wasmExports['mgpuCreateComputeShader'];
+  Module['_mgpuDestroyComputeShader'] = _mgpuDestroyComputeShader = wasmExports['mgpuDestroyComputeShader'];
+  Module['_mgpuLoadKernel'] = _mgpuLoadKernel = wasmExports['mgpuLoadKernel'];
+  Module['_mgpuHasKernel'] = _mgpuHasKernel = wasmExports['mgpuHasKernel'];
+  Module['_mgpuCreateBuffer'] = _mgpuCreateBuffer = wasmExports['mgpuCreateBuffer'];
+  Module['_mgpuDestroyBuffer'] = _mgpuDestroyBuffer = wasmExports['mgpuDestroyBuffer'];
+  Module['_mgpuSetBuffer'] = _mgpuSetBuffer = wasmExports['mgpuSetBuffer'];
+  Module['_mgpuDispatch'] = _mgpuDispatch = wasmExports['mgpuDispatch'];
+  Module['_mgpuDispatchAsync'] = _mgpuDispatchAsync = wasmExports['mgpuDispatchAsync'];
+  Module['_mgpuReadSync'] = _mgpuReadSync = wasmExports['mgpuReadSync'];
+  Module['_mgpuReadAsyncFloat'] = _mgpuReadAsyncFloat = wasmExports['mgpuReadAsyncFloat'];
+  Module['_mgpuReadAsyncInt8'] = _mgpuReadAsyncInt8 = wasmExports['mgpuReadAsyncInt8'];
+  Module['_mgpuReadAsyncUint8'] = _mgpuReadAsyncUint8 = wasmExports['mgpuReadAsyncUint8'];
+  Module['_mgpuReadAsyncInt16'] = _mgpuReadAsyncInt16 = wasmExports['mgpuReadAsyncInt16'];
+  Module['_mgpuReadAsyncUint16'] = _mgpuReadAsyncUint16 = wasmExports['mgpuReadAsyncUint16'];
+  Module['_mgpuReadAsyncInt32'] = _mgpuReadAsyncInt32 = wasmExports['mgpuReadAsyncInt32'];
+  Module['_mgpuReadAsyncUint32'] = _mgpuReadAsyncUint32 = wasmExports['mgpuReadAsyncUint32'];
+  Module['_mgpuReadAsyncInt64'] = _mgpuReadAsyncInt64 = wasmExports['mgpuReadAsyncInt64'];
+  Module['_mgpuReadAsyncUint64'] = _mgpuReadAsyncUint64 = wasmExports['mgpuReadAsyncUint64'];
+  Module['_mgpuWriteFloat'] = _mgpuWriteFloat = wasmExports['mgpuWriteFloat'];
+  Module['_mgpuReadAsyncDouble'] = _mgpuReadAsyncDouble = wasmExports['mgpuReadAsyncDouble'];
+  Module['_mgpuReadSyncInt8'] = _mgpuReadSyncInt8 = wasmExports['mgpuReadSyncInt8'];
+  Module['_mgpuReadSyncUint8'] = _mgpuReadSyncUint8 = wasmExports['mgpuReadSyncUint8'];
+  Module['_mgpuReadSyncInt16'] = _mgpuReadSyncInt16 = wasmExports['mgpuReadSyncInt16'];
+  Module['_mgpuReadSyncUint16'] = _mgpuReadSyncUint16 = wasmExports['mgpuReadSyncUint16'];
+  Module['_mgpuReadSyncInt32'] = _mgpuReadSyncInt32 = wasmExports['mgpuReadSyncInt32'];
+  Module['_mgpuReadSyncUint32'] = _mgpuReadSyncUint32 = wasmExports['mgpuReadSyncUint32'];
+  Module['_mgpuReadSyncInt64'] = _mgpuReadSyncInt64 = wasmExports['mgpuReadSyncInt64'];
+  Module['_mgpuReadSyncUint64'] = _mgpuReadSyncUint64 = wasmExports['mgpuReadSyncUint64'];
+  Module['_mgpuReadSyncFloat32'] = _mgpuReadSyncFloat32 = wasmExports['mgpuReadSyncFloat32'];
+  Module['_mgpuReadSyncFloat64'] = _mgpuReadSyncFloat64 = wasmExports['mgpuReadSyncFloat64'];
+  Module['_mgpuWriteInt8'] = _mgpuWriteInt8 = wasmExports['mgpuWriteInt8'];
+  Module['_mgpuWriteInt16'] = _mgpuWriteInt16 = wasmExports['mgpuWriteInt16'];
+  Module['_mgpuWriteInt32'] = _mgpuWriteInt32 = wasmExports['mgpuWriteInt32'];
+  Module['_mgpuWriteInt64'] = _mgpuWriteInt64 = wasmExports['mgpuWriteInt64'];
+  Module['_mgpuWriteUint8'] = _mgpuWriteUint8 = wasmExports['mgpuWriteUint8'];
+  Module['_mgpuWriteUint16'] = _mgpuWriteUint16 = wasmExports['mgpuWriteUint16'];
+  Module['_mgpuWriteUint32'] = _mgpuWriteUint32 = wasmExports['mgpuWriteUint32'];
+  Module['_mgpuWriteUint64'] = _mgpuWriteUint64 = wasmExports['mgpuWriteUint64'];
+  Module['_mgpuWriteDouble'] = _mgpuWriteDouble = wasmExports['mgpuWriteDouble'];
+  _emwgpuCreateBindGroup = wasmExports['emwgpuCreateBindGroup'];
+  _emwgpuCreateBindGroupLayout = wasmExports['emwgpuCreateBindGroupLayout'];
+  _emwgpuCreateCommandBuffer = wasmExports['emwgpuCreateCommandBuffer'];
+  _emwgpuCreateCommandEncoder = wasmExports['emwgpuCreateCommandEncoder'];
+  _emwgpuCreateComputePassEncoder = wasmExports['emwgpuCreateComputePassEncoder'];
+  _emwgpuCreateComputePipeline = wasmExports['emwgpuCreateComputePipeline'];
+  _emwgpuCreatePipelineLayout = wasmExports['emwgpuCreatePipelineLayout'];
+  _emwgpuCreateQuerySet = wasmExports['emwgpuCreateQuerySet'];
+  _emwgpuCreateRenderBundle = wasmExports['emwgpuCreateRenderBundle'];
+  _emwgpuCreateRenderBundleEncoder = wasmExports['emwgpuCreateRenderBundleEncoder'];
+  _emwgpuCreateRenderPassEncoder = wasmExports['emwgpuCreateRenderPassEncoder'];
+  _emwgpuCreateRenderPipeline = wasmExports['emwgpuCreateRenderPipeline'];
+  _emwgpuCreateSampler = wasmExports['emwgpuCreateSampler'];
+  _emwgpuCreateSurface = wasmExports['emwgpuCreateSurface'];
+  _emwgpuCreateTexture = wasmExports['emwgpuCreateTexture'];
+  _emwgpuCreateTextureView = wasmExports['emwgpuCreateTextureView'];
+  _emwgpuCreateAdapter = wasmExports['emwgpuCreateAdapter'];
+  _emwgpuCreateBuffer = wasmExports['emwgpuCreateBuffer'];
+  _emwgpuCreateDevice = wasmExports['emwgpuCreateDevice'];
+  _emwgpuCreateQueue = wasmExports['emwgpuCreateQueue'];
+  _emwgpuCreateShaderModule = wasmExports['emwgpuCreateShaderModule'];
+  _emwgpuOnCompilationInfoCompleted = wasmExports['emwgpuOnCompilationInfoCompleted'];
+  _emwgpuOnCreateComputePipelineCompleted = wasmExports['emwgpuOnCreateComputePipelineCompleted'];
+  _emwgpuOnCreateRenderPipelineCompleted = wasmExports['emwgpuOnCreateRenderPipelineCompleted'];
+  _emwgpuOnDeviceLostCompleted = wasmExports['emwgpuOnDeviceLostCompleted'];
+  _emwgpuOnMapAsyncCompleted = wasmExports['emwgpuOnMapAsyncCompleted'];
+  _emwgpuOnPopErrorScopeCompleted = wasmExports['emwgpuOnPopErrorScopeCompleted'];
+  _emwgpuOnRequestAdapterCompleted = wasmExports['emwgpuOnRequestAdapterCompleted'];
+  _emwgpuOnRequestDeviceCompleted = wasmExports['emwgpuOnRequestDeviceCompleted'];
+  _emwgpuOnWorkDoneCompleted = wasmExports['emwgpuOnWorkDoneCompleted'];
+  _emwgpuOnUncapturedError = wasmExports['emwgpuOnUncapturedError'];
+  Module['_free'] = _free = wasmExports['free'];
+  Module['_memcpy'] = _memcpy = wasmExports['memcpy'];
+  __emscripten_timeout = wasmExports['_emscripten_timeout'];
+  _memalign = wasmExports['memalign'];
+  Module['_malloc'] = _malloc = wasmExports['malloc'];
+  __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
+  __emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc'];
+  _emscripten_stack_get_current = wasmExports['emscripten_stack_get_current'];
+  ___cxa_increment_exception_refcount = wasmExports['__cxa_increment_exception_refcount'];
+  dynCalls['ii'] = dynCall_ii = wasmExports['dynCall_ii'];
+  dynCalls['vi'] = dynCall_vi = wasmExports['dynCall_vi'];
+  dynCalls['viiii'] = dynCall_viiii = wasmExports['dynCall_viiii'];
+  dynCalls['viiiii'] = dynCall_viiiii = wasmExports['dynCall_viiiii'];
+  dynCalls['vii'] = dynCall_vii = wasmExports['dynCall_vii'];
+  dynCalls['iii'] = dynCall_iii = wasmExports['dynCall_iii'];
+  dynCalls['v'] = dynCall_v = wasmExports['dynCall_v'];
+  dynCalls['viji'] = dynCall_viji = wasmExports['dynCall_viji'];
+  dynCalls['iidiiii'] = dynCall_iidiiii = wasmExports['dynCall_iidiiii'];
+  dynCalls['iiii'] = dynCall_iiii = wasmExports['dynCall_iiii'];
+  dynCalls['jiji'] = dynCall_jiji = wasmExports['dynCall_jiji'];
+  dynCalls['viijii'] = dynCall_viijii = wasmExports['dynCall_viijii'];
+  dynCalls['iiiii'] = dynCall_iiiii = wasmExports['dynCall_iiiii'];
+  dynCalls['iiiiii'] = dynCall_iiiiii = wasmExports['dynCall_iiiiii'];
+  dynCalls['iiiiiiiii'] = dynCall_iiiiiiiii = wasmExports['dynCall_iiiiiiiii'];
+  dynCalls['iiiiiii'] = dynCall_iiiiiii = wasmExports['dynCall_iiiiiii'];
+  dynCalls['iiiiij'] = dynCall_iiiiij = wasmExports['dynCall_iiiiij'];
+  dynCalls['iiiiid'] = dynCall_iiiiid = wasmExports['dynCall_iiiiid'];
+  dynCalls['iiiiijj'] = dynCall_iiiiijj = wasmExports['dynCall_iiiiijj'];
+  dynCalls['iiiiiiii'] = dynCall_iiiiiiii = wasmExports['dynCall_iiiiiiii'];
+  dynCalls['iiiiiijj'] = dynCall_iiiiiijj = wasmExports['dynCall_iiiiiijj'];
+  dynCalls['viiiiii'] = dynCall_viiiiii = wasmExports['dynCall_viiiiii'];
+  _asyncify_start_unwind = wasmExports['asyncify_start_unwind'];
+  _asyncify_stop_unwind = wasmExports['asyncify_stop_unwind'];
+  _asyncify_start_rewind = wasmExports['asyncify_start_rewind'];
+  _asyncify_stop_rewind = wasmExports['asyncify_stop_rewind'];
+}
 var wasmImports = {
   /** @export */
   __assert_fail: ___assert_fail,
@@ -2938,124 +3149,10 @@ var wasmImports = {
 };
 var wasmExports;
 createWasm();
-var ___wasm_call_ctors = () => (___wasm_call_ctors = wasmExports['__wasm_call_ctors'])();
-var _mgpuInitializeContext = Module['_mgpuInitializeContext'] = () => (_mgpuInitializeContext = Module['_mgpuInitializeContext'] = wasmExports['mgpuInitializeContext'])();
-var _mgpuInitializeContextAsync = Module['_mgpuInitializeContextAsync'] = (a0) => (_mgpuInitializeContextAsync = Module['_mgpuInitializeContextAsync'] = wasmExports['mgpuInitializeContextAsync'])(a0);
-var _mgpuDestroyContext = Module['_mgpuDestroyContext'] = () => (_mgpuDestroyContext = Module['_mgpuDestroyContext'] = wasmExports['mgpuDestroyContext'])();
-var _mgpuCreateComputeShader = Module['_mgpuCreateComputeShader'] = () => (_mgpuCreateComputeShader = Module['_mgpuCreateComputeShader'] = wasmExports['mgpuCreateComputeShader'])();
-var _mgpuDestroyComputeShader = Module['_mgpuDestroyComputeShader'] = (a0) => (_mgpuDestroyComputeShader = Module['_mgpuDestroyComputeShader'] = wasmExports['mgpuDestroyComputeShader'])(a0);
-var _mgpuLoadKernel = Module['_mgpuLoadKernel'] = (a0, a1) => (_mgpuLoadKernel = Module['_mgpuLoadKernel'] = wasmExports['mgpuLoadKernel'])(a0, a1);
-var _mgpuHasKernel = Module['_mgpuHasKernel'] = (a0) => (_mgpuHasKernel = Module['_mgpuHasKernel'] = wasmExports['mgpuHasKernel'])(a0);
-var _mgpuCreateBuffer = Module['_mgpuCreateBuffer'] = (a0, a1) => (_mgpuCreateBuffer = Module['_mgpuCreateBuffer'] = wasmExports['mgpuCreateBuffer'])(a0, a1);
-var _mgpuDestroyBuffer = Module['_mgpuDestroyBuffer'] = (a0) => (_mgpuDestroyBuffer = Module['_mgpuDestroyBuffer'] = wasmExports['mgpuDestroyBuffer'])(a0);
-var _mgpuSetBuffer = Module['_mgpuSetBuffer'] = (a0, a1, a2) => (_mgpuSetBuffer = Module['_mgpuSetBuffer'] = wasmExports['mgpuSetBuffer'])(a0, a1, a2);
-var _mgpuDispatch = Module['_mgpuDispatch'] = (a0, a1, a2, a3) => (_mgpuDispatch = Module['_mgpuDispatch'] = wasmExports['mgpuDispatch'])(a0, a1, a2, a3);
-var _mgpuDispatchAsync = Module['_mgpuDispatchAsync'] = (a0, a1, a2, a3, a4) => (_mgpuDispatchAsync = Module['_mgpuDispatchAsync'] = wasmExports['mgpuDispatchAsync'])(a0, a1, a2, a3, a4);
-var _mgpuReadSync = Module['_mgpuReadSync'] = (a0, a1, a2, a3) => (_mgpuReadSync = Module['_mgpuReadSync'] = wasmExports['mgpuReadSync'])(a0, a1, a2, a3);
-var _mgpuReadAsyncFloat = Module['_mgpuReadAsyncFloat'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncFloat = Module['_mgpuReadAsyncFloat'] = wasmExports['mgpuReadAsyncFloat'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncInt8 = Module['_mgpuReadAsyncInt8'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncInt8 = Module['_mgpuReadAsyncInt8'] = wasmExports['mgpuReadAsyncInt8'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncUint8 = Module['_mgpuReadAsyncUint8'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncUint8 = Module['_mgpuReadAsyncUint8'] = wasmExports['mgpuReadAsyncUint8'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncInt16 = Module['_mgpuReadAsyncInt16'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncInt16 = Module['_mgpuReadAsyncInt16'] = wasmExports['mgpuReadAsyncInt16'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncUint16 = Module['_mgpuReadAsyncUint16'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncUint16 = Module['_mgpuReadAsyncUint16'] = wasmExports['mgpuReadAsyncUint16'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncInt32 = Module['_mgpuReadAsyncInt32'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncInt32 = Module['_mgpuReadAsyncInt32'] = wasmExports['mgpuReadAsyncInt32'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncUint32 = Module['_mgpuReadAsyncUint32'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncUint32 = Module['_mgpuReadAsyncUint32'] = wasmExports['mgpuReadAsyncUint32'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncInt64 = Module['_mgpuReadAsyncInt64'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncInt64 = Module['_mgpuReadAsyncInt64'] = wasmExports['mgpuReadAsyncInt64'])(a0, a1, a2, a3, a4);
-var _mgpuReadAsyncUint64 = Module['_mgpuReadAsyncUint64'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncUint64 = Module['_mgpuReadAsyncUint64'] = wasmExports['mgpuReadAsyncUint64'])(a0, a1, a2, a3, a4);
-var _mgpuWriteFloat = Module['_mgpuWriteFloat'] = (a0, a1, a2) => (_mgpuWriteFloat = Module['_mgpuWriteFloat'] = wasmExports['mgpuWriteFloat'])(a0, a1, a2);
-var _mgpuReadAsyncDouble = Module['_mgpuReadAsyncDouble'] = (a0, a1, a2, a3, a4) => (_mgpuReadAsyncDouble = Module['_mgpuReadAsyncDouble'] = wasmExports['mgpuReadAsyncDouble'])(a0, a1, a2, a3, a4);
-var _mgpuReadSyncInt8 = Module['_mgpuReadSyncInt8'] = (a0, a1, a2, a3) => (_mgpuReadSyncInt8 = Module['_mgpuReadSyncInt8'] = wasmExports['mgpuReadSyncInt8'])(a0, a1, a2, a3);
-var _mgpuReadSyncUint8 = Module['_mgpuReadSyncUint8'] = (a0, a1, a2, a3) => (_mgpuReadSyncUint8 = Module['_mgpuReadSyncUint8'] = wasmExports['mgpuReadSyncUint8'])(a0, a1, a2, a3);
-var _mgpuReadSyncInt16 = Module['_mgpuReadSyncInt16'] = (a0, a1, a2, a3) => (_mgpuReadSyncInt16 = Module['_mgpuReadSyncInt16'] = wasmExports['mgpuReadSyncInt16'])(a0, a1, a2, a3);
-var _mgpuReadSyncUint16 = Module['_mgpuReadSyncUint16'] = (a0, a1, a2, a3) => (_mgpuReadSyncUint16 = Module['_mgpuReadSyncUint16'] = wasmExports['mgpuReadSyncUint16'])(a0, a1, a2, a3);
-var _mgpuReadSyncInt32 = Module['_mgpuReadSyncInt32'] = (a0, a1, a2, a3) => (_mgpuReadSyncInt32 = Module['_mgpuReadSyncInt32'] = wasmExports['mgpuReadSyncInt32'])(a0, a1, a2, a3);
-var _mgpuReadSyncUint32 = Module['_mgpuReadSyncUint32'] = (a0, a1, a2, a3) => (_mgpuReadSyncUint32 = Module['_mgpuReadSyncUint32'] = wasmExports['mgpuReadSyncUint32'])(a0, a1, a2, a3);
-var _mgpuReadSyncInt64 = Module['_mgpuReadSyncInt64'] = (a0, a1, a2, a3) => (_mgpuReadSyncInt64 = Module['_mgpuReadSyncInt64'] = wasmExports['mgpuReadSyncInt64'])(a0, a1, a2, a3);
-var _mgpuReadSyncUint64 = Module['_mgpuReadSyncUint64'] = (a0, a1, a2, a3) => (_mgpuReadSyncUint64 = Module['_mgpuReadSyncUint64'] = wasmExports['mgpuReadSyncUint64'])(a0, a1, a2, a3);
-var _mgpuReadSyncFloat32 = Module['_mgpuReadSyncFloat32'] = (a0, a1, a2, a3) => (_mgpuReadSyncFloat32 = Module['_mgpuReadSyncFloat32'] = wasmExports['mgpuReadSyncFloat32'])(a0, a1, a2, a3);
-var _mgpuReadSyncFloat64 = Module['_mgpuReadSyncFloat64'] = (a0, a1, a2, a3) => (_mgpuReadSyncFloat64 = Module['_mgpuReadSyncFloat64'] = wasmExports['mgpuReadSyncFloat64'])(a0, a1, a2, a3);
-var _mgpuWriteInt8 = Module['_mgpuWriteInt8'] = (a0, a1, a2) => (_mgpuWriteInt8 = Module['_mgpuWriteInt8'] = wasmExports['mgpuWriteInt8'])(a0, a1, a2);
-var _mgpuWriteInt16 = Module['_mgpuWriteInt16'] = (a0, a1, a2) => (_mgpuWriteInt16 = Module['_mgpuWriteInt16'] = wasmExports['mgpuWriteInt16'])(a0, a1, a2);
-var _mgpuWriteInt32 = Module['_mgpuWriteInt32'] = (a0, a1, a2) => (_mgpuWriteInt32 = Module['_mgpuWriteInt32'] = wasmExports['mgpuWriteInt32'])(a0, a1, a2);
-var _mgpuWriteInt64 = Module['_mgpuWriteInt64'] = (a0, a1, a2) => (_mgpuWriteInt64 = Module['_mgpuWriteInt64'] = wasmExports['mgpuWriteInt64'])(a0, a1, a2);
-var _mgpuWriteUint8 = Module['_mgpuWriteUint8'] = (a0, a1, a2) => (_mgpuWriteUint8 = Module['_mgpuWriteUint8'] = wasmExports['mgpuWriteUint8'])(a0, a1, a2);
-var _mgpuWriteUint16 = Module['_mgpuWriteUint16'] = (a0, a1, a2) => (_mgpuWriteUint16 = Module['_mgpuWriteUint16'] = wasmExports['mgpuWriteUint16'])(a0, a1, a2);
-var _mgpuWriteUint32 = Module['_mgpuWriteUint32'] = (a0, a1, a2) => (_mgpuWriteUint32 = Module['_mgpuWriteUint32'] = wasmExports['mgpuWriteUint32'])(a0, a1, a2);
-var _mgpuWriteUint64 = Module['_mgpuWriteUint64'] = (a0, a1, a2) => (_mgpuWriteUint64 = Module['_mgpuWriteUint64'] = wasmExports['mgpuWriteUint64'])(a0, a1, a2);
-var _mgpuWriteDouble = Module['_mgpuWriteDouble'] = (a0, a1, a2) => (_mgpuWriteDouble = Module['_mgpuWriteDouble'] = wasmExports['mgpuWriteDouble'])(a0, a1, a2);
-var _emwgpuCreateBindGroup = (a0) => (_emwgpuCreateBindGroup = wasmExports['emwgpuCreateBindGroup'])(a0);
-var _emwgpuCreateBindGroupLayout = (a0) => (_emwgpuCreateBindGroupLayout = wasmExports['emwgpuCreateBindGroupLayout'])(a0);
-var _emwgpuCreateCommandBuffer = (a0) => (_emwgpuCreateCommandBuffer = wasmExports['emwgpuCreateCommandBuffer'])(a0);
-var _emwgpuCreateCommandEncoder = (a0) => (_emwgpuCreateCommandEncoder = wasmExports['emwgpuCreateCommandEncoder'])(a0);
-var _emwgpuCreateComputePassEncoder = (a0) => (_emwgpuCreateComputePassEncoder = wasmExports['emwgpuCreateComputePassEncoder'])(a0);
-var _emwgpuCreateComputePipeline = (a0) => (_emwgpuCreateComputePipeline = wasmExports['emwgpuCreateComputePipeline'])(a0);
-var _emwgpuCreatePipelineLayout = (a0) => (_emwgpuCreatePipelineLayout = wasmExports['emwgpuCreatePipelineLayout'])(a0);
-var _emwgpuCreateQuerySet = (a0) => (_emwgpuCreateQuerySet = wasmExports['emwgpuCreateQuerySet'])(a0);
-var _emwgpuCreateRenderBundle = (a0) => (_emwgpuCreateRenderBundle = wasmExports['emwgpuCreateRenderBundle'])(a0);
-var _emwgpuCreateRenderBundleEncoder = (a0) => (_emwgpuCreateRenderBundleEncoder = wasmExports['emwgpuCreateRenderBundleEncoder'])(a0);
-var _emwgpuCreateRenderPassEncoder = (a0) => (_emwgpuCreateRenderPassEncoder = wasmExports['emwgpuCreateRenderPassEncoder'])(a0);
-var _emwgpuCreateRenderPipeline = (a0) => (_emwgpuCreateRenderPipeline = wasmExports['emwgpuCreateRenderPipeline'])(a0);
-var _emwgpuCreateSampler = (a0) => (_emwgpuCreateSampler = wasmExports['emwgpuCreateSampler'])(a0);
-var _emwgpuCreateSurface = (a0) => (_emwgpuCreateSurface = wasmExports['emwgpuCreateSurface'])(a0);
-var _emwgpuCreateTexture = (a0) => (_emwgpuCreateTexture = wasmExports['emwgpuCreateTexture'])(a0);
-var _emwgpuCreateTextureView = (a0) => (_emwgpuCreateTextureView = wasmExports['emwgpuCreateTextureView'])(a0);
-var _emwgpuCreateAdapter = (a0) => (_emwgpuCreateAdapter = wasmExports['emwgpuCreateAdapter'])(a0);
-var _emwgpuCreateBuffer = (a0, a1) => (_emwgpuCreateBuffer = wasmExports['emwgpuCreateBuffer'])(a0, a1);
-var _emwgpuCreateDevice = (a0, a1) => (_emwgpuCreateDevice = wasmExports['emwgpuCreateDevice'])(a0, a1);
-var _emwgpuCreateQueue = (a0) => (_emwgpuCreateQueue = wasmExports['emwgpuCreateQueue'])(a0);
-var _emwgpuCreateShaderModule = (a0) => (_emwgpuCreateShaderModule = wasmExports['emwgpuCreateShaderModule'])(a0);
-var _emwgpuOnCompilationInfoCompleted = (a0, a1, a2) => (_emwgpuOnCompilationInfoCompleted = wasmExports['emwgpuOnCompilationInfoCompleted'])(a0, a1, a2);
-var _emwgpuOnCreateComputePipelineCompleted = (a0, a1, a2, a3) => (_emwgpuOnCreateComputePipelineCompleted = wasmExports['emwgpuOnCreateComputePipelineCompleted'])(a0, a1, a2, a3);
-var _emwgpuOnCreateRenderPipelineCompleted = (a0, a1, a2, a3) => (_emwgpuOnCreateRenderPipelineCompleted = wasmExports['emwgpuOnCreateRenderPipelineCompleted'])(a0, a1, a2, a3);
-var _emwgpuOnDeviceLostCompleted = (a0, a1, a2) => (_emwgpuOnDeviceLostCompleted = wasmExports['emwgpuOnDeviceLostCompleted'])(a0, a1, a2);
-var _emwgpuOnMapAsyncCompleted = (a0, a1, a2) => (_emwgpuOnMapAsyncCompleted = wasmExports['emwgpuOnMapAsyncCompleted'])(a0, a1, a2);
-var _emwgpuOnPopErrorScopeCompleted = (a0, a1, a2, a3) => (_emwgpuOnPopErrorScopeCompleted = wasmExports['emwgpuOnPopErrorScopeCompleted'])(a0, a1, a2, a3);
-var _emwgpuOnRequestAdapterCompleted = (a0, a1, a2, a3) => (_emwgpuOnRequestAdapterCompleted = wasmExports['emwgpuOnRequestAdapterCompleted'])(a0, a1, a2, a3);
-var _emwgpuOnRequestDeviceCompleted = (a0, a1, a2, a3) => (_emwgpuOnRequestDeviceCompleted = wasmExports['emwgpuOnRequestDeviceCompleted'])(a0, a1, a2, a3);
-var _emwgpuOnWorkDoneCompleted = (a0, a1) => (_emwgpuOnWorkDoneCompleted = wasmExports['emwgpuOnWorkDoneCompleted'])(a0, a1);
-var _emwgpuOnUncapturedError = (a0, a1, a2) => (_emwgpuOnUncapturedError = wasmExports['emwgpuOnUncapturedError'])(a0, a1, a2);
-var _free = Module['_free'] = (a0) => (_free = Module['_free'] = wasmExports['free'])(a0);
-var _memcpy = Module['_memcpy'] = (a0, a1, a2) => (_memcpy = Module['_memcpy'] = wasmExports['memcpy'])(a0, a1, a2);
-var __emscripten_timeout = (a0, a1) => (__emscripten_timeout = wasmExports['_emscripten_timeout'])(a0, a1);
-var _memalign = (a0, a1) => (_memalign = wasmExports['memalign'])(a0, a1);
-var _malloc = Module['_malloc'] = (a0) => (_malloc = Module['_malloc'] = wasmExports['malloc'])(a0);
-var __emscripten_stack_restore = (a0) => (__emscripten_stack_restore = wasmExports['_emscripten_stack_restore'])(a0);
-var __emscripten_stack_alloc = (a0) => (__emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc'])(a0);
-var _emscripten_stack_get_current = () => (_emscripten_stack_get_current = wasmExports['emscripten_stack_get_current'])();
-var ___cxa_increment_exception_refcount = (a0) => (___cxa_increment_exception_refcount = wasmExports['__cxa_increment_exception_refcount'])(a0);
-var dynCall_ii = Module['dynCall_ii'] = (a0, a1) => (dynCall_ii = Module['dynCall_ii'] = wasmExports['dynCall_ii'])(a0, a1);
-var dynCall_vi = Module['dynCall_vi'] = (a0, a1) => (dynCall_vi = Module['dynCall_vi'] = wasmExports['dynCall_vi'])(a0, a1);
-var dynCall_viiii = Module['dynCall_viiii'] = (a0, a1, a2, a3, a4) => (dynCall_viiii = Module['dynCall_viiii'] = wasmExports['dynCall_viiii'])(a0, a1, a2, a3, a4);
-var dynCall_viiiii = Module['dynCall_viiiii'] = (a0, a1, a2, a3, a4, a5) => (dynCall_viiiii = Module['dynCall_viiiii'] = wasmExports['dynCall_viiiii'])(a0, a1, a2, a3, a4, a5);
-var dynCall_vii = Module['dynCall_vii'] = (a0, a1, a2) => (dynCall_vii = Module['dynCall_vii'] = wasmExports['dynCall_vii'])(a0, a1, a2);
-var dynCall_iii = Module['dynCall_iii'] = (a0, a1, a2) => (dynCall_iii = Module['dynCall_iii'] = wasmExports['dynCall_iii'])(a0, a1, a2);
-var dynCall_v = Module['dynCall_v'] = (a0) => (dynCall_v = Module['dynCall_v'] = wasmExports['dynCall_v'])(a0);
-var dynCall_viji = Module['dynCall_viji'] = (a0, a1, a2, a3) => (dynCall_viji = Module['dynCall_viji'] = wasmExports['dynCall_viji'])(a0, a1, a2, a3);
-var dynCall_iidiiii = Module['dynCall_iidiiii'] = (a0, a1, a2, a3, a4, a5, a6) => (dynCall_iidiiii = Module['dynCall_iidiiii'] = wasmExports['dynCall_iidiiii'])(a0, a1, a2, a3, a4, a5, a6);
-var dynCall_iiii = Module['dynCall_iiii'] = (a0, a1, a2, a3) => (dynCall_iiii = Module['dynCall_iiii'] = wasmExports['dynCall_iiii'])(a0, a1, a2, a3);
-var dynCall_jiji = Module['dynCall_jiji'] = (a0, a1, a2, a3) => (dynCall_jiji = Module['dynCall_jiji'] = wasmExports['dynCall_jiji'])(a0, a1, a2, a3);
-var dynCall_viijii = Module['dynCall_viijii'] = (a0, a1, a2, a3, a4, a5) => (dynCall_viijii = Module['dynCall_viijii'] = wasmExports['dynCall_viijii'])(a0, a1, a2, a3, a4, a5);
-var dynCall_iiiii = Module['dynCall_iiiii'] = (a0, a1, a2, a3, a4) => (dynCall_iiiii = Module['dynCall_iiiii'] = wasmExports['dynCall_iiiii'])(a0, a1, a2, a3, a4);
-var dynCall_iiiiii = Module['dynCall_iiiiii'] = (a0, a1, a2, a3, a4, a5) => (dynCall_iiiiii = Module['dynCall_iiiiii'] = wasmExports['dynCall_iiiiii'])(a0, a1, a2, a3, a4, a5);
-var dynCall_iiiiiiiii = Module['dynCall_iiiiiiiii'] = (a0, a1, a2, a3, a4, a5, a6, a7, a8) => (dynCall_iiiiiiiii = Module['dynCall_iiiiiiiii'] = wasmExports['dynCall_iiiiiiiii'])(a0, a1, a2, a3, a4, a5, a6, a7, a8);
-var dynCall_iiiiiii = Module['dynCall_iiiiiii'] = (a0, a1, a2, a3, a4, a5, a6) => (dynCall_iiiiiii = Module['dynCall_iiiiiii'] = wasmExports['dynCall_iiiiiii'])(a0, a1, a2, a3, a4, a5, a6);
-var dynCall_iiiiij = Module['dynCall_iiiiij'] = (a0, a1, a2, a3, a4, a5) => (dynCall_iiiiij = Module['dynCall_iiiiij'] = wasmExports['dynCall_iiiiij'])(a0, a1, a2, a3, a4, a5);
-var dynCall_iiiiid = Module['dynCall_iiiiid'] = (a0, a1, a2, a3, a4, a5) => (dynCall_iiiiid = Module['dynCall_iiiiid'] = wasmExports['dynCall_iiiiid'])(a0, a1, a2, a3, a4, a5);
-var dynCall_iiiiijj = Module['dynCall_iiiiijj'] = (a0, a1, a2, a3, a4, a5, a6) => (dynCall_iiiiijj = Module['dynCall_iiiiijj'] = wasmExports['dynCall_iiiiijj'])(a0, a1, a2, a3, a4, a5, a6);
-var dynCall_iiiiiiii = Module['dynCall_iiiiiiii'] = (a0, a1, a2, a3, a4, a5, a6, a7) => (dynCall_iiiiiiii = Module['dynCall_iiiiiiii'] = wasmExports['dynCall_iiiiiiii'])(a0, a1, a2, a3, a4, a5, a6, a7);
-var dynCall_iiiiiijj = Module['dynCall_iiiiiijj'] = (a0, a1, a2, a3, a4, a5, a6, a7) => (dynCall_iiiiiijj = Module['dynCall_iiiiiijj'] = wasmExports['dynCall_iiiiiijj'])(a0, a1, a2, a3, a4, a5, a6, a7);
-var dynCall_viiiiii = Module['dynCall_viiiiii'] = (a0, a1, a2, a3, a4, a5, a6) => (dynCall_viiiiii = Module['dynCall_viiiiii'] = wasmExports['dynCall_viiiiii'])(a0, a1, a2, a3, a4, a5, a6);
-var _asyncify_start_unwind = (a0) => (_asyncify_start_unwind = wasmExports['asyncify_start_unwind'])(a0);
-var _asyncify_stop_unwind = () => (_asyncify_stop_unwind = wasmExports['asyncify_stop_unwind'])();
-var _asyncify_start_rewind = (a0) => (_asyncify_start_rewind = wasmExports['asyncify_start_rewind'])(a0);
-var _asyncify_stop_rewind = () => (_asyncify_stop_rewind = wasmExports['asyncify_stop_rewind'])();
 
 
 // include: postamble.js
 // === Auto-generated postamble setup entry stuff ===
-
-Module['ccall'] = ccall;
-Module['cwrap'] = cwrap;
-
 
 function run() {
 
@@ -3098,13 +3195,16 @@ function run() {
   }
 }
 
-if (Module['preInit']) {
-  if (typeof Module['preInit'] == 'function') Module['preInit'] = [Module['preInit']];
-  while (Module['preInit'].length > 0) {
-    Module['preInit'].pop()();
+function preInit() {
+  if (Module['preInit']) {
+    if (typeof Module['preInit'] == 'function') Module['preInit'] = [Module['preInit']];
+    while (Module['preInit'].length > 0) {
+      Module['preInit'].shift()();
+    }
   }
 }
 
+preInit();
 run();
 
 // end include: postamble.js

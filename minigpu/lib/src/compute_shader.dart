@@ -15,9 +15,12 @@ final class ComputeShader {
     (platformShader) => platformShader.destroy(),
   );
 
-  /// Loads a kernel string into the shader.
+  /// Reset tag->binding index mapping so the next binding session starts at 0.
+  void resetTagOrder() => _kernelTags.clear();
+
   void loadKernelString(String kernelString) {
     shaderCode = kernelString;
+    _kernelTags.clear(); // fresh tag ordering for this kernel
     return _shader.loadKernelString(kernelString);
   }
 
@@ -59,16 +62,19 @@ final class CachedComputeShader extends ComputeShader {
 
   @override
   void loadKernelString(String kernelString) {
-    // Check if we have this shader cached
+    // Reuse/create cached shader instance for this kernel source
     _cachedShader = _gpu.getOrCreateCachedShader(kernelString);
 
-    // If it's the same instance, we're already loaded
     if (_cachedShader == this) {
+      // This instance owns the platform shader
       super.loadKernelString(kernelString);
-      return;
+    } else {
+      // Ensure the cached instance has the kernel loaded
+      _cachedShader!.loadKernelString(kernelString);
     }
 
-    // Otherwise, just store the code reference
+    // Start a fresh bind session
+    _cachedShader!.resetTagOrder();
     shaderCode = kernelString;
   }
 

@@ -90,7 +90,7 @@ if(EMSCRIPTEN)
         -sWASM=1 \
         -DDAWN_EMSCRIPTEN_TOOLCHAIN=${EMSCRIPTEN_DIR} \
         -sEXPORTED_FUNCTIONS=_malloc,_free,_memcpy \
-        -sEXPORTED_RUNTIME_METHODS=ccall,cwrap \
+        -sEXPORTED_RUNTIME_METHODS=ccall,cwrap,HEAPU8,HEAPU16,HEAPU32,HEAP8,HEAP16,HEAP32,HEAPF32,HEAPF64 \
         -sUSE_GLFW=3 \
         -sINITIAL_MEMORY=256MB \
         -sSTACK_SIZE=64MB \
@@ -101,10 +101,7 @@ if(EMSCRIPTEN)
         -sASYNCIFY_IGNORE_INDIRECT=1 \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
-        --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_enum_tables.js \
-        --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_struct_info.js \
-        --js-library=${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/library_webgpu_generated_sig_info.js \
-        --js-library=${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/library_webgpu.js \
+        --use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
     ")
 else()
