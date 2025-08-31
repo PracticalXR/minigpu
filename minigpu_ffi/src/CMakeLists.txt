@@ -101,7 +101,7 @@ if(EMSCRIPTEN)
         -sASYNCIFY_IGNORE_INDIRECT=1 \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
-        --use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py \
+        --use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py:shared_memory=true \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
     ")
 else()
