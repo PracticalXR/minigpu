@@ -113,6 +113,7 @@ else()
             -mtune=native          # Optimize for current CPU
             -ffast-math            # Aggressive floating-point optimizations
             -flto                  # Link-time optimization
+            -Wno-error
         )
         
         # Release-specific flags
