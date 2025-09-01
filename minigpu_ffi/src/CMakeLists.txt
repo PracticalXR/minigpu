@@ -108,12 +108,9 @@ else()
     # Compiler-specific optimizations
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${MAIN_LIB} PRIVATE 
-            -Wall -Werror
-            -march=native          # Use CPU-specific instructions
-            -mtune=native          # Optimize for current CPU
+            -Wall
             -ffast-math            # Aggressive floating-point optimizations
             -flto                  # Link-time optimization
-            -Wno-error
         )
         
         # Release-specific flags
