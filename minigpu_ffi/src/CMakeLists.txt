@@ -1,4 +1,3 @@
-cmake_minimum_required(VERSION 3.5)
 project(minigpu_ffi VERSION 1.0.0)
 cmake_minimum_required(VERSION 3.22.1)
 set(CMAKE_CXX_STANDARD 20)
@@ -17,6 +16,37 @@ endif()
 
 # Include Additional CMake Modules
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/dawn.cmake")
+
+# Arch-aware output directories (reuse DAWN_ARCH from dawn.cmake)
+if(NOT EMSCRIPTEN)
+  if(EMSCRIPTEN)
+    set(_mg_build_os "web")
+  elseif(WIN32)
+    set(_mg_build_os "win")
+  elseif(IOS)
+    set(_mg_build_os "ios")
+  elseif(APPLE)
+    set(_mg_build_os "mac")
+  elseif(ANDROID)
+    set(_mg_build_os "android")
+  else()
+    set(_mg_build_os "unix")
+  endif()
+
+  set(MINIGPU_OUT_ROOT "${CMAKE_BINARY_DIR}/out_${_mg_build_os}_${DAWN_ARCH}")
+  message(STATUS "minigpu: target OS=${_mg_build_os}, arch=${DAWN_ARCH}, out=${MINIGPU_OUT_ROOT}")
+
+  # Multi-config generators need per-config dirs as well
+  set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${MINIGPU_OUT_ROOT}/lib")
+  set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${MINIGPU_OUT_ROOT}/lib")
+  set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${MINIGPU_OUT_ROOT}/bin")
+  foreach(cfg IN ITEMS Debug Release RelWithDebInfo MinSizeRel)
+    string(TOUPPER "${cfg}" cfg_up)
+    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${cfg_up} "${MINIGPU_OUT_ROOT}/lib")
+    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${cfg_up} "${MINIGPU_OUT_ROOT}/lib")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${cfg_up} "${MINIGPU_OUT_ROOT}/bin")
+  endforeach()
+endif()
 
 # Define Main Target Names and Paths
 if(NOT EMSCRIPTEN)
@@ -107,12 +137,17 @@ if(EMSCRIPTEN)
 else()
     # Compiler-specific optimizations
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        # Only use CPU-specific tuning when we are not on Apple and not cross-compiling
+        set(CPU_TUNING_FLAGS "")
+        if(NOT APPLE AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL CMAKE_SYSTEM_PROCESSOR)
+            list(APPEND CPU_TUNING_FLAGS -march=native -mtune=native)
+        endif()
+
         target_compile_options(${MAIN_LIB} PRIVATE 
-            -Wall -Werror
-            -march=native          # Use CPU-specific instructions
-            -mtune=native          # Optimize for current CPU
+            -Wall
             -ffast-math            # Aggressive floating-point optimizations
             -flto                  # Link-time optimization
+            ${CPU_TUNING_FLAGS}
         )
         
         # Release-specific flags
