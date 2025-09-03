@@ -20,16 +20,23 @@ void main(List<String> args) async {
     );
 
     final dawnNativeOutDir = _dawnNativeOutDir(input, sourceDir.absolute.uri);
-    final webgpuLib = await output.findAndAddCodeAssets(
-      input,
-      names: {'webgpu_dawn': 'webgpu_dawn.dart'},
-      outDir: dawnNativeOutDir,
-    );
+    if (input.config.code.targetOS != OS.iOS) {
+      // Only search/runtime-package Dawn on platforms where it’s a shared library
+      final webgpuLib = await output.findAndAddCodeAssets(
+        input,
+        names: {'webgpu_dawn': 'webgpu_dawn.dart'},
+        outDir: dawnNativeOutDir,
+      );
 
-    final assets = <List<dynamic>>[minigpuLib, webgpuLib];
-
-    for (final assetList in assets) {
-      for (CodeAsset asset in assetList) {
+      final assets = <List<dynamic>>[minigpuLib, webgpuLib];
+      for (final assetList in assets) {
+        for (CodeAsset asset in assetList) {
+          logger.info('Added file: ${asset.file}');
+        }
+      }
+    } else {
+      // iOS: linked statically, nothing to add as an asset
+      for (final asset in minigpuLib) {
         logger.info('Added file: ${asset.file}');
       }
     }
@@ -49,7 +56,8 @@ Future<void> runBuild(
       generator = Generator.ninja;
       break;
     case OS.iOS:
-      generator = Generator.make;
+      // Use Xcode so deployment target sticks
+      generator = Generator.ninja;
       break;
     case OS.macOS:
       generator = Generator.make;
@@ -65,12 +73,24 @@ Future<void> runBuild(
       break;
   }
 
+  // Map Dart arch to CMake arch for iOS
+  String? cmakeArch;
+  if (input.config.code.targetOS == OS.iOS) {
+    final a = input.config.code.targetArchitecture;
+    if (a == Architecture.arm64) cmakeArch = 'arm64';
+    if (a == Architecture.x64) cmakeArch = 'x86_64';
+  }
+
   final builder = CMakeBuilder.create(
     name: name,
     sourceDir: sourceDir,
     generator: generator,
     buildMode: BuildMode.release,
-    defines: {},
+    targets: ['minigpu_ffi', 'webgpu_dawn'],
+    defines: {
+      if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
+        'ENABLE_ARC': 'OFF',
+    },
   );
   await builder.run(
     input: input,
@@ -82,9 +102,8 @@ Future<void> runBuild(
 }
 
 Uri _dawnNativeOutDir(BuildInput input, Uri srcDir) {
-  final osKey = _osKey(input.config.code.targetOS);
+  final osKey = _osKey(input);
   final archKey = _archKey(input.config.code.targetArchitecture, input.config.code.targetOS);
-  // Matches: ${DAWN_DIR}/build_${os}_${arch}/src/dawn/native
   return srcDir
       .resolve('external/')
       .resolve('dawn/')
@@ -92,15 +111,32 @@ Uri _dawnNativeOutDir(BuildInput input, Uri srcDir) {
       .resolve('src/dawn/native/');
 }
 
-String _osKey(OS os) => switch (os) {
-      OS.android => 'android',
-      OS.iOS => 'ios',
-      OS.macOS => 'mac',
-      OS.linux => 'unix',
-      OS.windows => 'win',
-      OS.fuchsia => 'unix', // fallback
-      _ => 'unknown',
-    };
+String _osKey(BuildInput input) {
+  final os = input.config.code.targetOS;
+  if (os == OS.iOS) {
+    // Prefer SDK info if available to distinguish simulator vs device
+    try {
+      // code_assets exposes iOS SDK in the config package
+      final sdk = input.config.code.iOS.targetSdk; // IosSdk.device | IosSdk.simulator
+      if (sdk.toString().contains('simulator')) return 'iossim';
+      return 'ios';
+    } catch (_) {
+      // Heuristic fallback: x86_64 is always simulator; arm64 could be either
+      final arch = input.config.code.targetArchitecture;
+      if (arch.name == 'ia32' || arch.name == 'x86_64') return 'iossim';
+      // Default to device when unknown
+      return 'ios';
+    }
+  }
+  return switch (os) {
+    OS.android => 'android',
+    OS.macOS => 'mac',
+    OS.linux => 'unix',
+    OS.windows => 'win',
+    OS.fuchsia => 'unix',
+    _ => 'unix',
+  };
+}
 
 String _archKey(Architecture arch, OS os) {
   // Mirror dawn.cmake normalization

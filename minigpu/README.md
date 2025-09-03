@@ -11,10 +11,10 @@ Tensor package: [https://pub.dev/packages/gpu_tensor](https://pub.dev/packages/g
 
 - [x] Windows
 - [x] Linux
-- [x] Mac - Needs testing.
+- [x] Mac
 - [x] Web
 - [x] Android
-- [x] iOS - Needs testing.
+- [x] iOS
 
 **Disclaimer: This library is experimental and supported at will, use in production at your own risk.**
 

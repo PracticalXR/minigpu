@@ -1091,7 +1091,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let golden_harmonic = cos(spiral_angle / fib_ratio) * 15.0;
     
     // Add neighbor coupling for propagation
-    let coupling = (neighbor_left + neighbor_right) * 0.1;
+    let coupling = (neighbor_left + neighbor_right) / 10;
     
     // Stronger chaos injection to prevent stagnation
     let chaos1 = sin(x * 0.789 + f32(idx) * 1.234) * 8.0;
@@ -1743,27 +1743,42 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
           ],
         ),
       ),
-      body: Column(
-        children: [
-          _buildTypeSelector(),
-          _buildAlgorithmSelector(),
-          Expanded(
-            child: TabBarView(
-              controller: _tabController,
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          final screenH = MediaQuery.of(context).size.height;
+          // Give the chart/data area a responsive, fixed height
+          final double tabAreaHeight =
+              screenH * 0.4 /* 40% */.clamp(240.0, 520.0);
+
+          return SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SingleChildScrollView(
-                  padding: const EdgeInsets.all(8),
-                  child: _buildVisualizationTab(),
+                _buildTypeSelector(),
+                _buildAlgorithmSelector(),
+                SizedBox(
+                  height: tabAreaHeight,
+                  child: TabBarView(
+                    controller: _tabController,
+                    // Keep horizontal paging; avoid nested vertical scrolls
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: _buildVisualizationTab(),
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: _buildDataTab(),
+                      ),
+                    ],
+                  ),
                 ),
-                SingleChildScrollView(
-                  padding: const EdgeInsets.all(8),
-                  child: _buildDataTab(),
-                ),
+                _buildControls(),
               ],
             ),
-          ),
-          _buildControls(),
-        ],
+          );
+        },
       ),
     );
   }

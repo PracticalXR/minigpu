@@ -77,6 +77,28 @@ endif()
 set(DAWN_BUILD_DIR "${DAWN_DIR}/build_${_dawn_build_os}_${DAWN_ARCH}" CACHE INTERNAL "arch-specific build directory" FORCE)
 message(STATUS "Dawn: target OS=${_dawn_build_os}, arch=${DAWN_ARCH}, build dir=${DAWN_BUILD_DIR}")
 
+# Ensure Dawn/Tint inherit iOS 13+ (important for std::filesystem availability)
+if(IOS)
+  set(DAWN_USE_GLFW                      OFF CACHE INTERNAL "" FORCE)
+  if(NOT DEFINED MINIGPU_IOS_DEPLOYMENT_TARGET)
+    set(MINIGPU_IOS_DEPLOYMENT_TARGET "16.0" CACHE STRING "Minimum iOS version" FORCE)
+  endif()
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+  set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+  set(CMAKE_XCODE_ATTRIBUTE_IPHONESIMULATOR_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+
+  # If not using the Xcode generator, also force min-version flags
+  if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
+    if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+      add_compile_options(-mios-simulator-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+      add_link_options(-mios-simulator-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+    else()
+      add_compile_options(-miphoneos-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+      add_link_options(-miphoneos-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+    endif()
+  endif()
+endif()
+
 # Add Dawn header include directories so that they are available later.
 include_directories(BEFORE PUBLIC 
   "${DAWN_BUILD_DIR}/src/dawn/native/"
@@ -107,48 +129,62 @@ endif()
 if(NOT DAWN_BUILD_FOUND)
   message(STATUS "Dawn build not found - pre-building Dawn.")
 
-  if(WIN32)
-      set(DAWN_ENABLE_VULKAN           OFF CACHE INTERNAL "Always assert in Dawn" FORCE)
-      set(DAWN_FORCE_SYSTEM_COMPONENT_LOAD            ON CACHE INTERNAL " " FORCE)
-  endif()
-  # Force Dawn build options.
-  set(DAWN_ALWAYS_ASSERT           OFF CACHE INTERNAL "Always assert in Dawn" FORCE)
-  set(DAWN_BUILD_MONOLITHIC_LIBRARY SHARED CACHE INTERNAL "Build Dawn monolithically" FORCE)
-  set(DAWN_BUILD_EXAMPLES          OFF CACHE INTERNAL "Build Dawn examples" FORCE)
-  set(DAWN_BUILD_SAMPLES           OFF CACHE INTERNAL "Build Dawn samples" FORCE)
-  set(DAWN_BUILD_TESTS             OFF CACHE INTERNAL "Build Dawn tests" FORCE)
-  set(DAWN_ENABLE_INSTALL          OFF  CACHE INTERNAL "Enable Dawn installation" FORCE)
-  set(DAWN_FETCH_DEPENDENCIES      ON  CACHE INTERNAL "Fetch Dawn dependencies" FORCE)
-  set(TINT_BUILD_TESTS             OFF CACHE INTERNAL "Build Tint Tests" FORCE)
-  set(TINT_BUILD_IR_BINARY         OFF CACHE INTERNAL "Build Tint IR binary" FORCE)
-  set(TINT_BUILD_CMD_TOOLS         OFF CACHE INTERNAL "Build Tint command line tools" FORCE)
-  set(DAWN_EMSCRIPTEN_TOOLCHAIN    ${EMSCRIPTEN_DIR} CACHE INTERNAL "Emscripten toolchain" FORCE)
+  # Dawn options
+  set(DAWN_ALWAYS_ASSERT               OFF   CACHE BOOL "" FORCE)
+  set(DAWN_BUILD_EXAMPLES              OFF   CACHE BOOL "" FORCE)
+  set(DAWN_BUILD_SAMPLES               OFF   CACHE BOOL "" FORCE)
+  set(DAWN_BUILD_TESTS                 OFF   CACHE BOOL "" FORCE)
+  set(DAWN_ENABLE_INSTALL              OFF   CACHE BOOL "" FORCE)
+  set(DAWN_FETCH_DEPENDENCIES           ON   CACHE BOOL "" FORCE)
+  set(TINT_BUILD_TESTS                 OFF   CACHE BOOL "" FORCE)
+  set(TINT_BUILD_IR_BINARY             OFF   CACHE BOOL "" FORCE)
+  set(TINT_BUILD_CMD_TOOLS             OFF   CACHE BOOL "" FORCE)
+  set(DAWN_ENABLE_GLFW                 OFF   CACHE BOOL "" FORCE)
+  set(DAWN_USE_GLFW                    OFF   CACHE BOOL "" FORCE)
+  set(DAWN_BUILD_MONOLITHIC_LIBRARY  SHARED CACHE STRING "Monolithic library type" FORCE)
 
-  set(DAWN_COMMIT "af771226e2ea32c0816418103f28d52b149d5af4" CACHE STRING "Dawn commit to checkout" FORCE)
-  
+  # iOS minimum version (std::filesystem availability, simulator)
+  if(IOS)
+    if(NOT DEFINED MINIGPU_IOS_DEPLOYMENT_TARGET)
+      set(MINIGPU_IOS_DEPLOYMENT_TARGET "13.0" CACHE STRING "" FORCE)
+    endif()
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+    set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+    set(CMAKE_XCODE_ATTRIBUTE_IPHONESIMULATOR_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+
+    # For non-Xcode generators, also force min-version flags
+    if(CMAKE_GENERATOR MATCHES "Unix Makefiles|Ninja")
+      if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+        add_compile_options(-mios-simulator-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+        add_link_options(-mios-simulator-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+      else()
+        add_compile_options(-miphoneos-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+        add_link_options(-miphoneos-version-min=${MINIGPU_IOS_DEPLOYMENT_TARGET})
+      endif()
+    endif()
+  endif()
+
+  # Ensure source present on required commit (idempotent remote setup)
+  if(NOT DEFINED DAWN_COMMIT OR DAWN_COMMIT STREQUAL "")
+    set(DAWN_COMMIT "af771226e2ea32c0816418103f28d52b149d5af4" CACHE STRING "" FORCE)
+  endif()
   file(MAKE_DIRECTORY ${DAWN_DIR})
-  # Initialize Git and set/update remote.
-  execute_process(COMMAND git init
-  WORKING_DIRECTORY "${DAWN_DIR}"
-  )
+  execute_process(COMMAND git init WORKING_DIRECTORY "${DAWN_DIR}")
   execute_process(
-    COMMAND git remote add origin https://dawn.googlesource.com/dawn
+    COMMAND git remote get-url origin
     WORKING_DIRECTORY "${DAWN_DIR}"
+    RESULT_VARIABLE _have_origin
+    OUTPUT_QUIET ERROR_QUIET
   )
-  # Fetch and checkout the specified commit.
-  execute_process(
-  COMMAND git fetch origin ${DAWN_COMMIT}
-  WORKING_DIRECTORY "${DAWN_DIR}"
-  )
-  execute_process(
-  COMMAND git checkout ${DAWN_COMMIT}
-  WORKING_DIRECTORY "${DAWN_DIR}"
-  )
-  execute_process(
-  COMMAND git reset --hard ${DAWN_COMMIT}
-  WORKING_DIRECTORY "${DAWN_DIR}"
-  )
-  # Fetch the Dawn repository if not already present.
+  if(_have_origin EQUAL 0)
+    execute_process(COMMAND git remote set-url origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
+  else()
+    execute_process(COMMAND git remote add origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
+  endif()
+  execute_process(COMMAND git fetch origin ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+  execute_process(COMMAND git checkout ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+  execute_process(COMMAND git reset --hard ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+
   FetchContent_Declare(
     dawn
     SOURCE_DIR   ${DAWN_DIR}
@@ -158,55 +194,66 @@ if(NOT DAWN_BUILD_FOUND)
   FetchContent_MakeAvailable(dawn)
 
   set(CMAKE_INCLUDE_PATH "${CMAKE_INCLUDE_PATH};${DAWN_DIR}/src" CACHE INTERNAL "")
-
   set(DAWN_BUILD_FOUND ON)
 endif()  # End pre-build Dawn
 
-# Create an IMPORTED target for the Dawn library.
-# Adjust the expected output name/extension per platform.
-if(MSVC)
-message(STATUS "Dawn build found on Windows.")
-# MSVC: use separate debug and release dlls.
-if((NOT WEBGPU_DAWN_DEBUG) OR (WEBGPU_DAWN_DEBUG MATCHES "NOTFOUND"))
-  find_library(WEBGPU_DAWN_DEBUG NAMES webgpu_dawn PATHS "${DAWN_BUILD_DIR}/src/dawn/native/Debug")
-endif()
-if((NOT WEBGPU_DAWN_RELEASE) OR (WEBGPU_DAWN_RELEASE MATCHES "NOTFOUND"))
-  find_library(WEBGPU_DAWN_RELEASE NAMES webgpu_dawn PATHS "${DAWN_BUILD_DIR}/src/dawn/native/Release")
-endif()
-
-if(WEBGPU_DAWN_DEBUG OR WEBGPU_DAWN_RELEASE)
-  if(NOT TARGET webgpu_dawn)
-    add_library(webgpu_dawn INTERFACE)
-    target_link_libraries(webgpu_dawn INTERFACE
-      $<$<CONFIG:Debug>:${WEBGPU_DAWN_DEBUG}>
-      $<$<CONFIG:Release>:${WEBGPU_DAWN_RELEASE}>
-    )
-  endif()
-endif()
-elseif(IOS)
-  # On iOS, it is common to build a static library.
-  if(NOT TARGET webgpu_dawn)
+# Create an IMPORTED target that matches the monolithic output
+if(TARGET webgpu_dawn)
+  # Dawn already created it in this project; use it directly
+else()
+  if(IOS)
+    # Xcode config suffix: Debug-iphoneos/Debug-iphonesimulator etc.
+    if(CMAKE_OSX_SYSROOT MATCHES "iphonesimulator")
+      set(_ios_conf_suffix "-iphonesimulator")
+    else()
+      set(_ios_conf_suffix "-iphoneos")
+    endif()
     add_library(webgpu_dawn STATIC IMPORTED)
+    # Monolithic static archive name is libwebgpu_dawn.a
     set_target_properties(webgpu_dawn PROPERTIES
-      IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/webgpu_dawn.a")
-  endif()
-elseif(APPLE)
-  # On macOS (non-iOS), typically a dynamic library (.dylib) is built.
-  if(NOT TARGET webgpu_dawn)
-    add_library(webgpu_dawn SHARED IMPORTED)
-    set_target_properties(webgpu_dawn PROPERTIES
-      IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/webgpu_dawn.dylib")
-  endif()
-elseif(ANDROID)
-  if(NOT TARGET webgpu_dawn)
-    add_library(webgpu_dawn SHARED IMPORTED)
-    set_target_properties(webgpu_dawn PROPERTIES
-      IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/webgpu_dawn.so")
-  endif()
-elseif(NOT EMSCRIPTEN)  # For Linux and other Unix-like systems.
-  if(NOT TARGET webgpu_dawn)
-    add_library(webgpu_dawn SHARED IMPORTED)
-    set_target_properties(webgpu_dawn PROPERTIES
-      IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/webgpu_dawn.so")
+      IMPORTED_LOCATION_DEBUG           "${DAWN_BUILD_DIR}/src/dawn/native/Debug${_ios_conf_suffix}/libwebgpu_dawn.a"
+      IMPORTED_LOCATION_RELEASE         "${DAWN_BUILD_DIR}/src/dawn/native/Release${_ios_conf_suffix}/libwebgpu_dawn.a"
+      IMPORTED_LOCATION_RELWITHDEBINFO  "${DAWN_BUILD_DIR}/src/dawn/native/RelWithDebInfo${_ios_conf_suffix}/libwebgpu_dawn.a"
+      IMPORTED_LOCATION_MINSIZEREL      "${DAWN_BUILD_DIR}/src/dawn/native/MinSizeRel${_ios_conf_suffix}/libwebgpu_dawn.a"
+    )
+  elseif(APPLE)
+    # macOS: prefer shared monolithic dylib; fallback to static if needed
+    if(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.dylib")
+      add_library(webgpu_dawn SHARED IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.dylib"
+      )
+    elseif(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a")
+      add_library(webgpu_dawn STATIC IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a"
+      )
+    endif()
+  elseif(ANDROID)
+    if(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.so")
+      add_library(webgpu_dawn SHARED IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.so"
+      )
+    elseif(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a")
+      add_library(webgpu_dawn STATIC IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a"
+      )
+    endif()
+  elseif(WIN32)
+    # You can add Debug/Release import locations here if needed
+  else() # Linux/Unix
+    if(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.so")
+      add_library(webgpu_dawn SHARED IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.so"
+      )
+    elseif(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a")
+      add_library(webgpu_dawn STATIC IMPORTED)
+      set_target_properties(webgpu_dawn PROPERTIES
+        IMPORTED_LOCATION "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.a"
+      )
+    endif()
   endif()
 endif()

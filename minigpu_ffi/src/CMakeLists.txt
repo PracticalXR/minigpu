@@ -2,6 +2,15 @@ project(minigpu_ffi VERSION 1.0.0)
 cmake_minimum_required(VERSION 3.22.1)
 set(CMAKE_CXX_STANDARD 20)
 
+# Ensure iOS 13+ so std::filesystem APIs are available in simulator
+if(IOS)
+  set(MINIGPU_IOS_DEPLOYMENT_TARGET "16.0" CACHE STRING "Minimum iOS version" FORCE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+  set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+  # Also set for the simulator explicitly
+  set(CMAKE_XCODE_ATTRIBUTE_IPHONESIMULATOR_DEPLOYMENT_TARGET "${MINIGPU_IOS_DEPLOYMENT_TARGET}" CACHE STRING "" FORCE)
+endif()
+
 if(EMSCRIPTEN)
 # Locate the Project Root
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_root.cmake")
@@ -247,4 +256,16 @@ endif()
 # Android Specific Linking
 if(ANDROID)
    # target_link_libraries(${MAIN_LIB} OpenSLES)
+endif()
+
+# Link Dawn monolithic lib; iOS links static archive
+if(NOT EMSCRIPTEN)
+  target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
+  if(IOS)
+    target_link_libraries(${MAIN_LIB} PRIVATE
+      "-framework Metal"
+      "-framework QuartzCore"
+      "-framework Foundation"
+    )
+  endif()
 endif()
