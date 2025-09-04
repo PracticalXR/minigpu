@@ -6,6 +6,20 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <vector>
+#include <cstdio>
+#include <cstring>
+
+// Prefer std::format or {fmt} if available
+#if defined(__has_include)
+#  if __has_include(<format>) && defined(__cpp_lib_format)
+#    include <format>
+#    define MGPU_USE_STD_FORMAT 1
+#  elif __has_include(<fmt/format.h>)
+#    include <fmt/format.h>
+#    define MGPU_USE_FMTLIB 1
+#  endif
+#endif
 
 #include "../include/mutex.h"
 
@@ -52,11 +66,34 @@ public:
         if (!filename) filename = file;
         else filename++;
 
-        char buffer[1024];
-        snprintf(buffer, sizeof(buffer), format, args...);
+        // Build the message without triggering -Wformat-security
+        std::string message;
+    #if defined(MGPU_USE_STD_FORMAT)
+        message = std::vformat(format, std::make_format_args(args...));
+    #elif defined(MGPU_USE_FMTLIB)
+        // fmt::runtime allows non-literal format strings safely
+        message = fmt::format(fmt::runtime(format), args...);
+    #else
+        // Fallback to snprintf with size probing; suppress format-security warning locally
+    #if defined(__GNUC__) || defined(__clang__)
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wformat-security"
+    #endif
+        int n = std::snprintf(nullptr, 0, format, args...);
+        if (n > 0) {
+            std::vector<char> buf(static_cast<size_t>(n) + 1);
+            std::snprintf(buf.data(), buf.size(), format, args...);
+            message.assign(buf.data(), static_cast<size_t>(n));
+        } else {
+            message = format ? format : "";
+        }
+    #if defined(__GNUC__) || defined(__clang__)
+    #pragma GCC diagnostic pop
+    #endif
+    #endif
 
-        std::string logLine = ss.str() + " [" + levelStr[level] + "] " + 
-                             filename + ":" + std::to_string(line) + " " + buffer;
+        std::string logLine = ss.str() + " [" + levelStr[static_cast<int>(level)] + "] " + 
+                              filename + ":" + std::to_string(line) + " " + message;
 
         std::cout << logLine << std::endl;
     }
@@ -73,8 +110,8 @@ private:
 
 // Convenience macros
 #define LOG_DEBUG(...) mgpu::Logger::getInstance().log(mgpu::LOG_DEBUG, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_INFO(...) mgpu::Logger::getInstance().log(mgpu::LOG_INFO, __FILE__, __LINE__, __VA_ARGS__)
-#define LOG_WARN(...) mgpu::Logger::getInstance().log(mgpu::LOG_WARN, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_INFO(...)  mgpu::Logger::getInstance().log(mgpu::LOG_INFO,  __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_WARN(...)  mgpu::Logger::getInstance().log(mgpu::LOG_WARN,  __FILE__, __LINE__, __VA_ARGS__)
 #define LOG_ERROR(...) mgpu::Logger::getInstance().log(mgpu::LOG_ERROR, __FILE__, __LINE__, __VA_ARGS__)
 
 // Helper to set log level

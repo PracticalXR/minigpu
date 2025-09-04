@@ -154,6 +154,7 @@ else()
 
         target_compile_options(${MAIN_LIB} PRIVATE 
             -Wall
+            -Wno-error
             -ffast-math            # Aggressive floating-point optimizations
             -flto                  # Link-time optimization
             ${CPU_TUNING_FLAGS}
@@ -189,6 +190,7 @@ else()
             LINK_FLAGS_RELEASE "/LTCG"
             LINK_FLAGS_RELWITHDEBINFO "/LTCG"
         )
+    elseif(ANDROID)
     endif()
     
     # Additional optimizations
@@ -203,6 +205,29 @@ if(NOT EMSCRIPTEN)
 else()
     target_include_directories(${MAIN_LIB} PUBLIC "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/")
     target_include_directories(${MAIN_LIB} PUBLIC "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/webgpu/")
+endif()
+
+# Android Specific Linking
+if(ANDROID)
+     find_library(ANDROID_LOG_LIB log)
+  if(ANDROID_LOG_LIB)
+    target_link_libraries(${MAIN_LIB} PRIVATE ${ANDROID_LOG_LIB})
+    target_link_libraries(webgpu_dawn PRIVATE ${ANDROID_LOG_LIB})
+  else()
+    message(FATAL_ERROR "Android log library not found")
+  endif()
+endif()
+
+# Link Dawn monolithic lib; iOS links static archive
+if(NOT EMSCRIPTEN)
+  target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
+  if(IOS)
+    target_link_libraries(${MAIN_LIB} PRIVATE
+      "-framework Metal"
+      "-framework QuartzCore"
+      "-framework Foundation"
+    )
+  endif()
 endif()
 
 # Add Test Target (Non-Emscripten Only)
@@ -251,21 +276,4 @@ if(EMSCRIPTEN)
                 ${WEB_OUTPUT_DIR}/${MAIN_LIB}.wasm
         COMMENT "Copying output JS and WASM to web output directory"
     )
-endif()
-
-# Android Specific Linking
-if(ANDROID)
-   # target_link_libraries(${MAIN_LIB} OpenSLES)
-endif()
-
-# Link Dawn monolithic lib; iOS links static archive
-if(NOT EMSCRIPTEN)
-  target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
-  if(IOS)
-    target_link_libraries(${MAIN_LIB} PRIVATE
-      "-framework Metal"
-      "-framework QuartzCore"
-      "-framework Foundation"
-    )
-  endif()
 endif()

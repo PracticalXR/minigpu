@@ -93,6 +93,8 @@ Future<void> runBuild(
     defines: {
       if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
         'ENABLE_ARC': 'OFF',
+      if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
+        'CMAKE_OSX_ARCHITECTURES': cmakeArch,
     },
   );
   await builder.run(
@@ -148,7 +150,7 @@ String _archKey(Architecture arch, OS os) {
   // Mirror dawn.cmake normalization
   if (os == OS.android) {
     if (arch == Architecture.arm64) return 'arm64-v8a';
-    if (arch == Architecture.arm) return 'armeabi-v7a';
+    if (arch == Architecture.arm) return 'armv7';
     if (arch == Architecture.x64) return 'x86_64';
     if (arch == Architecture.ia32) return 'x86';
   } else {
