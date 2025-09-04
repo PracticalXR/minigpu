@@ -941,10 +941,10 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     } else {
       LOG_ERROR("Failed to get mapped range");
     }
-    wgpuBufferUnmap(stagingBuffer);
   } else {
     LOG_ERROR("Buffer mapping failed with status %d", (int)readState.status);
   }
+  wgpuBufferUnmap(stagingBuffer);
 
   // Cleanup
   wgpuCommandBufferRelease(commands);

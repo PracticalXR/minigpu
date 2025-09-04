@@ -37,6 +37,8 @@ elseif(ANDROID)
     set(_raw_arch "${ANDROID_ABI}")
   endif()
 elseif(WIN32)
+  set(DAWN_ENABLE_VULKAN           OFF CACHE INTERNAL "Always assert in Dawn" FORCE)
+  set(DAWN_FORCE_SYSTEM_COMPONENT_LOAD            ON CACHE INTERNAL " " FORCE)
   # Prefer generator platform when present (e.g., x64, Win32, ARM64)
   if(DEFINED CMAKE_GENERATOR_PLATFORM AND NOT CMAKE_GENERATOR_PLATFORM STREQUAL "")
     set(_raw_arch "${CMAKE_GENERATOR_PLATFORM}")
@@ -242,7 +244,24 @@ else()
       )
     endif()
   elseif(WIN32)
-    # You can add Debug/Release import locations here if needed
+    message(STATUS "Dawn build found on Windows.")
+# MSVC: use separate debug and release dlls.
+if((NOT WEBGPU_DAWN_DEBUG) OR (WEBGPU_DAWN_DEBUG MATCHES "NOTFOUND"))
+  find_library(WEBGPU_DAWN_DEBUG NAMES webgpu_dawn PATHS "${DAWN_BUILD_DIR}/src/dawn/native/Debug")
+endif()
+if((NOT WEBGPU_DAWN_RELEASE) OR (WEBGPU_DAWN_RELEASE MATCHES "NOTFOUND"))
+  find_library(WEBGPU_DAWN_RELEASE NAMES webgpu_dawn PATHS "${DAWN_BUILD_DIR}/src/dawn/native/Release")
+endif()
+
+if(WEBGPU_DAWN_DEBUG OR WEBGPU_DAWN_RELEASE)
+  if(NOT TARGET webgpu_dawn)
+    add_library(webgpu_dawn INTERFACE)
+    target_link_libraries(webgpu_dawn INTERFACE
+      $<$<CONFIG:Debug>:${WEBGPU_DAWN_DEBUG}>
+      $<$<CONFIG:Release>:${WEBGPU_DAWN_RELEASE}>
+    )
+  endif()
+endif()
   else() # Linux/Unix
     if(EXISTS "${DAWN_BUILD_DIR}/src/dawn/native/libwebgpu_dawn.so")
       add_library(webgpu_dawn SHARED IMPORTED)

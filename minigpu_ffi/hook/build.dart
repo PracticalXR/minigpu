@@ -86,7 +86,10 @@ Future<void> runBuild(
     sourceDir: sourceDir,
     generator: generator,
     buildMode: BuildMode.release,
-    targets: ['minigpu_ffi', 'webgpu_dawn'],
+    targets: [
+      'minigpu_ffi',
+      input.config.code.targetOS == OS.iOS ? 'webgpu_dawn' : null,
+    ].whereType<String>().toList(),
     defines: {
       if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
         'ENABLE_ARC': 'OFF',
@@ -103,12 +106,14 @@ Future<void> runBuild(
 
 Uri _dawnNativeOutDir(BuildInput input, Uri srcDir) {
   final osKey = _osKey(input);
-  final archKey = _archKey(input.config.code.targetArchitecture, input.config.code.targetOS);
+  final archKey = _archKey(
+    input.config.code.targetArchitecture,
+    input.config.code.targetOS,
+  );
   return srcDir
       .resolve('external/')
       .resolve('dawn/')
-      .resolve('build_${osKey}_${archKey}/')
-      .resolve('src/dawn/native/');
+      .resolve('build_${osKey}_${archKey}/');
 }
 
 String _osKey(BuildInput input) {
@@ -117,7 +122,8 @@ String _osKey(BuildInput input) {
     // Prefer SDK info if available to distinguish simulator vs device
     try {
       // code_assets exposes iOS SDK in the config package
-      final sdk = input.config.code.iOS.targetSdk; // IosSdk.device | IosSdk.simulator
+      final sdk =
+          input.config.code.iOS.targetSdk; // IosSdk.device | IosSdk.simulator
       if (sdk.toString().contains('simulator')) return 'iossim';
       return 'ios';
     } catch (_) {
