@@ -107,6 +107,14 @@ public:
   WGPUDevice getDevice() const;
   WGPUQueue getQueue() const;
   WGPUInstance getInstance() const;
+  // Returns the instance without attempting to reinitialize the context.
+  WGPUInstance tryGetInstance() const noexcept {
+    return (ctx && ctx->initialized) ? ctx->instance : nullptr;
+  }
+  // Returns the queue without attempting to reinitialize the context.
+  WGPUQueue tryGetQueue() const noexcept {
+    return (ctx && ctx->initialized) ? ctx->queue : nullptr;
+  }
 
   mgpu::mutex &getGpuMutex() { return gpuOperationMutex; }
 

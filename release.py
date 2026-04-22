@@ -487,7 +487,8 @@ def main_publish():
             # Using shell=True can be a security risk if cmd components are from untrusted input.
             # Here, cmd is hardcoded, so it's safer. On Windows, shell=True might help with pathing for dart.
             # However, direct execution is preferred. Ensure Dart SDK is in PATH.
-            result = subprocess.run(cmd, cwd=package_dir, capture_output=True, text=True, check=False, timeout=300, input="y\n")
+            # shell=True is required on Windows so cmd.exe resolves dart.bat/.cmd via PATHEXT.
+            result = subprocess.run(cmd, cwd=package_dir, capture_output=True, text=True, check=False, timeout=300, input="y\n", shell=(os.name == 'nt'))
             
             if result.returncode == 0:
                 print(f"  Publish command for {package_name} SUCCEEDED (or dry-run successful).")

@@ -387,8 +387,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       final int count = 16;
       // The API packs 2 Uint16 per Uint32.
       final int bufSize = getBufferSizeForType(BufferDataType.uint16, count);
-      final inputBuffer = minigpu.createBuffer(count, BufferDataType.uint16);
-      final outputBuffer = minigpu.createBuffer(count, BufferDataType.uint16);
+      // createBuffer expects byte size
+      final inputBuffer = minigpu.createBuffer(
+        count * Uint16List.bytesPerElement,
+        BufferDataType.uint16,
+      );
+      final outputBuffer = minigpu.createBuffer(
+        count * Uint16List.bytesPerElement,
+        BufferDataType.uint16,
+      );
 
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => i * 2, growable: false),

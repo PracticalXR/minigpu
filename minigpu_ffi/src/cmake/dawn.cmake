@@ -76,7 +76,13 @@ else()
   set(_dawn_build_os "unix")
 endif()
 
-set(DAWN_BUILD_DIR "${DAWN_DIR}/build_${_dawn_build_os}_${DAWN_ARCH}" CACHE INTERNAL "arch-specific build directory" FORCE)
+if(EMSCRIPTEN)
+  # Web always targets wasm32 — no arch suffix needed, and the generated
+  # emdawnwebgpu headers live in build_web (created by the Dawn web cmake step).
+  set(DAWN_BUILD_DIR "${DAWN_DIR}/build_web" CACHE INTERNAL "arch-specific build directory" FORCE)
+else()
+  set(DAWN_BUILD_DIR "${DAWN_DIR}/build_${_dawn_build_os}_${DAWN_ARCH}" CACHE INTERNAL "arch-specific build directory" FORCE)
+endif()
 message(STATUS "Dawn: target OS=${_dawn_build_os}, arch=${DAWN_ARCH}, build dir=${DAWN_BUILD_DIR}")
 
 # Ensure Dawn/Tint inherit iOS 13+ (important for std::filesystem availability)

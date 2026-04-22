@@ -28,11 +28,12 @@ class MinigpuFfi extends MinigpuPlatform {
     final nativeCallable = NativeCallable<Void Function()>.listener(
       nativeCallback,
     );
-
-    ffi.mgpuInitializeContextAsync(nativeCallable.nativeFunction);
-
-    await completer.future;
-    nativeCallable.close();
+    try {
+      ffi.mgpuInitializeContextAsync(nativeCallable.nativeFunction);
+      await completer.future;
+    } finally {
+      nativeCallable.close();
+    }
   }
 
   @override
@@ -85,16 +86,16 @@ final class FfiComputeShader implements PlatformComputeShader {
 
   @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
+    final completer = Completer<void>();
+
+    void nativeCallback() {
+      completer.complete();
+    }
+
+    final nativeCallable = NativeCallable<Void Function()>.listener(
+      nativeCallback,
+    );
     try {
-      final completer = Completer<void>();
-
-      void nativeCallback() {
-        completer.complete();
-      }
-
-      final nativeCallable = NativeCallable<Void Function()>.listener(
-        nativeCallback,
-      );
       ffi.mgpuDispatchAsync(
         _self,
         groupsX,
@@ -103,8 +104,9 @@ final class FfiComputeShader implements PlatformComputeShader {
         nativeCallable.nativeFunction,
       );
       await completer.future;
+    } finally {
       nativeCallable.close();
-    } finally {}
+    }
   }
 
   @override
@@ -210,14 +212,14 @@ final class FfiBuffer implements PlatformBuffer {
       completer.complete();
     }
 
-    final nativeCallable = NativeCallable<Void Function()>.listener(
-      nativeCallback,
-    );
-
     // Allocate temporary native memory based on the number of elements to read
     final int bytesToAllocate = elementsToRead * elementSize;
     final Pointer<NativeType> nativePtr = malloc.allocate<NativeType>(
       bytesToAllocate,
+    );
+
+    final nativeCallable = NativeCallable<Void Function()>.listener(
+      nativeCallback,
     );
 
     try {

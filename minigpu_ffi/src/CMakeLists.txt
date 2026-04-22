@@ -88,6 +88,11 @@ if(EMSCRIPTEN)
 
     # Create a helper library for WebGPU (from Dawn)
     add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/webgpu.cpp")
+    # Must pass --use-port at compile time so Emscripten installs the emdawnwebgpu
+    # port headers before the sysroot webgpu.h (which is an older incompatible version).
+    target_compile_options(webgpu_web PRIVATE
+        "--use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py:shared_memory=true"
+    )
 
     set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
     message(STATUS "Needs Emscripten 4.0.10+, please upgrade if you face issues.")

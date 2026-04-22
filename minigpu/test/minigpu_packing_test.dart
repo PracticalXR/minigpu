@@ -74,11 +74,11 @@ void main() {
 
     test('Int16 read/write', () async {
       final int count = 17;
-      // For i16, createBuffer expects logical element count
+      // createBuffer expects byte size
       final buffer = minigpu.createBuffer(
-        count,
+        count * Int16List.bytesPerElement,
         BufferDataType.int16,
-      ); // Pass logical count
+      ); // Pass byte size
 
       final Int16List input = Int16List.fromList(
         List.generate(count, (i) => (i * 100) - 15000),
@@ -186,11 +186,11 @@ void main() {
 
     test('Uint16 read/write', () async {
       final int count = 17;
-      // For u16, createBuffer expects logical element count
+      // createBuffer expects byte size
       final buffer = minigpu.createBuffer(
-        count,
+        count * Uint16List.bytesPerElement,
         BufferDataType.uint16,
-      ); // Pass logical count
+      ); // Pass byte size
 
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => (i * 100) % 65536),
@@ -330,9 +330,15 @@ void main() {
 
     test('Float64 Roundtrip', () async {
       final int count = 16;
-      // For f64, createBuffer expects logical element count (C++ handles expansion)
-      final inputBuffer = minigpu.createBuffer(count, BufferDataType.float64);
-      final outputBuffer = minigpu.createBuffer(count, BufferDataType.float64);
+      // createBuffer expects byte size
+      final inputBuffer = minigpu.createBuffer(
+        count * Float64List.bytesPerElement,
+        BufferDataType.float64,
+      );
+      final outputBuffer = minigpu.createBuffer(
+        count * Float64List.bytesPerElement,
+        BufferDataType.float64,
+      );
 
       final Float64List input = Float64List.fromList(
         List.generate(
@@ -427,15 +433,15 @@ void main() {
 
     test('Int16 Roundtrip', () async {
       final int count = 17;
-      // For i16, createBuffer expects logical element count
+      // createBuffer expects byte size
       final inputBuffer = minigpu.createBuffer(
-        count,
+        count * Int16List.bytesPerElement,
         BufferDataType.int16,
-      ); // Pass logical count
+      ); // Pass byte size
       final outputBuffer = minigpu.createBuffer(
-        count,
+        count * Int16List.bytesPerElement,
         BufferDataType.int16,
-      ); // Pass logical count
+      ); // Pass byte size
 
       final Int16List input = Int16List.fromList(
         List.generate(count, (i) => (i * 100) - 15000, growable: false),
@@ -619,15 +625,15 @@ void main() {
 
     test('Uint16 Roundtrip', () async {
       final int count = 17;
-      // For u16, createBuffer expects logical element count
+      // createBuffer expects byte size
       final inputBuffer = minigpu.createBuffer(
-        count,
+        count * Uint16List.bytesPerElement,
         BufferDataType.uint16,
-      ); // Pass logical count
+      ); // Pass byte size
       final outputBuffer = minigpu.createBuffer(
-        count,
+        count * Uint16List.bytesPerElement,
         BufferDataType.uint16,
-      ); // Pass logical count
+      ); // Pass byte size
 
       final Uint16List input = Uint16List.fromList(
         List.generate(count, (i) => (i * 100) % 65536, growable: false),

@@ -1,6 +1,8 @@
 # minigpu
 
-## 1.2.2-dev-WIP
+## 1.2.2
+
+- fixes memleaks and broken tests
 
 ## 1.2.1
 

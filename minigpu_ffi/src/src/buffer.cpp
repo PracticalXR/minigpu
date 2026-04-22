@@ -446,10 +446,47 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
 
 void Buffer::release() {
   if (bufferData.buffer) {
-    releaseInternal();
+    WGPUBuffer bufferHandle = bufferData.buffer;
+    WGPUInstance instance = mgpu.tryGetInstance();
+    WGPUQueue queue = mgpu.tryGetQueue();
+    mgpu::mutex &gpuMutex = mgpu.getGpuMutex();
+
+    // Enqueue destruction on the WebGPU thread so Dawn processes events on
+    // the correct thread and immediately reclaims GPU memory.  This mirrors
+    // ComputeShader::~ComputeShader() and avoids callers needing a sentinel
+    // read to flush the event queue.
+    auto cleanupTask = [bufferHandle, queue, instance, &gpuMutex]() {
+      LOG_INFO("Releasing buffer on WebGPU thread: %p", bufferHandle);
+      {
+        // Hold the GPU mutex so we don't race with writeDirect or dispatch.
+        mgpu::lock_guard<mgpu::mutex> lock(gpuMutex);
+        // Submit an empty command buffer to flush any pending wgpuQueueWriteBuffer
+        // staging allocations that Dawn holds until the next submit.
+        if (queue) {
+          wgpuQueueSubmit(queue, 0, nullptr);
+        }
+        wgpuBufferDestroy(bufferHandle);
+        wgpuBufferRelease(bufferHandle);
+      }
+      if (instance) {
+        wgpuInstanceProcessEvents(instance);
+      }
+      LOG_INFO("Buffer released and events processed");
+    };
+
+    try {
+      mgpu.getWebGPUThread().enqueueAsync(cleanupTask);
+    } catch (...) {
+      // GPU thread already shut down — release directly as a last resort.
+      wgpuBufferDestroy(bufferHandle);
+      wgpuBufferRelease(bufferHandle);
+    }
+
     bufferData.buffer = nullptr;
     bufferData.size = 0;
     elementCount = 0;
+    dataType = kUnknownType;
+    isPacked = false;
   }
 }
 
@@ -820,7 +857,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   LOG_INFO("readDirect: elementCount=%zu, offset=%zu, sizeof(T)=%zu",
            elementCount, offset, sizeof(T));
 
-  size_t elementSize = getElementSize(dataType);
+  const size_t elementSize = sizeof(T); // Use actual template type size, not logical dataType size
   size_t byteOffset = offset * elementSize;
   size_t readBytes = elementCount * elementSize;
 
