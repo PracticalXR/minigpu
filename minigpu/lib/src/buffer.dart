@@ -3,18 +3,23 @@ import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
 /// A buffer.
 final class Buffer {
-  Buffer(PlatformBuffer buffer) : _platformBuffer = buffer {
-    _finalizer.attach(this, buffer, detach: this);
+  /// [owner] is an optional callback invoked exactly once when [destroy] is
+  /// called (or the finalizer runs).  [Minigpu] passes [_onBufferDestroyed]
+  /// here so it can maintain [liveBufferCount] without a circular import.
+  Buffer(PlatformBuffer buffer, [void Function()? owner])
+    : _platformBuffer = buffer,
+      _owner = owner {
+    _finalizer.attach(this, _DestroyArgs(buffer, owner), detach: this);
   }
 
-  static final Finalizer<PlatformBuffer> _finalizer = Finalizer(
-    (platformBuffer) => platformBuffer.destroy(),
-  );
+  static final Finalizer<_DestroyArgs> _finalizer = Finalizer((args) {
+    args.platformBuffer.destroy();
+    args.owner?.call();
+  });
 
-  // Store the platform-specific buffer implementation. Marked as potentially nullable
-  // if we consider the buffer invalid after destruction.
   PlatformBuffer? _platformBuffer;
-  bool _isValid = true; // Flag to track if destroy has been called
+  final void Function()? _owner;
+  bool _isValid = true;
 
   /// Returns true if the buffer has not been destroyed.
   bool get isValid => _isValid && _platformBuffer != null;
@@ -65,15 +70,23 @@ final class Buffer {
     if (_isValid && _platformBuffer != null) {
       _finalizer.detach(this);
       _platformBuffer!.destroy();
-      _platformBuffer = null; // Release the reference
-      _isValid = false; // Mark as destroyed
+      _owner?.call();
+      _platformBuffer = null;
+      _isValid = false;
     }
-    // If already destroyed (_isValid is false), do nothing.
   }
 
   // Internal access for ComputeShader (consider if this is the best pattern)
   // Or adjust ComputeShader to accept Buffer directly.
   PlatformBuffer? get platformBuffer => _platformBuffer;
+}
+
+/// Internal holder used by [Buffer]'s [Finalizer] so the finalizer can invoke
+/// both the platform destroy and the owner callback without capturing `this`.
+class _DestroyArgs {
+  const _DestroyArgs(this.platformBuffer, this.owner);
+  final PlatformBuffer platformBuffer;
+  final void Function()? owner;
 }
 
 class MinigpuAlreadyInitError extends Error {

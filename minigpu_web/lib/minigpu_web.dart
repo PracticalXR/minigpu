@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:js_interop';
 import 'dart:typed_data';
 
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
@@ -10,6 +11,10 @@ class MinigpuWeb extends MinigpuPlatform {
   MinigpuWeb._();
 
   static void registerWith(dynamic _) => MinigpuWeb._();
+
+  /// Creates an instance for use in tests. Equivalent to the private
+  /// constructor but accessible from test code.
+  factory MinigpuWeb.createForTest() => MinigpuWeb._();
 
   @override
   Future<void> initializeContext() async {
@@ -31,6 +36,41 @@ class MinigpuWeb extends MinigpuPlatform {
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
     final buff = wasm.mgpuCreateBuffer(bufferSize, dataType.index);
     return WebBuffer(buff);
+  }
+
+  @override
+  bool isExternalContentTypeSupported(ExternalContentType type) =>
+      type == ExternalContentType.webVideoFrame;
+
+  @override
+  bool isExternalPixelFormatSupported(ExternalPixelFormat format) =>
+      // GPUExternalTexture is opaque — the browser handles all pixel formats
+      format != ExternalPixelFormat.unknown;
+
+  @override
+  PlatformVideoTexture? importVideoFrame(ExternalVideoBuffer buf) {
+    if (buf.contentType != ExternalContentType.webVideoFrame) return null;
+    // Web callers use importVideoFrameWeb() directly to pass a JSAny VideoFrame.
+    // This path is a no-op to satisfy the platform interface contract.
+    return null;
+  }
+
+  /// Web-specific: import a VideoFrame (WebCodecs) as a GPUExternalTexture.
+  /// [videoFrame] must be a [JSAny] pointing to a VideoFrame JS object.
+  WebVideoTexture? importVideoFrameWeb(
+    JSAny videoFrame,
+    ExternalPixelFormat pixelFormat,
+    int width,
+    int height,
+  ) {
+    final tex = wasm.mgpuImportExternalTexture(videoFrame);
+    if (tex == null) return null;
+    return WebVideoTexture(
+      externalTexture: tex,
+      pixelFormat: pixelFormat,
+      width: width,
+      height: height,
+    );
   }
 }
 
@@ -64,6 +104,18 @@ class WebComputeShader implements PlatformComputeShader {
   void destroy() {
     wasm.mgpuDestroyComputeShader(_shader);
   }
+
+  /// Store a GPUExternalTexture (from a VideoFrame import) at [slot].
+  /// This is a Web-only method used by [WebVideoTexture.setOnShader].
+  final _externalTextures = <int, JSObject>{};
+
+  void setExternalTexture(int slot, JSObject texture) {
+    _externalTextures[slot] = texture;
+  }
+
+  /// Returns all stored external textures (keyed by slot) for use in bind groups.
+  Map<int, JSObject> get externalTextures =>
+      Map.unmodifiable(_externalTextures);
 }
 
 class WebBuffer implements PlatformBuffer {
@@ -248,5 +300,59 @@ class WebBuffer implements PlatformBuffer {
   @override
   void destroy() {
     wasm.mgpuDestroyBuffer(_buffer);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Web VideoFrame import � wraps GPUExternalTexture via JS importExternalTexture
+// ---------------------------------------------------------------------------
+class WebVideoTexture implements PlatformVideoTexture {
+  WebVideoTexture({
+    required JSObject externalTexture,
+    required this.pixelFormat,
+    required this.width,
+    required this.height,
+  }) : _externalTexture = externalTexture;
+
+  final JSObject _externalTexture;
+
+  /// The underlying GPUExternalTexture (valid for current task only per WebGPU spec).
+  JSObject get externalTexture => _externalTexture;
+
+  @override
+  final ExternalPixelFormat pixelFormat;
+  @override
+  final int width;
+  @override
+  final int height;
+
+  @override
+  int get numPlanes => 1; // GPUExternalTexture is always single-plane on Web
+
+  @override
+  void setOnShader(PlatformComputeShader shader, int slot, int planeIndex) {
+    // Web: pass the external texture to the WebComputeShader via a custom method.
+    // The shader implementation must call device.setBindGroup with the external texture.
+    // For now we store the texture on the shader via the JS interop tag mechanism.
+    if (shader is WebComputeShader) {
+      shader.setExternalTexture(slot, _externalTexture);
+    } else {
+      throw UnsupportedError('setOnShader requires WebComputeShader on Web');
+    }
+  }
+
+  @override
+  PlatformBuffer toRGBA() => throw UnsupportedError(
+    'toRGBA() is not supported for Web VideoFrames. '
+    'Read back via WebCodecs VideoFrame.copyTo() instead.',
+  );
+
+  /// D3D11 shared-output path is Windows-only; always returns false on Web.
+  @override
+  bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
+
+  @override
+  void destroy() {
+    // GPUExternalTexture lifetime is managed by the browser; no explicit destroy.
   }
 }

@@ -1,0 +1,8 @@
+tags:
+  browser:
+    test_on: browser
+  webgpu:
+    # WebGPU requires Chrome with the flag:
+    #   --enable-unsafe-webgpu --disable-dawn-features=disallow_unsafe_apis
+    # Tests tagged webgpu skip gracefully on non-GPU browsers.
+    test_on: chrome

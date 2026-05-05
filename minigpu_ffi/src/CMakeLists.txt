@@ -233,17 +233,43 @@ if(NOT EMSCRIPTEN)
       "-framework Foundation"
     )
   endif()
+  # Platform-specific libs for minigpu_external.cpp
+  if(WIN32)
+    target_link_libraries(${MAIN_LIB} PRIVATE d3d11 dxgi)
+  endif()
+  if(APPLE)
+    target_link_libraries(${MAIN_LIB} PRIVATE
+      "-framework IOSurface"
+      "-framework Metal"
+    )
+  endif()
+  if(ANDROID)
+    find_library(ANDROID_HARDWARE_BUFFER_LIB android)
+    target_link_libraries(${MAIN_LIB} PRIVATE ${ANDROID_HARDWARE_BUFFER_LIB})
+  endif()
 endif()
 
 # Add Test Target (Non-Emscripten Only)
 if(NOT EMSCRIPTEN)
-    set(TEST_SOURCES "${MAIN_PATH}/test/minigpu_test.cpp")
+    set(TEST_SOURCES
+        "${MAIN_PATH}/test/minigpu_test.cpp"
+        "${MAIN_PATH}/test/external_texture_test.cpp"
+    )
     add_executable(minigpu_test ${TEST_SOURCES})
     # For tests, you may also want to expose the test sources in the main target;
     # adjust the following as needed
     target_link_libraries(minigpu_test PRIVATE ${MAIN_LIB})
     target_link_libraries(minigpu_test PRIVATE webgpu_dawn)
+    if(WIN32)
+        target_link_libraries(minigpu_test PRIVATE d3d11 dxgi)
+    endif()
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
+    # Dawn native include dirs needed for minigpu_external.cpp and test headers
+    target_include_directories(${MAIN_LIB} PUBLIC
+        "${MAIN_PATH}/include"
+        "${DAWN_DIR}/include"
+        "${DAWN_BUILD_DIR}/gen/include"
+    )
     target_compile_definitions(${MAIN_LIB} PRIVATE DART_SHARED_LIB_TEST)
 else()
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_web)

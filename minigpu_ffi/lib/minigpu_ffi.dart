@@ -54,6 +54,200 @@ class MinigpuFfi extends MinigpuPlatform {
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
     return FfiBuffer(self);
   }
+
+  @override
+  int queryVramBytes() => ffi.mgpuQueryVramBytes();
+
+  @override
+  bool isExternalContentTypeSupported(ExternalContentType type) =>
+      ffi.mgpuIsExternalContentTypeSupported(
+        ffi.MGPUExternalContentType.fromValue(type.index),
+      ) !=
+      0;
+
+  @override
+  bool isExternalPixelFormatSupported(ExternalPixelFormat format) =>
+      ffi.mgpuIsExternalPixelFormatSupported(
+        ffi.MGPUExternalPixelFormat.fromValue(format.index),
+      ) !=
+      0;
+
+  @override
+  PlatformVideoTexture? importVideoFrame(ExternalVideoBuffer buf) {
+    final nativeBuf = _allocExternalVideoBuffer(buf);
+    try {
+      final ptr = ffi.mgpuImportVideoFrame(nativeBuf.cast());
+      if (ptr == nullptr) return null;
+      return FfiVideoTexture(ptr, buf.pixelFormat, buf.width, buf.height);
+    } finally {
+      malloc.free(nativeBuf);
+    }
+  }
+
+  @override
+  PlatformSharedOutputTexture? createSharedOutputTexture(
+    int width,
+    int height,
+  ) {
+    final ptr = ffi.mgpuCreateSharedOutputTexture(width, height);
+    if (ptr == nullptr) return null;
+    return FfiSharedOutputTexture(ptr);
+  }
+
+  @override
+  int createD3D11DeviceOnDawnAdapter() {
+    return ffi.mgpuCreateD3D11DeviceOnDawnAdapter().address;
+  }
+
+  Pointer<ffi.MGPUExternalVideoBuffer> _allocExternalVideoBuffer(
+    ExternalVideoBuffer buf,
+  ) {
+    final p = malloc<ffi.MGPUExternalVideoBuffer>();
+    p.ref.content_typeAsInt = buf.contentType.index;
+    p.ref.pixel_formatAsInt = buf.pixelFormat.index;
+    p.ref.width = buf.width;
+    p.ref.height = buf.height;
+    p.ref.num_planes = buf.planes.length;
+    for (int i = 0; i < buf.planes.length && i < 4; i++) {
+      final sp = buf.planes[i];
+      p.ref.planes[i].data_ptr = Pointer.fromAddress(sp.dataPtr);
+      p.ref.planes[i].width = sp.width;
+      p.ref.planes[i].height = sp.height;
+      p.ref.planes[i].stride_bytes = sp.strideBytes;
+      p.ref.planes[i].offset_bytes = sp.offsetBytes;
+      p.ref.planes[i].subresource_index = sp.subresourceIndex;
+      p.ref.planes[i].dmabuf_fd = sp.dmabufFd;
+      p.ref.planes[i].drm_format_modifier = sp.drmFormatModifier;
+    }
+    p.ref.fence.sync_fd = buf.fence.syncFd;
+    p.ref.fence.d3d11_fence = Pointer.fromAddress(buf.fence.d3d11FencePtr);
+    p.ref.fence.metal_shared_event = Pointer.fromAddress(
+      buf.fence.metalSharedEventPtr,
+    );
+    p.ref.fence.metal_fence_value = buf.fence.metalFenceValue;
+    p.ref.timestamp_us = buf.timestampUs;
+    return p;
+  }
+}
+
+// Video texture FFI
+final class FfiVideoTexture implements PlatformVideoTexture {
+  FfiVideoTexture(
+    Pointer<ffi.MGPUVideoTexture> ptr,
+    ExternalPixelFormat fmt,
+    int w,
+    int h,
+  ) : _self = ptr,
+      _pixelFormat = fmt,
+      _width = w,
+      _height = h;
+
+  final Pointer<ffi.MGPUVideoTexture> _self;
+  final ExternalPixelFormat _pixelFormat;
+  final int _width;
+  final int _height;
+
+  @override
+  int get numPlanes {
+    switch (_pixelFormat) {
+      case ExternalPixelFormat.nv12:
+      case ExternalPixelFormat.yuv420pAsNV12Planes:
+        return 2;
+      case ExternalPixelFormat.yuv420pAsRGBPlanes:
+        return 3;
+      default:
+        return 1;
+    }
+  }
+
+  @override
+  int get width => _width;
+  @override
+  int get height => _height;
+  @override
+  ExternalPixelFormat get pixelFormat => _pixelFormat;
+
+  @override
+  void setOnShader(PlatformComputeShader shader, int slot, int planeIndex) {
+    ffi.mgpuSetVideoTexture(
+      (shader as FfiComputeShader)._self,
+      slot,
+      _self,
+      planeIndex,
+    );
+  }
+
+  @override
+  PlatformBuffer toRGBA() {
+    final ptr = ffi.mgpuVideoTextureToRGBA(_self);
+    if (ptr == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiBuffer(ptr);
+  }
+
+  @override
+  bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) {
+    if (dst is! FfiSharedOutputTexture) return false;
+    return ffi.mgpuVideoTextureBGRAToRGBASharedOutput(_self, dst._self) != 0;
+  }
+
+  @override
+  void destroy() => ffi.mgpuDestroyVideoTexture(_self);
+}
+
+// Cross-API shared output texture FFI wrapper.
+final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
+  FfiSharedOutputTexture(Pointer<ffi.MGPUSharedOutputTexture> self)
+    : _self = self;
+
+  final Pointer<ffi.MGPUSharedOutputTexture> _self;
+  bool _destroyed = false;
+
+  @override
+  int get width => ffi.mgpuSharedOutputTextureGetWidth(_self);
+
+  @override
+  int get height => ffi.mgpuSharedOutputTextureGetHeight(_self);
+
+  @override
+  int get d3d11Handle =>
+      ffi.mgpuSharedOutputTextureGetD3D11Handle(_self).address;
+
+  @override
+  int get d3d11TexturePtr =>
+      ffi.mgpuSharedOutputTextureGetD3D11Texture(_self).address;
+
+  @override
+  bool copyFromBuffer(PlatformBuffer src) {
+    return ffi.mgpuCopyBufferToSharedOutputTexture(
+          (src as FfiBuffer)._self,
+          _self,
+        ) !=
+        0;
+  }
+
+  @override
+  bool copyFromBufferF32(PlatformBuffer src) {
+    return ffi.mgpuCopyBufferF32ToSharedOutputTexture(
+          (src as FfiBuffer)._self,
+          _self,
+        ) !=
+        0;
+  }
+
+  @override
+  int debugReadFirstPixel() =>
+      ffi.mgpuSharedOutputTextureDebugReadFirstPixel(_self);
+
+  @override
+  int debugReadFirstPixelDawn() =>
+      ffi.mgpuSharedOutputTextureDebugReadFirstPixelDawn(_self);
+
+  @override
+  void destroy() {
+    if (_destroyed) return;
+    _destroyed = true;
+    ffi.mgpuDestroySharedOutputTexture(_self);
+  }
 }
 
 // Compute shader FFI

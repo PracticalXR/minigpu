@@ -194,6 +194,12 @@ private:
   size_t elementCount = 0;
   bool isPacked = false; // For types that need packing (8/16-bit, 64-bit)
 
+  // Persistent staging buffer reused across readDirect calls to avoid
+  // allocating/freeing a large (e.g. 5 MB) CopyDst|MapRead buffer on every
+  // texture readback (at 20 fps that is ~100 MB/s of GPU heap churn).
+  WGPUBuffer _readStagingBuffer = nullptr;
+  size_t _readStagingBufferSize = 0;
+
   void releaseInternal();
   size_t getElementSize(BufferDataType type) const;
   bool needsPacking(BufferDataType type) const;

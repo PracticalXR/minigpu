@@ -2157,6 +2157,12 @@ async function createWasm() {
     };
 
 
+  var _wgpuAdapterGetInfo = (adapterPtr, info) => {
+      var adapter = WebGPU.getJsObject(adapterPtr);
+      WebGPU.fillAdapterInfoStruct(adapter.info, info);
+      return 1;
+    };
+
   
   var _wgpuCommandEncoderBeginComputePass = (encoderPtr, descriptor) => {
       var desc;
@@ -2447,6 +2453,37 @@ async function createWasm() {
       return ptr;
     };
 
+  
+  var _wgpuDeviceCreateTexture = (devicePtr, descriptor) => {
+      
+  
+      var desc = {
+        "label": WebGPU.makeStringFromOptionalStringView(
+          descriptor + 4),
+        "size": WebGPU.makeExtent3D(descriptor + 28),
+        "mipLevelCount": HEAPU32[(((descriptor)+(44))>>2)],
+        "sampleCount": HEAPU32[(((descriptor)+(48))>>2)],
+        "dimension": WebGPU.TextureDimension[
+          HEAPU32[(((descriptor)+(24))>>2)]],
+        "format": WebGPU.TextureFormat[
+          HEAPU32[(((descriptor)+(40))>>2)]],
+        "usage": HEAPU32[(((descriptor)+(16))>>2)],
+      };
+  
+      var viewFormatCount = HEAPU32[(((descriptor)+(52))>>2)];
+      if (viewFormatCount) {
+        var viewFormatsPtr = HEAPU32[(((descriptor)+(56))>>2)];
+        // viewFormatsPtr pointer to an array of TextureFormat which is an enum of size uint32_t
+        desc['viewFormats'] = Array.from(HEAP32.subarray((((viewFormatsPtr)>>2)), ((viewFormatsPtr + viewFormatCount * 4)>>2)),
+          format => WebGPU.TextureFormat[format]);
+      }
+  
+      var device = WebGPU.getJsObject(devicePtr);
+      var ptr = _emwgpuCreateTexture(0);
+      WebGPU.Internals.jsObjectInsert(ptr, device.createTexture(desc));
+      return ptr;
+    };
+
   var _wgpuQueueSubmit = (queuePtr, commandCount, commands) => {
       var queue = WebGPU.getJsObject(queuePtr);
       var cmds = Array.from(HEAP32.subarray((((commands)>>2)), ((commands + commandCount * 4)>>2)),
@@ -2467,6 +2504,47 @@ async function createWasm() {
       queue.writeBuffer(buffer, bufferOffset, subarray, 0, size);
     ;
   }
+
+  var _wgpuQueueWriteTexture = (queuePtr, destinationPtr, data, dataSize, dataLayoutPtr, writeSizePtr) => {
+      var queue = WebGPU.getJsObject(queuePtr);
+  
+      var destination = WebGPU.makeTexelCopyTextureInfo(destinationPtr);
+      var dataLayout = WebGPU.makeTexelCopyBufferLayout(dataLayoutPtr);
+      var writeSize = WebGPU.makeExtent3D(writeSizePtr);
+      // This subarray isn't strictly necessary, but helps work around an issue
+      // where Chromium makes a copy of the entire heap. crbug.com/1134457
+      var subarray = HEAPU8.subarray(data, data + dataSize);
+      queue.writeTexture(destination, subarray, dataLayout, writeSize);
+    };
+
+  
+  var _wgpuTextureCreateView = (texturePtr, descriptor) => {
+      var desc;
+      if (descriptor) {
+        
+        var mipLevelCount = HEAPU32[(((descriptor)+(24))>>2)];
+        var arrayLayerCount = HEAPU32[(((descriptor)+(32))>>2)];
+        desc = {
+          "label": WebGPU.makeStringFromOptionalStringView(
+            descriptor + 4),
+          "format": WebGPU.TextureFormat[
+            HEAPU32[(((descriptor)+(12))>>2)]],
+          "dimension": WebGPU.TextureViewDimension[
+            HEAPU32[(((descriptor)+(16))>>2)]],
+          "baseMipLevel": HEAPU32[(((descriptor)+(20))>>2)],
+          "mipLevelCount": mipLevelCount === 4294967295 ? undefined : mipLevelCount,
+          "baseArrayLayer": HEAPU32[(((descriptor)+(28))>>2)],
+          "arrayLayerCount": arrayLayerCount === 4294967295 ? undefined : arrayLayerCount,
+          "aspect": WebGPU.TextureAspect[
+            HEAPU32[(((descriptor)+(36))>>2)]],
+        };
+      }
+  
+      var texture = WebGPU.getJsObject(texturePtr);
+      var ptr = _emwgpuCreateTextureView(0);
+      WebGPU.Internals.jsObjectInsert(ptr, texture.createView(desc));
+      return ptr;
+    };
 
   var ptrToString = (ptr) => {
       // With CAN_ADDRESS_2GB or MEMORY64, pointers are already unsigned.
@@ -2880,6 +2958,24 @@ var _mgpuInitializeContext,
   _mgpuWriteUint32,
   _mgpuWriteUint64,
   _mgpuWriteDouble,
+  _mgpuQueryVramBytes,
+  _mgpuIsExternalContentTypeSupported,
+  _mgpuIsExternalPixelFormatSupported,
+  _mgpuImportVideoFrame,
+  _mgpuSetVideoTexture,
+  _mgpuDestroyVideoTexture,
+  _mgpuVideoTextureToRGBA,
+  _mgpuCreateSharedOutputTexture,
+  _mgpuSharedOutputTextureGetD3D11Handle,
+  _mgpuSharedOutputTextureGetD3D11Texture,
+  _mgpuSharedOutputTextureGetWidth,
+  _mgpuSharedOutputTextureGetHeight,
+  _mgpuCreateD3D11DeviceOnDawnAdapter,
+  _mgpuVideoTextureBGRAToRGBASharedOutput,
+  _mgpuCopyBufferToSharedOutputTexture,
+  _mgpuSharedOutputTextureDebugReadFirstPixel,
+  _mgpuSharedOutputTextureDebugReadFirstPixelDawn,
+  _mgpuDestroySharedOutputTexture,
   _emwgpuCreateBindGroup,
   _emwgpuCreateBindGroupLayout,
   _emwgpuCreateCommandBuffer,
@@ -2992,6 +3088,24 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuWriteUint32'] = _mgpuWriteUint32 = wasmExports['mgpuWriteUint32'];
   Module['_mgpuWriteUint64'] = _mgpuWriteUint64 = wasmExports['mgpuWriteUint64'];
   Module['_mgpuWriteDouble'] = _mgpuWriteDouble = wasmExports['mgpuWriteDouble'];
+  Module['_mgpuQueryVramBytes'] = _mgpuQueryVramBytes = wasmExports['mgpuQueryVramBytes'];
+  Module['_mgpuIsExternalContentTypeSupported'] = _mgpuIsExternalContentTypeSupported = wasmExports['mgpuIsExternalContentTypeSupported'];
+  Module['_mgpuIsExternalPixelFormatSupported'] = _mgpuIsExternalPixelFormatSupported = wasmExports['mgpuIsExternalPixelFormatSupported'];
+  Module['_mgpuImportVideoFrame'] = _mgpuImportVideoFrame = wasmExports['mgpuImportVideoFrame'];
+  Module['_mgpuSetVideoTexture'] = _mgpuSetVideoTexture = wasmExports['mgpuSetVideoTexture'];
+  Module['_mgpuDestroyVideoTexture'] = _mgpuDestroyVideoTexture = wasmExports['mgpuDestroyVideoTexture'];
+  Module['_mgpuVideoTextureToRGBA'] = _mgpuVideoTextureToRGBA = wasmExports['mgpuVideoTextureToRGBA'];
+  Module['_mgpuCreateSharedOutputTexture'] = _mgpuCreateSharedOutputTexture = wasmExports['mgpuCreateSharedOutputTexture'];
+  Module['_mgpuSharedOutputTextureGetD3D11Handle'] = _mgpuSharedOutputTextureGetD3D11Handle = wasmExports['mgpuSharedOutputTextureGetD3D11Handle'];
+  Module['_mgpuSharedOutputTextureGetD3D11Texture'] = _mgpuSharedOutputTextureGetD3D11Texture = wasmExports['mgpuSharedOutputTextureGetD3D11Texture'];
+  Module['_mgpuSharedOutputTextureGetWidth'] = _mgpuSharedOutputTextureGetWidth = wasmExports['mgpuSharedOutputTextureGetWidth'];
+  Module['_mgpuSharedOutputTextureGetHeight'] = _mgpuSharedOutputTextureGetHeight = wasmExports['mgpuSharedOutputTextureGetHeight'];
+  Module['_mgpuCreateD3D11DeviceOnDawnAdapter'] = _mgpuCreateD3D11DeviceOnDawnAdapter = wasmExports['mgpuCreateD3D11DeviceOnDawnAdapter'];
+  Module['_mgpuVideoTextureBGRAToRGBASharedOutput'] = _mgpuVideoTextureBGRAToRGBASharedOutput = wasmExports['mgpuVideoTextureBGRAToRGBASharedOutput'];
+  Module['_mgpuCopyBufferToSharedOutputTexture'] = _mgpuCopyBufferToSharedOutputTexture = wasmExports['mgpuCopyBufferToSharedOutputTexture'];
+  Module['_mgpuSharedOutputTextureDebugReadFirstPixel'] = _mgpuSharedOutputTextureDebugReadFirstPixel = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixel'];
+  Module['_mgpuSharedOutputTextureDebugReadFirstPixelDawn'] = _mgpuSharedOutputTextureDebugReadFirstPixelDawn = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixelDawn'];
+  Module['_mgpuDestroySharedOutputTexture'] = _mgpuDestroySharedOutputTexture = wasmExports['mgpuDestroySharedOutputTexture'];
   _emwgpuCreateBindGroup = wasmExports['emwgpuCreateBindGroup'];
   _emwgpuCreateBindGroupLayout = wasmExports['emwgpuCreateBindGroupLayout'];
   _emwgpuCreateCommandBuffer = wasmExports['emwgpuCreateCommandBuffer'];
@@ -3119,6 +3233,8 @@ var wasmImports = {
   /** @export */
   proc_exit: _proc_exit,
   /** @export */
+  wgpuAdapterGetInfo: _wgpuAdapterGetInfo,
+  /** @export */
   wgpuCommandEncoderBeginComputePass: _wgpuCommandEncoderBeginComputePass,
   /** @export */
   wgpuCommandEncoderCopyBufferToBuffer: _wgpuCommandEncoderCopyBufferToBuffer,
@@ -3143,9 +3259,15 @@ var wasmImports = {
   /** @export */
   wgpuDeviceCreatePipelineLayout: _wgpuDeviceCreatePipelineLayout,
   /** @export */
+  wgpuDeviceCreateTexture: _wgpuDeviceCreateTexture,
+  /** @export */
   wgpuQueueSubmit: _wgpuQueueSubmit,
   /** @export */
-  wgpuQueueWriteBuffer: _wgpuQueueWriteBuffer
+  wgpuQueueWriteBuffer: _wgpuQueueWriteBuffer,
+  /** @export */
+  wgpuQueueWriteTexture: _wgpuQueueWriteTexture,
+  /** @export */
+  wgpuTextureCreateView: _wgpuTextureCreateView
 };
 var wasmExports;
 createWasm();

@@ -12,11 +12,238 @@
 // ignore_for_file: type=lint
 import 'dart:ffi' as ffi;
 
+/// Returns 1 if the current WebGPU device can import the given content type
+/// (i.e. the required Dawn SharedTextureMemory feature is present), 0 otherwise.
+@ffi.Native<ffi.Int Function(ffi.UnsignedInt)>(
+    symbol: 'mgpuIsExternalContentTypeSupported')
+external int _mgpuIsExternalContentTypeSupported(
+  int type,
+);
+
+int mgpuIsExternalContentTypeSupported(
+  MGPUExternalContentType type,
+) =>
+    _mgpuIsExternalContentTypeSupported(
+      type.value,
+    );
+
+/// Returns 1 if Minigpu has a valid WGPUTextureFormat mapping for the given
+/// pixel format AND the necessary device features are available, 0 otherwise.
+@ffi.Native<ffi.Int Function(ffi.UnsignedInt)>(
+    symbol: 'mgpuIsExternalPixelFormatSupported')
+external int _mgpuIsExternalPixelFormatSupported(
+  int fmt,
+);
+
+int mgpuIsExternalPixelFormatSupported(
+  MGPUExternalPixelFormat fmt,
+) =>
+    _mgpuIsExternalPixelFormatSupported(
+      fmt.value,
+    );
+
+/// Import an external video frame as a Minigpu video texture.
+///
+/// - For GPU content types: imports via Dawn SharedTextureMemory / importExternalTexture.
+/// Begins GPU access (acquires keyed-mutex / fence).
+/// - For CPU: allocates a WGPUTexture and uploads with wgpuQueueWriteTexture.
+///
+/// Returns NULL on failure (check log output for reason).
+/// Caller must call mgpuDestroyVideoTexture() after GPU work is done.
+@ffi.Native<
+    ffi.Pointer<MGPUVideoTexture> Function(
+        ffi.Pointer<MGPUExternalVideoBuffer>)>()
+external ffi.Pointer<MGPUVideoTexture> mgpuImportVideoFrame(
+  ffi.Pointer<MGPUExternalVideoBuffer> buf,
+);
+
+/// Bind plane [plane_index] of a video texture to a compute shader binding slot.
+///
+/// For packed formats (RGBA32, BGRA32, GRAY8, RGBA64_HALF): use plane_index 0.
+/// For NV12: plane_index 0 = Y (R8Unorm), plane_index 1 = UV (Rg8Unorm).
+/// For YUV420P_AS_RGB_PLANES: plane_index 0/1/2 = Y/U/V (each R8Unorm).
+///
+/// The binding corresponds to the @binding attribute in your WGSL shader.
+@ffi.Native<
+    ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int,
+        ffi.Pointer<MGPUVideoTexture>, ffi.Uint32)>()
+external void mgpuSetVideoTexture(
+  ffi.Pointer<MGPUComputeShader> shader,
+  int binding_slot,
+  ffi.Pointer<MGPUVideoTexture> tex,
+  int plane_index,
+);
+
+/// Release a video texture.
+///
+/// For SharedTextureMemory imports: ends GPU access (releases keyed-mutex /
+/// fence), releases the WGPUTexture and WGPUSharedTextureMemory.
+/// For CPU uploads: releases the WGPUTexture.
+///
+/// MUST be called AFTER any dispatch that reads the texture has completed.
+/// (i.e. after mgpuDispatch returns, or inside the mgpuDispatchAsync callback.)
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUVideoTexture>)>()
+external void mgpuDestroyVideoTexture(
+  ffi.Pointer<MGPUVideoTexture> tex,
+);
+
+/// Convert a video texture (NV12 or YUV420P variants) to an RGBA8 MGPUBuffer
+/// via an internal compute pass (BT.709 full-range color matrix).
+///
+/// For packed formats (RGBA32/BGRA32/GRAY8) this is a simple copy/expand.
+///
+/// Returns a new MGPUBuffer* (caller owns; destroy with mgpuDestroyBuffer).
+/// Returns NULL on failure.
+///
+/// Note: this call is synchronous — it blocks until the GPU work is done.
+@ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Pointer<MGPUVideoTexture>)>()
+external ffi.Pointer<MGPUBuffer> mgpuVideoTextureToRGBA(
+  ffi.Pointer<MGPUVideoTexture> tex,
+);
+
+/// Create a shared RGBA8 output texture of the given dimensions.
+///
+/// Returns NULL on non-Windows platforms or if the GPU does not support
+/// the SharedTextureMemoryD3D12Resource feature, or on allocation failure.
+///
+/// Caller must call mgpuDestroySharedOutputTexture().
+@ffi.Native<
+    ffi.Pointer<MGPUSharedOutputTexture> Function(ffi.Uint32, ffi.Uint32)>()
+external ffi.Pointer<MGPUSharedOutputTexture> mgpuCreateSharedOutputTexture(
+  int width,
+  int height,
+);
+
+/// Returns the Windows NT HANDLE that the D3D11 client should open via
+/// ID3D11Device1::OpenSharedResource1(handle, IID_ID3D11Texture2D, ...).
+///
+/// The handle remains owned by the MGPUSharedOutputTexture; the D3D11 client
+/// must not CloseHandle() it.  (Open the resulting ID3D11Texture2D and let
+/// the COM ref-count manage that view's lifetime.)
+///
+/// Returns NULL on non-Windows platforms or for an invalid texture.
+@ffi.Native<
+    ffi.Pointer<ffi.Void> Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external ffi.Pointer<ffi.Void> mgpuSharedOutputTextureGetD3D11Handle(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+/// Returns the underlying ID3D11Texture2D* for the shared output texture.
+///
+/// The texture lives on the same ID3D11Device returned by
+/// mgpuCreateD3D11DeviceOnDawnAdapter(), so an external D3D11 client (e.g.
+/// an FFmpeg encoder) can use this pointer directly without
+/// OpenSharedResource1. Caller must NOT Release this pointer — its
+/// lifetime is owned by the MGPUSharedOutputTexture.
+///
+/// Returns NULL on non-Windows platforms or for an invalid texture.
+@ffi.Native<
+    ffi.Pointer<ffi.Void> Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external ffi.Pointer<ffi.Void> mgpuSharedOutputTextureGetD3D11Texture(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+/// Returns an AddRef'd ID3D11Device* on the SAME DXGI adapter as Dawn's
+/// D3D12 device. The same cached device is used internally to back any
+/// MGPUSharedOutputTexture we create. Caller is responsible for Release()
+/// (or handing ownership to FFmpeg via av_hwdevice_ctx_init).
+///
+/// Returns NULL on non-Windows platforms.
+@ffi.Native<ffi.Pointer<ffi.Void> Function()>()
+external ffi.Pointer<ffi.Void> mgpuCreateD3D11DeviceOnDawnAdapter();
+
+@ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuSharedOutputTextureGetWidth(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+@ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuSharedOutputTextureGetHeight(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+/// Run a BGRA->RGBA swizzle (or pure RGBA passthrough) compute pass that
+/// reads from [src] (typically an imported miniav D3D11 texture) and writes
+/// the result into [dst].
+///
+/// Blocks until the GPU work has completed; the D3D11 view of [dst] is then
+/// safe to read.
+///
+/// Returns 1 on success, 0 on failure.
+@ffi.Native<
+    ffi.Int Function(
+        ffi.Pointer<MGPUVideoTexture>, ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuVideoTextureBGRAToRGBASharedOutput(
+  ffi.Pointer<MGPUVideoTexture> src,
+  ffi.Pointer<MGPUSharedOutputTexture> dst,
+);
+
+/// Copy an RGBA8 GPU storage buffer (the output of a GpuEffect / compute
+/// dispatch) into the shared output texture entirely on the GPU.  The
+/// buffer must hold exactly width*height u32 pixels packed as RGBA8.
+///
+/// Returns 1 on success, 0 on failure.
+@ffi.Native<
+    ffi.Int Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuCopyBufferToSharedOutputTexture(
+  ffi.Pointer<MGPUBuffer> buf,
+  ffi.Pointer<MGPUSharedOutputTexture> dst,
+);
+
+/// Like mgpuCopyBufferToSharedOutputTexture but reads the source as
+/// `array<f32>` with 4 floats per pixel (R,G,B,A in [0,1]).  Used by
+/// visualizers (e.g. the spectrogram) that produce float colors directly.
+///
+/// Returns 1 on success, 0 on failure.
+@ffi.Native<
+    ffi.Int Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuCopyBufferF32ToSharedOutputTexture(
+  ffi.Pointer<MGPUBuffer> buf,
+  ffi.Pointer<MGPUSharedOutputTexture> dst,
+);
+
+/// Release all resources held by the shared output texture (WGPUTexture,
+/// WGPUSharedTextureMemory, ID3D12Resource COM ref, NT HANDLE).
+///
+/// Must NOT be called while the D3D11 client still holds an
+/// ID3D11Texture2D view of the underlying resource.
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external void mgpuDestroySharedOutputTexture(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+/// Debug-only: read the first pixel (BGRA8, packed as 0xAARRGGBB after Map)
+/// of the shared output texture from the D3D11 side using the cached
+/// Dawn-adapter D3D11 device. Useful to verify that Dawn's writes are
+/// visible on the D3D11 consumer.
+///
+/// Returns the raw 32-bit pixel value, or 0xDEAD000N on failure (N is the
+/// stage that failed, see implementation).
+@ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuSharedOutputTextureDebugReadFirstPixel(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
+/// Debug-only: read the first pixel from the Dawn (D3D12) side via
+/// CopyTextureToBuffer + map.  Used to compare with the D3D11-side
+/// readback above to determine which side sees stale data.
+///
+/// Returns the raw 32-bit pixel value, or 0xDEAD100N on failure (N is the
+/// stage that failed, see implementation).
+@ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
+external int mgpuSharedOutputTextureDebugReadFirstPixelDawn(
+  ffi.Pointer<MGPUSharedOutputTexture> tex,
+);
+
 @ffi.Native<ffi.Void Function()>()
 external void mgpuInitializeContext();
 
 @ffi.Native<ffi.Void Function(MGPUCallback)>()
-external void mgpuInitializeContextAsync(MGPUCallback callback);
+external void mgpuInitializeContextAsync(
+  MGPUCallback callback,
+);
 
 @ffi.Native<ffi.Void Function()>()
 external void mgpuDestroyContext();
@@ -25,32 +252,36 @@ external void mgpuDestroyContext();
 external ffi.Pointer<MGPUComputeShader> mgpuCreateComputeShader();
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUComputeShader>)>()
-external void mgpuDestroyComputeShader(ffi.Pointer<MGPUComputeShader> shader);
+external void mgpuDestroyComputeShader(
+  ffi.Pointer<MGPUComputeShader> shader,
+);
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Pointer<ffi.Char>)
->()
+    ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Pointer<ffi.Char>)>()
 external void mgpuLoadKernel(
   ffi.Pointer<MGPUComputeShader> shader,
   ffi.Pointer<ffi.Char> kernelString,
 );
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MGPUComputeShader>)>()
-external int mgpuHasKernel(ffi.Pointer<MGPUComputeShader> shader);
+external int mgpuHasKernel(
+  ffi.Pointer<MGPUComputeShader> shader,
+);
 
 @ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int, ffi.Int)>()
-external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(int bufferSize, int dataType);
+external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(
+  int bufferSize,
+  int dataType,
+);
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUBuffer>)>()
-external void mgpuDestroyBuffer(ffi.Pointer<MGPUBuffer> buffer);
+external void mgpuDestroyBuffer(
+  ffi.Pointer<MGPUBuffer> buffer,
+);
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUComputeShader>,
-    ffi.Int,
-    ffi.Pointer<MGPUBuffer>,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Pointer<MGPUBuffer>)>()
 external void mgpuSetBuffer(
   ffi.Pointer<MGPUComputeShader> shader,
   int tag,
@@ -58,8 +289,8 @@ external void mgpuSetBuffer(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)>()
 external void mgpuCreateKernel(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -68,8 +299,8 @@ external void mgpuCreateKernel(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)>()
 external void mgpuDispatch(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -78,14 +309,8 @@ external void mgpuDispatch(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUComputeShader>,
-    ffi.Int,
-    ffi.Int,
-    ffi.Int,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int,
+        MGPUCallback)>()
 external void mgpuDispatchAsync(
   ffi.Pointer<MGPUComputeShader> shader,
   int groupsX,
@@ -95,14 +320,8 @@ external void mgpuDispatchAsync(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int8>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> outputData,
@@ -112,14 +331,8 @@ external void mgpuReadAsyncInt8(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int16>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> outputData,
@@ -129,14 +342,8 @@ external void mgpuReadAsyncInt16(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int32>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> outputData,
@@ -146,14 +353,8 @@ external void mgpuReadAsyncInt32(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int64>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> outputData,
@@ -163,14 +364,8 @@ external void mgpuReadAsyncInt64(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint8>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> outputData,
@@ -180,14 +375,8 @@ external void mgpuReadAsyncUint8(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint16>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>,
+        ffi.Size, ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> outputData,
@@ -197,14 +386,8 @@ external void mgpuReadAsyncUint16(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint32>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>,
+        ffi.Size, ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> outputData,
@@ -214,14 +397,8 @@ external void mgpuReadAsyncUint32(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint64>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>,
+        ffi.Size, ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> outputData,
@@ -231,14 +408,8 @@ external void mgpuReadAsyncUint64(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Float>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size,
+        ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncFloat(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> outputData,
@@ -248,14 +419,8 @@ external void mgpuReadAsyncFloat(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Double>,
-    ffi.Size,
-    ffi.Size,
-    MGPUCallback,
-  )
->()
+    ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>,
+        ffi.Size, ffi.Size, MGPUCallback)>()
 external void mgpuReadAsyncDouble(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> outputData,
@@ -265,13 +430,8 @@ external void mgpuReadAsyncDouble(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Void>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Void>, ffi.Size, ffi.Size)>()
 external void mgpuReadSync(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Void> outputData,
@@ -280,13 +440,8 @@ external void mgpuReadSync(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int8>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> outputData,
@@ -295,13 +450,8 @@ external void mgpuReadSyncInt8(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint8>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> outputData,
@@ -310,13 +460,8 @@ external void mgpuReadSyncUint8(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int16>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> outputData,
@@ -325,13 +470,8 @@ external void mgpuReadSyncInt16(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint16>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> outputData,
@@ -340,13 +480,8 @@ external void mgpuReadSyncUint16(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int32>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> outputData,
@@ -355,13 +490,8 @@ external void mgpuReadSyncInt32(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint32>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> outputData,
@@ -370,13 +500,8 @@ external void mgpuReadSyncUint32(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Int64>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> outputData,
@@ -385,13 +510,8 @@ external void mgpuReadSyncInt64(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Uint64>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> outputData,
@@ -400,13 +520,8 @@ external void mgpuReadSyncUint64(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Float>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncFloat32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> outputData,
@@ -415,13 +530,8 @@ external void mgpuReadSyncFloat32(
 );
 
 @ffi.Native<
-  ffi.Void Function(
-    ffi.Pointer<MGPUBuffer>,
-    ffi.Pointer<ffi.Double>,
-    ffi.Size,
-    ffi.Size,
-  )
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size, ffi.Size)>()
 external void mgpuReadSyncFloat64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> outputData,
@@ -430,8 +540,8 @@ external void mgpuReadSyncFloat64(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int8>, ffi.Size)>()
 external void mgpuWriteInt8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int8> inputData,
@@ -439,8 +549,8 @@ external void mgpuWriteInt8(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int16>, ffi.Size)>()
 external void mgpuWriteInt16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int16> inputData,
@@ -448,8 +558,8 @@ external void mgpuWriteInt16(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int32>, ffi.Size)>()
 external void mgpuWriteInt32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int32> inputData,
@@ -457,8 +567,8 @@ external void mgpuWriteInt32(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Int64>, ffi.Size)>()
 external void mgpuWriteInt64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Int64> inputData,
@@ -466,8 +576,8 @@ external void mgpuWriteInt64(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint8>, ffi.Size)>()
 external void mgpuWriteUint8(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint8> inputData,
@@ -475,8 +585,8 @@ external void mgpuWriteUint8(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint16>, ffi.Size)>()
 external void mgpuWriteUint16(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint16> inputData,
@@ -484,8 +594,8 @@ external void mgpuWriteUint16(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint32>, ffi.Size)>()
 external void mgpuWriteUint32(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint32> inputData,
@@ -493,8 +603,8 @@ external void mgpuWriteUint32(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Uint64>, ffi.Size)>()
 external void mgpuWriteUint64(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Uint64> inputData,
@@ -502,8 +612,8 @@ external void mgpuWriteUint64(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Float>, ffi.Size)>()
 external void mgpuWriteFloat(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Float> inputData,
@@ -511,17 +621,185 @@ external void mgpuWriteFloat(
 );
 
 @ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size)
->()
+    ffi.Void Function(
+        ffi.Pointer<MGPUBuffer>, ffi.Pointer<ffi.Double>, ffi.Size)>()
 external void mgpuWriteDouble(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Double> inputData,
   int byteSize,
 );
 
+@ffi.Native<ffi.Int64 Function()>()
+external int mgpuQueryVramBytes();
+
 final class MGPUComputeShader extends ffi.Opaque {}
 
 final class MGPUBuffer extends ffi.Opaque {}
+
+/// Describes the origin / handle type of the external buffer.
+enum MGPUExternalContentType {
+  MGPU_EXTERNAL_CONTENT_TYPE_CPU(0),
+  MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE(1),
+  MGPU_EXTERNAL_CONTENT_TYPE_METAL_IOSURFACE(2),
+  MGPU_EXTERNAL_CONTENT_TYPE_DMABUF(3),
+  MGPU_EXTERNAL_CONTENT_TYPE_AHARDWAREBUFFER(4),
+  MGPU_EXTERNAL_CONTENT_TYPE_WEB_VIDEO_FRAME(5);
+
+  final int value;
+  const MGPUExternalContentType(this.value);
+
+  static MGPUExternalContentType fromValue(int value) => switch (value) {
+        0 => MGPU_EXTERNAL_CONTENT_TYPE_CPU,
+        1 => MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE,
+        2 => MGPU_EXTERNAL_CONTENT_TYPE_METAL_IOSURFACE,
+        3 => MGPU_EXTERNAL_CONTENT_TYPE_DMABUF,
+        4 => MGPU_EXTERNAL_CONTENT_TYPE_AHARDWAREBUFFER,
+        5 => MGPU_EXTERNAL_CONTENT_TYPE_WEB_VIDEO_FRAME,
+        _ => throw ArgumentError(
+            'Unknown value for MGPUExternalContentType: $value'),
+      };
+}
+
+/// Pixel format as seen by the external producer.
+/// Subset of MiniAVPixelFormat that Minigpu can consume efficiently.
+enum MGPUExternalPixelFormat {
+  MGPU_EXTERNAL_PIXEL_FORMAT_UNKNOWN(0),
+
+  /// < Rgba8Unorm
+  MGPU_EXTERNAL_PIXEL_FORMAT_RGBA32(1),
+
+  /// < Bgra8Unorm
+  MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32(2),
+
+  /// < R8Unorm (Y) + Rg8Unorm (UV)
+  MGPU_EXTERNAL_PIXEL_FORMAT_NV12(3),
+
+  /// < R8Unorm
+  MGPU_EXTERNAL_PIXEL_FORMAT_GRAY8(4),
+
+  /// < Rgba16Float
+  MGPU_EXTERNAL_PIXEL_FORMAT_RGBA64_HALF(5),
+  MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES(6),
+  MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_RGB_PLANES(7);
+
+  final int value;
+  const MGPUExternalPixelFormat(this.value);
+
+  static MGPUExternalPixelFormat fromValue(int value) => switch (value) {
+        0 => MGPU_EXTERNAL_PIXEL_FORMAT_UNKNOWN,
+        1 => MGPU_EXTERNAL_PIXEL_FORMAT_RGBA32,
+        2 => MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32,
+        3 => MGPU_EXTERNAL_PIXEL_FORMAT_NV12,
+        4 => MGPU_EXTERNAL_PIXEL_FORMAT_GRAY8,
+        5 => MGPU_EXTERNAL_PIXEL_FORMAT_RGBA64_HALF,
+        6 => MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES,
+        7 => MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_RGB_PLANES,
+        _ => throw ArgumentError(
+            'Unknown value for MGPUExternalPixelFormat: $value'),
+      };
+}
+
+/// Per-plane descriptor for an external video buffer.
+final class MGPUExternalPlane extends ffi.Struct {
+  /// < CPU: pixel data ptr.
+  /// D3D11: NT HANDLE (cast to void*).
+  /// Metal: IOSurfaceRef or id<MTLTexture>.
+  /// DMA-BUF: legacy cast of dmabuf_fd.
+  /// AHB: AHardwareBuffer*.
+  /// Web: unused (0).
+  external ffi.Pointer<ffi.Void> data_ptr;
+
+  /// < Plane width in pixels.
+  @ffi.Uint32()
+  external int width;
+
+  /// < Plane height in pixels.
+  @ffi.Uint32()
+  external int height;
+
+  /// < Row stride in bytes.
+  @ffi.Uint32()
+  external int stride_bytes;
+
+  /// < Byte offset within the shared resource.
+  @ffi.Uint32()
+  external int offset_bytes;
+
+  /// < D3D11 subresource / Vulkan aspect index.
+  @ffi.Uint32()
+  external int subresource_index;
+
+  /// < Per-plane DMA-BUF fd (-1 if not DMA-BUF).
+  @ffi.Int()
+  external int dmabuf_fd;
+
+  /// < DRM modifier (0 = DRM_FORMAT_MOD_LINEAR).
+  @ffi.Uint64()
+  external int drm_format_modifier;
+}
+
+/// Optional GPU synchronisation fence.
+/// Zero-initialise if the producer has already waited (e.g. CPU copy).
+final class MGPUExternalFence extends ffi.Struct {
+  /// < Linux/Android: sync_file fd. -1 = none.
+  @ffi.Int()
+  external int sync_fd;
+
+  /// < Windows: ID3D11Fence*. NULL = none.
+  external ffi.Pointer<ffi.Void> d3d11_fence;
+
+  /// < macOS/iOS: id<MTLSharedEvent> (bridged).
+  /// NULL = none.
+  external ffi.Pointer<ffi.Void> metal_shared_event;
+
+  /// < Signal value for metal_shared_event.
+  @ffi.Uint64()
+  external int metal_fence_value;
+}
+
+/// Full descriptor of an external video frame to be imported into Minigpu.
+final class MGPUExternalVideoBuffer extends ffi.Struct {
+  /// < Handle / memory type.
+  @ffi.UnsignedInt()
+  external int content_typeAsInt;
+
+  MGPUExternalContentType get content_type =>
+      MGPUExternalContentType.fromValue(content_typeAsInt);
+
+  /// < Pixel format of the frame.
+  @ffi.UnsignedInt()
+  external int pixel_formatAsInt;
+
+  MGPUExternalPixelFormat get pixel_format =>
+      MGPUExternalPixelFormat.fromValue(pixel_formatAsInt);
+
+  /// < Total frame width in pixels.
+  @ffi.Uint32()
+  external int width;
+
+  /// < Total frame height in pixels.
+  @ffi.Uint32()
+  external int height;
+
+  /// < Number of valid entries in planes[].
+  @ffi.Uint32()
+  external int num_planes;
+
+  /// < Per-plane descriptors.
+  @ffi.Array.multi([4])
+  external ffi.Array<MGPUExternalPlane> planes;
+
+  /// < Optional GPU fence.
+  external MGPUExternalFence fence;
+
+  /// < Frame timestamp (microseconds).
+  @ffi.Int64()
+  external int timestamp_us;
+}
+
+final class MGPUVideoTexture extends ffi.Opaque {}
+
+final class MGPUSharedOutputTexture extends ffi.Opaque {}
 
 typedef MGPUCallbackFunction = ffi.Void Function();
 typedef DartMGPUCallbackFunction = void Function();

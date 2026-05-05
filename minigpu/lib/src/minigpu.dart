@@ -1,7 +1,8 @@
 import 'package:minigpu/src/buffer.dart';
 import 'package:minigpu/src/compute_shader.dart';
+import 'package:minigpu/src/shared_output_texture.dart';
+import 'package:minigpu/src/video_texture.dart';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
-import 'dart:convert';
 
 /// Controls the initialization and destruction of the minigpu context.
 final class Minigpu {
@@ -23,7 +24,35 @@ final class Minigpu {
   bool isInitialized = false;
 
   // Internal shader cache: code hash -> shader
-  final Map<String, ComputeShader> _shaderCache = {};
+  // Live allocation counters — incremented on createBuffer/createComputeShader
+  // and decremented in Buffer.destroy() / ComputeShader.destroy().
+  // Inspect via [liveBufferCount] and [liveShaderCount] during debugging or
+  // in tests to catch per-frame allocation leaks without needing DXGI/VRAM
+  // measurement (which only detects leaks after the D3D12 pool grows past its
+  // high-water mark).
+  int _liveBufferCount = 0;
+  int _liveShaderCount = 0;
+
+  // Tracks all live shaders so they can be bulk-destroyed between test groups.
+  // Dawn/D3D12 silently fails dispatch when too many compute pipelines are
+  // active simultaneously. Destroying old shaders between tests (not during
+  // active GPU work) is safe and frees D3D12 resources.
+  final List<ComputeShader> _liveShaders = [];
+
+  /// Number of GPU buffers currently alive (created but not yet destroyed).
+  ///
+  /// Use this in tests or debug builds to assert that buffer counts are
+  /// stable across frames:
+  ///
+  /// ```dart
+  /// final before = gpu.liveBufferCount;
+  /// await stage.process(inputs);   // run one frame
+  /// expect(gpu.liveBufferCount, equals(before)); // must not grow
+  /// ```
+  int get liveBufferCount => _liveBufferCount;
+
+  /// Number of [ComputeShader]s currently alive (created but not yet destroyed).
+  int get liveShaderCount => _liveShaderCount;
 
   /// Initializes the minigpu context.
   Future<void> init() async {
@@ -37,7 +66,6 @@ final class Minigpu {
   Future<void> destroy() async {
     if (!isInitialized) throw MinigpuNotInitializedError();
 
-    _clearShaderCache();
     await _platform.destroyContext();
     isInitialized = false;
   }
@@ -46,23 +74,32 @@ final class Minigpu {
   ComputeShader createComputeShader() {
     final platformShader = _platform.createComputeShader();
     final shader = CachedComputeShader(platformShader, this);
+    _liveShaders.add(shader);
+    _liveShaderCount++;
     return shader;
   }
 
-  /// Internal method to get or create cached shader by code
-  ComputeShader getOrCreateCachedShader(String shaderCode) {
-    // Simple hash using built-in hashCode
-    final codeHash = shaderCode.hashCode.toString();
+  /// Called by [ComputeShader.destroy] to decrement [liveShaderCount].
+  // Accessed from compute_shader.dart (same package — library-private is fine).
+  // ignore: use_setters_to_change_properties
+  void onShaderDestroyed(ComputeShader shader) {
+    if (_liveShaderCount > 0) _liveShaderCount--;
+    _liveShaders.remove(shader);
+  }
 
-    if (_shaderCache.containsKey(codeHash)) {
-      return _shaderCache[codeHash]!;
+  /// Destroys all currently tracked live shaders and clears the tracking list.
+  ///
+  /// Call this between test groups (in `setUpAll`) to free D3D12 pipeline
+  /// resources accumulated by previous tests. Safe to call when no GPU work
+  /// is pending.
+  void destroyAllTrackedShaders() {
+    final shaders = List<ComputeShader>.from(_liveShaders);
+    _liveShaders.clear();
+    for (final shader in shaders) {
+      try {
+        shader.destroy();
+      } catch (_) {}
     }
-
-    final platformShader = _platform.createComputeShader();
-    final shader = ComputeShader(platformShader);
-    shader.loadKernelString(shaderCode);
-    _shaderCache[codeHash] = shader;
-    return shader;
   }
 
   /// Creates a buffer.
@@ -70,15 +107,54 @@ final class Minigpu {
     if (!isInitialized) throw MinigpuNotInitializedError();
 
     final platformBuffer = _platform.createBuffer(bufferSize, dataType);
-    final buff = Buffer(platformBuffer);
+    final buff = Buffer(platformBuffer, _onBufferDestroyed);
+    _liveBufferCount++;
     return buff;
   }
 
-  /// Clear shader cache (internal)
-  void _clearShaderCache() {
-    for (final shader in _shaderCache.values) {
-      shader.destroy();
-    }
-    _shaderCache.clear();
+  /// Called by [Buffer.destroy] to decrement [liveBufferCount].
+  // ignore: use_setters_to_change_properties
+  void _onBufferDestroyed() {
+    if (_liveBufferCount > 0) _liveBufferCount--;
+  }
+
+  /// Returns dedicated VRAM usage in bytes for the primary GPU (Windows D3D12
+  /// via DXGI QueryVideoMemoryInfo).  Returns -1 on unsupported platforms.
+  int queryVramBytes() => _platform.queryVramBytes();
+
+  /// Returns true if the given content type can be imported on this platform.
+  bool isExternalContentTypeSupported(ExternalContentType type) =>
+      _platform.isExternalContentTypeSupported(type);
+
+  /// Returns true if the given pixel format can be imported on this platform.
+  bool isExternalPixelFormatSupported(ExternalPixelFormat format) =>
+      _platform.isExternalPixelFormatSupported(format);
+
+  /// Import an external video frame as a GPU texture.
+  /// Returns null if unsupported or on failure.
+  VideoTexture? importVideoFrame(ExternalVideoBuffer buf) {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+    final platformTex = _platform.importVideoFrame(buf);
+    if (platformTex == null) return null;
+    return VideoTexture(platformTex, this);
+  }
+
+  /// Create a cross-API shared output RGBA8 texture suitable for zero-copy
+  /// hand-off to an external API (currently: Windows D3D12<->D3D11 via NT
+  /// shared handle). Returns null if unsupported on this platform/backend.
+  SharedOutputTexture? createSharedOutputTexture(int width, int height) {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+    final platformTex = _platform.createSharedOutputTexture(width, height);
+    if (platformTex == null) return null;
+    return SharedOutputTexture(platformTex, this);
+  }
+
+  /// Returns an `ID3D11Device*` (as an integer address) created on the same
+  /// DXGI adapter as Dawn's internal D3D12 device.  Non-zero only on Windows
+  /// with Dawn's D3D12 backend.  Ownership is transferred to the caller —
+  /// FFmpeg will call `Release()` when the AVHWDeviceContext is freed.
+  int createD3D11DeviceOnDawnAdapter() {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+    return _platform.createD3D11DeviceOnDawnAdapter();
   }
 }

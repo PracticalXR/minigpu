@@ -55,6 +55,8 @@ void ComputeShader::loadKernelString(const std::string &kernelString) {
     return; // No change, skip
   }
 
+  // Guard against concurrent dispatch reads of shaderCode/pipelineDirty.
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
   shaderCode = kernelString;
   pipelineDirty = true;
 }
@@ -93,14 +95,46 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
   buffers[tag] =
       BufferBinding{buffer.bufferData.buffer, buffer.bufferData.size, 0};
 
+  // Sync into unified bindings vector
+  if (tag >= static_cast<int>(bindings.size())) bindings.resize(tag + 1);
+  bindings[tag] = BindingEntry{BindingKind::kStorageBuffer,
+                               buffer.bufferData.buffer,
+                               buffer.bufferData.size, 0, nullptr};
+  bindingsDirty = true;
+}
+
+void ComputeShader::setTextureView(int slot, WGPUTextureView view) {
+  if (slot < 0 || !view) return;
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+  bindings[slot] = BindingEntry{BindingKind::kTextureView,
+                                nullptr, 0, 0, view};
+  bindingsDirty = true;
+}
+
+void ComputeShader::setStorageBuffer(int slot, WGPUBuffer buf,
+                                     size_t size, size_t offset) {
+  if (slot < 0 || !buf) return;
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+  bindings[slot] = BindingEntry{BindingKind::kStorageBuffer,
+                                buf, size, offset, nullptr};
+  bindingsDirty = true;
+}
+
+void ComputeShader::setUniformBuffer(int slot, WGPUBuffer buf, size_t size) {
+  if (slot < 0 || !buf) return;
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+  bindings[slot] = BindingEntry{BindingKind::kUniformBuffer,
+                                buf, size, 0, nullptr};
   bindingsDirty = true;
 }
 
 size_t ComputeShader::calculateBindingsHash() const {
-  // just use buffer count and first buffer pointer
-  size_t hash = buffers.size();
-  if (!buffers.empty() && buffers[0].buffer) {
-    hash ^= reinterpret_cast<size_t>(buffers[0].buffer);
+  size_t hash = bindings.size() ^ buffers.size();
+  if (!bindings.empty() && bindings[0].buffer) {
+    hash ^= reinterpret_cast<size_t>(bindings[0].buffer);
   }
   return hash;
 }
@@ -132,7 +166,7 @@ bool ComputeShader::createShaderModule() {
 bool ComputeShader::createBindGroupLayout() {
 
   if (bindGroupLayout && !bindingsDirty) {
-    return true; // Reuse existing layout
+    return true;
   }
 
   if (bindGroupLayout) {
@@ -140,31 +174,62 @@ bool ComputeShader::createBindGroupLayout() {
     bindGroupLayout = nullptr;
   }
 
-  //  assume all buffers are storage buffers
-  std::vector<WGPUBindGroupLayoutEntry> layoutEntries;
-  layoutEntries.reserve(buffers.size());
+  // Prefer the extended bindings vector; fall back to legacy buffers vector
+  // when bindings is empty (existing code paths).
+  const bool useExtended = !bindings.empty();
 
-  for (size_t i = 0; i < buffers.size(); ++i) {
-    if (buffers[i].buffer) {
+  std::vector<WGPUBindGroupLayoutEntry> layoutEntries;
+
+  if (useExtended) {
+    layoutEntries.reserve(bindings.size());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+      const auto& b = bindings[i];
       WGPUBindGroupLayoutEntry entry = {};
-      entry.binding = static_cast<uint32_t>(i);
+      entry.binding    = static_cast<uint32_t>(i);
       entry.visibility = WGPUShaderStage_Compute;
-      entry.buffer.type = WGPUBufferBindingType_Storage;
-      entry.buffer.minBindingSize = 0;
-      layoutEntries.push_back(entry);
+      switch (b.kind) {
+      case BindingKind::kStorageBuffer:
+        entry.buffer.type = WGPUBufferBindingType_Storage;
+        entry.buffer.minBindingSize = 0;
+        layoutEntries.push_back(entry);
+        break;
+      case BindingKind::kUniformBuffer:
+        entry.buffer.type = WGPUBufferBindingType_Uniform;
+        entry.buffer.minBindingSize = 0;
+        layoutEntries.push_back(entry);
+        break;
+      case BindingKind::kTextureView:
+        entry.texture.sampleType    = WGPUTextureSampleType_Float;
+        entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+        entry.texture.multisampled  = false;
+        layoutEntries.push_back(entry);
+        break;
+      default:
+        break; // skip empty slots
+      }
+    }
+  } else {
+    // Legacy path: all bindings are storage buffers
+    layoutEntries.reserve(buffers.size());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      if (buffers[i].buffer) {
+        WGPUBindGroupLayoutEntry entry = {};
+        entry.binding = static_cast<uint32_t>(i);
+        entry.visibility = WGPUShaderStage_Compute;
+        entry.buffer.type = WGPUBufferBindingType_Storage;
+        entry.buffer.minBindingSize = 0;
+        layoutEntries.push_back(entry);
+      }
     }
   }
 
-  if (layoutEntries.empty()) {
-    return false;
-  }
+  if (layoutEntries.empty()) return false;
 
   WGPUBindGroupLayoutDescriptor layoutDesc = {};
   layoutDesc.entryCount = static_cast<uint32_t>(layoutEntries.size());
-  layoutDesc.entries = layoutEntries.data();
+  layoutDesc.entries    = layoutEntries.data();
 
-  bindGroupLayout =
-      wgpuDeviceCreateBindGroupLayout(mgpu.getDevice(), &layoutDesc);
+  bindGroupLayout = wgpuDeviceCreateBindGroupLayout(mgpu.getDevice(), &layoutDesc);
   return bindGroupLayout != nullptr;
 }
 
@@ -218,28 +283,51 @@ bool ComputeShader::createBindGroup() {
     bindGroup = nullptr;
   }
 
+  const bool useExtended = !bindings.empty();
   std::vector<WGPUBindGroupEntry> bindGroupEntries;
-  bindGroupEntries.reserve(buffers.size());
 
-  for (size_t i = 0; i < buffers.size(); ++i) {
-    if (buffers[i].buffer) {
+  if (useExtended) {
+    bindGroupEntries.reserve(bindings.size());
+    for (size_t i = 0; i < bindings.size(); ++i) {
+      const auto& b = bindings[i];
       WGPUBindGroupEntry entry = {};
       entry.binding = static_cast<uint32_t>(i);
-      entry.buffer = buffers[i].buffer;
-      entry.offset = 0;
-      entry.size = WGPU_WHOLE_SIZE;
-      bindGroupEntries.push_back(entry);
+      switch (b.kind) {
+      case BindingKind::kStorageBuffer:
+      case BindingKind::kUniformBuffer:
+        entry.buffer = b.buffer;
+        entry.offset = b.offset;
+        entry.size   = (b.size > 0) ? b.size : WGPU_WHOLE_SIZE;
+        bindGroupEntries.push_back(entry);
+        break;
+      case BindingKind::kTextureView:
+        entry.textureView = b.view;
+        bindGroupEntries.push_back(entry);
+        break;
+      default:
+        break;
+      }
+    }
+  } else {
+    bindGroupEntries.reserve(buffers.size());
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      if (buffers[i].buffer) {
+        WGPUBindGroupEntry entry = {};
+        entry.binding = static_cast<uint32_t>(i);
+        entry.buffer  = buffers[i].buffer;
+        entry.offset  = 0;
+        entry.size    = WGPU_WHOLE_SIZE;
+        bindGroupEntries.push_back(entry);
+      }
     }
   }
 
-  if (bindGroupEntries.empty()) {
-    return false;
-  }
+  if (bindGroupEntries.empty()) return false;
 
   WGPUBindGroupDescriptor bindGroupDesc = {};
-  bindGroupDesc.layout = bindGroupLayout;
+  bindGroupDesc.layout     = bindGroupLayout;
   bindGroupDesc.entryCount = static_cast<uint32_t>(bindGroupEntries.size());
-  bindGroupDesc.entries = bindGroupEntries.data();
+  bindGroupDesc.entries    = bindGroupEntries.data();
 
   bindGroup = wgpuDeviceCreateBindGroup(mgpu.getDevice(), &bindGroupDesc);
   return bindGroup != nullptr;
@@ -269,7 +357,7 @@ bool ComputeShader::updatePipelineIfNeeded() {
 void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
   // async dispatch, returns immediately
   auto dispatchTask = [this, groupsX, groupsY, groupsZ]() {
-    // Ensure consistency with concurrent setBuffer calls
+    // Ensure consistency with concurrent setBuffer/loadKernelString calls.
     mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
@@ -325,57 +413,51 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
 void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
                                   std::function<void()> callback) {
   auto dispatchTask = [this, groupsX, groupsY, groupsZ, callback]() {
-    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+    bool ok = false;
+    {
+      // Scope the lock so the callback is invoked after it is released.
+      // This prevents a deadlock if the callback itself makes GPU calls.
+      mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
-    if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
-      if (callback)
-        callback();
-      return;
-    }
+      if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+        // ok stays false
+      } else if (!updatePipelineIfNeeded()) {
+        // ok stays false
+      } else {
+        WGPUCommandEncoder commandEncoder =
+            wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
 
-    if (!updatePipelineIfNeeded()) {
-      if (callback)
-        callback();
-      return;
-    }
+        if (commandEncoder) {
+          WGPUComputePassEncoder computePassEncoder =
+              wgpuCommandEncoderBeginComputePass(commandEncoder, nullptr);
 
-    WGPUCommandEncoder commandEncoder =
-        wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
+          if (computePassEncoder) {
+            wgpuComputePassEncoderSetPipeline(computePassEncoder,
+                                             computePipeline);
+            wgpuComputePassEncoderSetBindGroup(computePassEncoder, 0,
+                                               bindGroup, 0, nullptr);
+            wgpuComputePassEncoderDispatchWorkgroups(
+                computePassEncoder, static_cast<uint32_t>(groupsX),
+                static_cast<uint32_t>(groupsY),
+                static_cast<uint32_t>(groupsZ));
+            wgpuComputePassEncoderEnd(computePassEncoder);
+            wgpuComputePassEncoderRelease(computePassEncoder);
 
-    if (!commandEncoder) {
-      if (callback)
-        callback();
-      return;
-    }
+            WGPUCommandBuffer commandBuffer =
+                wgpuCommandEncoderFinish(commandEncoder, nullptr);
+            wgpuCommandEncoderRelease(commandEncoder);
 
-    WGPUComputePassEncoder computePassEncoder =
-        wgpuCommandEncoderBeginComputePass(commandEncoder, nullptr);
-
-    if (!computePassEncoder) {
-      wgpuCommandEncoderRelease(commandEncoder);
-      if (callback)
-        callback();
-      return;
-    }
-
-    wgpuComputePassEncoderSetPipeline(computePassEncoder, computePipeline);
-    wgpuComputePassEncoderSetBindGroup(computePassEncoder, 0, bindGroup, 0,
-                                       nullptr);
-    wgpuComputePassEncoderDispatchWorkgroups(
-        computePassEncoder, static_cast<uint32_t>(groupsX),
-        static_cast<uint32_t>(groupsY), static_cast<uint32_t>(groupsZ));
-
-    wgpuComputePassEncoderEnd(computePassEncoder);
-    wgpuComputePassEncoderRelease(computePassEncoder);
-
-    WGPUCommandBuffer commandBuffer =
-        wgpuCommandEncoderFinish(commandEncoder, nullptr);
-    wgpuCommandEncoderRelease(commandEncoder);
-
-    if (commandBuffer) {
-      wgpuQueueSubmit(mgpu.getQueue(), 1, &commandBuffer);
-      wgpuCommandBufferRelease(commandBuffer);
-    }
+            if (commandBuffer) {
+              wgpuQueueSubmit(mgpu.getQueue(), 1, &commandBuffer);
+              wgpuCommandBufferRelease(commandBuffer);
+              ok = true;
+            }
+          } else {
+            wgpuCommandEncoderRelease(commandEncoder);
+          }
+        }
+      }
+    } // lock released here — safe for callback to make GPU calls
 
     if (callback) {
       callback();

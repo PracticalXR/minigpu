@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstring>
 #include <thread>
+#include <vector>
 
 namespace mgpu {
 
@@ -66,6 +67,10 @@ void MGPU::initializeContext() {
   if (ctx && ctx->initialized) {
     return; // Already initialized
   }
+  std::fprintf(stderr,
+      "[mgpu] initializeContext() entering: ctx=%p ctx_initialized=%d\n",
+      (void*)ctx.get(),
+      ctx ? (int)ctx->initialized : -1);
 
   ctx = std::make_unique<Context>();
 
@@ -82,7 +87,29 @@ void MGPU::initializeContext() {
   WGPURequestAdapterOptions adapterOptions = {};
 #ifndef __EMSCRIPTEN__
   adapterOptions.powerPreference = WGPUPowerPreference_HighPerformance;
-  adapterOptions.backendType = WGPUBackendType_Undefined; // Let WebGPU choose
+  // Default to Dawn's D3D11 backend on Windows so cross-API texture sharing
+  // with WGC capture (D3D11) and FFmpeg D3D11VA encoders never has to cross
+  // the D3D11/D3D12 boundary (which on NVIDIA fails the d3d11on12 wrap and
+  // creates GPU hazards). The user can opt back into D3D12 by setting
+  // MGPU_BACKEND=d3d12 / vulkan / metal / opengl / undefined.
+  adapterOptions.backendType = WGPUBackendType_Undefined;
+#ifdef _WIN32
+  adapterOptions.backendType = WGPUBackendType_D3D11;
+#endif
+  if (const char* be = std::getenv("MGPU_BACKEND")) {
+    std::string s(be);
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    if      (s == "d3d11")     adapterOptions.backendType = WGPUBackendType_D3D11;
+    else if (s == "d3d12")     adapterOptions.backendType = WGPUBackendType_D3D12;
+    else if (s == "vulkan")    adapterOptions.backendType = WGPUBackendType_Vulkan;
+    else if (s == "metal")     adapterOptions.backendType = WGPUBackendType_Metal;
+    else if (s == "opengl")    adapterOptions.backendType = WGPUBackendType_OpenGL;
+    else if (s == "opengles")  adapterOptions.backendType = WGPUBackendType_OpenGLES;
+    else if (s == "undefined") adapterOptions.backendType = WGPUBackendType_Undefined;
+  }
+  std::fprintf(stderr,
+      "[mgpu] requesting adapter backendType=%d (MGPU_BACKEND env to override)\n",
+      (int)adapterOptions.backendType);
 #endif
 
   struct AdapterRequestState {
@@ -130,9 +157,77 @@ void MGPU::initializeContext() {
 
   ctx->adapter = adapterState.adapter;
 
+  // Log adapter backend so we know exactly which Dawn backend Dawn chose.
+  {
+    WGPUAdapterInfo info{};
+    if (wgpuAdapterGetInfo(ctx->adapter, &info) == WGPUStatus_Success) {
+      std::fprintf(stderr,
+        "[mgpu adapter] backendType=%d adapterType=%d vendorID=0x%X deviceID=0x%X\n",
+        (int)info.backendType, (int)info.adapterType,
+        (unsigned)info.vendorID, (unsigned)info.deviceID);
+      wgpuAdapterInfoFreeMembers(info);
+    }
+  }
+
   // Request device - Updated API
   WGPUDeviceDescriptor deviceDesc = {};
   deviceDesc.nextInChain = nullptr;
+  static const char kMainDeviceLabel[] = "MGPU.MainDevice";
+  deviceDesc.label.data = kMainDeviceLabel;
+  deviceDesc.label.length = sizeof(kMainDeviceLabel) - 1;
+
+  // ── Optionally enable platform-specific shared-texture-memory features so
+  //    minigpu_external can import D3D11 NT handles, IOSurfaces, DMA-BUFs and
+  //    AHardwareBuffers.  We probe the adapter and only enable what it
+  //    actually supports — the device request would fail otherwise.
+  std::vector<WGPUFeatureName> wantedFeatures;
+#if !defined(__EMSCRIPTEN__)
+  auto adapterHas = [&](WGPUFeatureName f) -> bool {
+    bool has = wgpuAdapterHasFeature(ctx->adapter, f) != 0;
+    std::fprintf(stderr,
+        "[mgpu adapter feature] %d => %d\n", (int)f, (int)has);
+    return has;
+  };
+#ifdef _WIN32
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryDXGISharedHandle))
+    wantedFeatures.push_back(
+        WGPUFeatureName_SharedTextureMemoryDXGISharedHandle);
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryD3D11Texture2D))
+    wantedFeatures.push_back(
+        WGPUFeatureName_SharedTextureMemoryD3D11Texture2D);
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryD3D12Resource))
+    wantedFeatures.push_back(
+        WGPUFeatureName_SharedTextureMemoryD3D12Resource);
+  if (adapterHas(WGPUFeatureName_SharedFenceDXGISharedHandle))
+    wantedFeatures.push_back(WGPUFeatureName_SharedFenceDXGISharedHandle);
+  if (adapterHas(WGPUFeatureName_D3D11MultithreadProtected))
+    wantedFeatures.push_back(WGPUFeatureName_D3D11MultithreadProtected);
+  // Allow BGRA8Unorm storage textures so SharedOutputTexture can be
+  // created in BGRA layout, matching what NVENC / AMF / QSV D3D11VA
+  // hwframes pools require for zero-copy encoding.
+  if (adapterHas(WGPUFeatureName_BGRA8UnormStorage))
+    wantedFeatures.push_back(WGPUFeatureName_BGRA8UnormStorage);
+#endif
+#ifdef __APPLE__
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryIOSurface))
+    wantedFeatures.push_back(WGPUFeatureName_SharedTextureMemoryIOSurface);
+#endif
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryDmaBuf))
+    wantedFeatures.push_back(WGPUFeatureName_SharedTextureMemoryDmaBuf);
+  if (adapterHas(WGPUFeatureName_SharedFenceSyncFD))
+    wantedFeatures.push_back(WGPUFeatureName_SharedFenceSyncFD);
+#endif
+#ifdef __ANDROID__
+  if (adapterHas(WGPUFeatureName_SharedTextureMemoryAHardwareBuffer))
+    wantedFeatures.push_back(
+        WGPUFeatureName_SharedTextureMemoryAHardwareBuffer);
+#endif
+#endif // !__EMSCRIPTEN__
+  if (!wantedFeatures.empty()) {
+    deviceDesc.requiredFeatures = wantedFeatures.data();
+    deviceDesc.requiredFeatureCount = wantedFeatures.size();
+  }
 
   // Set up device lost callback info
   WGPUDeviceLostCallbackInfo deviceLostCallbackInfo = {};
@@ -157,6 +252,10 @@ void MGPU::initializeContext() {
 
         LOG_ERROR("WebGPU Device Lost: %s - %.*s", reasonStr,
                   (int)message.length, message.data);
+        std::fprintf(stderr,
+            "[wgpu DEVICE LOST] reason=%s msg=%.*s\n",
+            reasonStr, (int)message.length,
+            message.data ? message.data : "");
 
         // Mark context as uninitialized so it can be recreated
         if (mgpu->ctx) {
@@ -167,6 +266,25 @@ void MGPU::initializeContext() {
 
   // Add the device lost callback to the device descriptor
   deviceDesc.deviceLostCallbackInfo = deviceLostCallbackInfo;
+
+  // Surface uncaptured validation/internal errors so we don't silently
+  // produce zero output when a compute pass / bind group fails validation.
+  WGPUUncapturedErrorCallbackInfo uncapErr = {};
+  uncapErr.callback = [](WGPUDevice const*, WGPUErrorType type,
+                          WGPUStringView message, void*, void*) {
+    const char* t = "?";
+    switch (type) {
+      case WGPUErrorType_Validation: t = "Validation"; break;
+      case WGPUErrorType_OutOfMemory: t = "OutOfMemory"; break;
+      case WGPUErrorType_Internal: t = "Internal"; break;
+      case WGPUErrorType_Unknown: t = "Unknown"; break;
+      default: break;
+    }
+    std::fprintf(stderr,
+        "[wgpu uncaptured %s] %.*s\n",
+        t, (int)message.length, message.data ? message.data : "");
+  };
+  deviceDesc.uncapturedErrorCallbackInfo = uncapErr;
 
   struct DeviceRequestState {
     WGPUDevice device = nullptr;
@@ -247,6 +365,10 @@ void MGPU::destroyContext() {
   if (!ctx) {
     return;
   }
+
+  // Drain all pending WebGPU-thread tasks (buffer cleanups, dispatch completions)
+  // before releasing the handles they reference.
+  webgpuThread.enqueueSync<void>([]{});
 
   if (ctx->queue) {
     wgpuQueueRelease(ctx->queue);
@@ -329,10 +451,14 @@ Buffer::~Buffer() { release(); }
 Buffer::Buffer(Buffer &&other) noexcept
     : mgpu(other.mgpu), bufferData(std::move(other.bufferData)),
       dataType(other.dataType), elementCount(other.elementCount),
-      isPacked(other.isPacked) {
+      isPacked(other.isPacked),
+      _readStagingBuffer(other._readStagingBuffer),
+      _readStagingBufferSize(other._readStagingBufferSize) {
   other.bufferData.buffer = nullptr;
   other.bufferData.size = 0;
   other.elementCount = 0;
+  other._readStagingBuffer = nullptr;
+  other._readStagingBufferSize = 0;
 }
 
 Buffer &Buffer::operator=(Buffer &&other) noexcept {
@@ -342,9 +468,13 @@ Buffer &Buffer::operator=(Buffer &&other) noexcept {
     dataType = other.dataType;
     elementCount = other.elementCount;
     isPacked = other.isPacked;
+    _readStagingBuffer = other._readStagingBuffer;
+    _readStagingBufferSize = other._readStagingBufferSize;
     other.bufferData.buffer = nullptr;
     other.bufferData.size = 0;
     other.elementCount = 0;
+    other._readStagingBuffer = nullptr;
+    other._readStagingBufferSize = 0;
   }
   return *this;
 }
@@ -447,26 +577,24 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
 void Buffer::release() {
   if (bufferData.buffer) {
     WGPUBuffer bufferHandle = bufferData.buffer;
+    WGPUBuffer stagingHandle = _readStagingBuffer;
     WGPUInstance instance = mgpu.tryGetInstance();
     WGPUQueue queue = mgpu.tryGetQueue();
     mgpu::mutex &gpuMutex = mgpu.getGpuMutex();
 
-    // Enqueue destruction on the WebGPU thread so Dawn processes events on
-    // the correct thread and immediately reclaims GPU memory.  This mirrors
-    // ComputeShader::~ComputeShader() and avoids callers needing a sentinel
-    // read to flush the event queue.
-    auto cleanupTask = [bufferHandle, queue, instance, &gpuMutex]() {
+    auto cleanupTask = [bufferHandle, stagingHandle, queue, instance, &gpuMutex]() {
       LOG_INFO("Releasing buffer on WebGPU thread: %p", bufferHandle);
       {
-        // Hold the GPU mutex so we don't race with writeDirect or dispatch.
         mgpu::lock_guard<mgpu::mutex> lock(gpuMutex);
-        // Submit an empty command buffer to flush any pending wgpuQueueWriteBuffer
-        // staging allocations that Dawn holds until the next submit.
         if (queue) {
           wgpuQueueSubmit(queue, 0, nullptr);
         }
         wgpuBufferDestroy(bufferHandle);
         wgpuBufferRelease(bufferHandle);
+        if (stagingHandle) {
+          wgpuBufferDestroy(stagingHandle);
+          wgpuBufferRelease(stagingHandle);
+        }
       }
       if (instance) {
         wgpuInstanceProcessEvents(instance);
@@ -480,6 +608,10 @@ void Buffer::release() {
       // GPU thread already shut down — release directly as a last resort.
       wgpuBufferDestroy(bufferHandle);
       wgpuBufferRelease(bufferHandle);
+      if (stagingHandle) {
+        wgpuBufferDestroy(stagingHandle);
+        wgpuBufferRelease(stagingHandle);
+      }
     }
 
     bufferData.buffer = nullptr;
@@ -487,6 +619,8 @@ void Buffer::release() {
     elementCount = 0;
     dataType = kUnknownType;
     isPacked = false;
+    _readStagingBuffer = nullptr;
+    _readStagingBufferSize = 0;
   }
 }
 
@@ -875,8 +1009,11 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     throw std::runtime_error("WebGPU context not valid for buffer read");
   }
 
-  // Acquire WebGPU operation lock to prevent conflicts with compute dispatch
-  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  // Acquire WebGPU operation lock to prevent conflicts with compute dispatch.
+  // We use unique_lock (vs lock_guard) so we can unlock it explicitly before
+  // calling wgpuInstanceProcessEvents at the end, which must run outside the
+  // lock to avoid blocking buffer-release cleanup tasks that also acquire it.
+  mgpu::unique_lock<mgpu::mutex> lock(mgpu.getGpuMutex());
 
   WGPUDevice device = mgpu.getDevice();
   WGPUQueue queue = mgpu.getQueue();
@@ -887,17 +1024,42 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     throw std::runtime_error("WebGPU handles not valid for buffer read");
   }
 
-  // Create a staging buffer for reading
-  WGPUBufferDescriptor stagingDesc = {};
-  stagingDesc.size = readBytes;
-  stagingDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-  stagingDesc.mappedAtCreation = false;
+  // Snapshot the handle while we hold the GPU mutex.  A concurrent
+  // Buffer::release() on the Dart thread nulls bufferData.buffer without
+  // the mutex (it only enqueues the actual WGPUBuffer destruction on the
+  // WebGPU thread).  Using a local copy avoids a TOCTOU race where
+  // bufferData.buffer becomes nullptr between the check above and the
+  // wgpuCommandEncoderCopyBufferToBuffer call below.
+  // Safety: the cleanup task enqueued by release() is always ordered *after*
+  // this readDirect task on the WebGPU thread, so localBuffer stays alive
+  // for the full duration of this function.
+  const WGPUBuffer localBuffer = bufferData.buffer;
 
-  WGPUBuffer stagingBuffer = wgpuDeviceCreateBuffer(device, &stagingDesc);
-  if (!stagingBuffer) {
-    LOG_ERROR("Failed to create staging buffer");
-    throw std::runtime_error("Failed to create staging buffer");
+  // Reuse the persistent staging buffer when it already has the right size.
+  // This eliminates the ~100 MB/s of GPU heap churn that occurs when reading
+  // a 5 MB texture tensor at 20 fps (one 5 MB alloc+free per frame).
+  if (_readStagingBuffer && _readStagingBufferSize != readBytes) {
+    wgpuBufferDestroy(_readStagingBuffer);
+    wgpuBufferRelease(_readStagingBuffer);
+    _readStagingBuffer = nullptr;
+    _readStagingBufferSize = 0;
   }
+
+  if (!_readStagingBuffer) {
+    // Create a staging buffer for reading
+    WGPUBufferDescriptor stagingDesc = {};
+    stagingDesc.size = readBytes;
+    stagingDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+    stagingDesc.mappedAtCreation = false;
+
+    _readStagingBuffer = wgpuDeviceCreateBuffer(device, &stagingDesc);
+    if (!_readStagingBuffer) {
+      LOG_ERROR("Failed to create staging buffer");
+      throw std::runtime_error("Failed to create staging buffer");
+    }
+    _readStagingBufferSize = readBytes;
+  }
+  WGPUBuffer stagingBuffer = _readStagingBuffer;
 
   // Copy from our buffer to staging buffer - protected by mutex
   WGPUCommandEncoderDescriptor encoderDesc = {};
@@ -909,7 +1071,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     throw std::runtime_error("Failed to create command encoder");
   }
 
-  wgpuCommandEncoderCopyBufferToBuffer(encoder, bufferData.buffer, byteOffset,
+  wgpuCommandEncoderCopyBufferToBuffer(encoder, localBuffer, byteOffset,
                                        stagingBuffer, 0, readBytes);
 
   WGPUCommandBufferDescriptor cmdBufferDesc = {};
@@ -983,10 +1145,20 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   }
   wgpuBufferUnmap(stagingBuffer);
 
-  // Cleanup
+  // Keep the staging buffer alive for reuse on the next readDirect call.
+  // It will be released in Buffer::release() when the buffer is destroyed.
   wgpuCommandBufferRelease(commands);
   wgpuCommandEncoderRelease(encoder);
-  wgpuBufferRelease(stagingBuffer);
+
+  // Release the GPU mutex before pumping events.  wgpuInstanceProcessEvents
+  // may deliver Dawn-internal callbacks (e.g. from prior buffer releases) that
+  // themselves need the GPU mutex; holding it here would deadlock.
+  lock.unlock();
+
+  // Pump Dawn's event loop so it can immediately reclaim the staging buffer's
+  // GPU memory and any other pending deferred deallocations.  Without this,
+  // ~800 KB staging buffers accumulate each frame until the next GC cycle.
+  wgpuInstanceProcessEvents(instance);
 }
 template <typename T>
 void Buffer::readPacked(T *outputData, size_t elementCount, size_t offset) {

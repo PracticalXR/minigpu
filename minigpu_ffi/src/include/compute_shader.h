@@ -18,6 +18,21 @@ struct BufferBinding {
   size_t offset = 0;
 };
 
+enum class BindingKind {
+  kEmpty = 0,
+  kStorageBuffer,
+  kUniformBuffer,
+  kTextureView,
+};
+
+struct BindingEntry {
+  BindingKind        kind   = BindingKind::kEmpty;
+  WGPUBuffer         buffer = nullptr;
+  size_t             size   = 0;
+  size_t             offset = 0;
+  WGPUTextureView    view   = nullptr;
+};
+
 class ComputeShader {
 public:
   explicit ComputeShader(MGPU &mgpu);
@@ -32,6 +47,10 @@ public:
   bool hasKernel() const;
 
   void setBuffer(int tag, const Buffer &buffer);
+  // Extended binding setters for video texture interop
+  void setTextureView(int slot, WGPUTextureView view);
+  void setStorageBuffer(int slot, WGPUBuffer buf, size_t size, size_t offset);
+  void setUniformBuffer(int slot, WGPUBuffer buf, size_t size);
 
   void dispatch(int groupsX, int groupsY, int groupsZ);
   void dispatchAsync(int groupsX, int groupsY, int groupsZ,
@@ -40,7 +59,8 @@ public:
 private:
   MGPU &mgpu;
   std::string shaderCode;
-  std::vector<BufferBinding> buffers;
+  std::vector<BufferBinding> buffers;  // legacy: slot → storage buffer (Buffer objects)
+  std::vector<BindingEntry>  bindings; // extended: all binding types indexed by slot
 
   // WebGPU resources
   WGPUShaderModule shaderModule = nullptr;

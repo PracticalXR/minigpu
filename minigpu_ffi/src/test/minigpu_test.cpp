@@ -2,6 +2,9 @@
 #include <iostream>
 #include <cassert>
 
+// Forward declaration from external_texture_test.cpp
+void runExternalTextureTests();
+
 
 void testCreateContext() {
   std::cout << "Testing context creation..." << std::endl;
@@ -347,6 +350,8 @@ int main() {
   testFloat64();
   testCreateBuffer();
   testComputeShader();
+
+  runExternalTextureTests();
 
   mgpuDestroyContext();
   return 0;

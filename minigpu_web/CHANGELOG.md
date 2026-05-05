@@ -1,5 +1,14 @@
 # minigpu_web CHANGELOG
 
+## 1.2.4-WIP
+
+- working on texture imports
+
+## 1.2.3
+
+- adds VRAM API
+- fixes memleaks and broken tests
+
 ## 1.2.2
 
 - fixes memleaks and broken tests

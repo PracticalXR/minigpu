@@ -33,10 +33,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
     if (activeShader?.shaderCode != shaderTemplate) {
+      activeShader?.destroy();
       activeShader = gpu.createComputeShader();
       activeShader!.loadKernelString(shaderTemplate);
     }
-    activeShader!.loadKernelString(shaderTemplate);
     activeShader!.setBuffer('input', buffer);
     activeShader!.setBuffer('output', out.buffer);
 
@@ -45,22 +45,62 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     return out;
   }
 
+  /// Same as [upgradeRealToComplex] but writes into the caller-supplied
+  /// [output] tensor instead of allocating a new one.  [output] must already
+  /// have shape [N*2] where N = this.shape.reduce(*).
+  /// No GPU allocations are made; the caller owns [output].
+  Future<void> upgradeRealToComplexInto(Tensor output) async {
+    final int total = shape.reduce((a, b) => a * b);
+    final shaderTemplate =
+        '''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+const N: u32 = ${total}u;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i: u32 = gid.x;
+  if (i >= N) { return; }
+  output[i * 2u] = input[i];
+  output[i * 2u + 1u] = 0.0;
+}
+''';
+    if (activeShader?.shaderCode != shaderTemplate) {
+      activeShader?.destroy();
+      activeShader = gpu.createComputeShader();
+      activeShader!.loadKernelString(shaderTemplate);
+    }
+    activeShader!.setBuffer('input', buffer);
+    activeShader!.setBuffer('output', output.buffer);
+    final int workgroups = (total + 255) ~/ 256;
+    await activeShader!.dispatch(workgroups, 1, 1);
+  }
+
   /// A unified FFT that upgrades a real tensor if necessary and then calls the
   /// appropriate FFT method based on the tensor's dimensions.
   Future<Tensor> fft({bool isRealInput = false}) async {
     // For 1D: if the tensor is real (length not even) upgrade to a flat complex tensor.
     if (shape.length == 1) {
       if (isRealInput) {
-        print("Upgrading real 1D tensor to complex for FFT operation.");
+        //print("Upgrading real 1D tensor to complex for FFT operation.");
         // Input is real samples, upgrade to complex
         Tensor upgraded = await upgradeRealToComplex();
-        return upgraded.fft1d();
+        // fft1d() creates its own internal scratch tensors; upgraded is
+        // the input-promotion buffer and is no longer referenced after the
+        // butterfly stages complete.  Destroy it explicitly so Dawn can
+        // reclaim the GPU memory without waiting for Dart's GC finalizers.
+        final result = await upgraded.fft1d();
+        upgraded.destroy();
+        return result;
       } else {
         // Input is already complex pairs (existing behavior)
         // Only upgrade if odd length (original logic)
         if (shape[0] % 2 != 0) {
           Tensor upgraded = await upgradeRealToComplex();
-          return upgraded.fft1d();
+          final result = await upgraded.fft1d();
+          upgraded.destroy();
+          return result;
         }
         return fft1d();
       }
@@ -132,6 +172,148 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     return output;
   }
 
+  /// Same as [bitReverseReorder] but writes into the caller-supplied
+  /// [outputTensor] instead of allocating a new one.  [outputTensor] must
+  /// already have the same shape as [input].
+  /// No GPU allocations are made; the caller owns [outputTensor].
+  Future<void> bitReverseReorderInto(Tensor input, Tensor outputTensor) async {
+    final n = input.shape[0] ~/ 2;
+    if (n <= 1) return;
+
+    final numBits = (math.log(n) / math.ln2).round();
+    final shaderTemplate =
+        '''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+fn bitReverse(x: u32, bits: u32) -> u32 {
+  var result: u32 = 0u;
+  var temp: u32 = x;
+  for (var i: u32 = 0u; i < bits; i = i + 1u) {
+    result = (result << 1u) | (temp & 1u);
+    temp = temp >> 1u;
+  }
+  return result;
+}
+
+const N: u32 = ${n}u;
+const BITS: u32 = ${numBits}u;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i: u32 = gid.x;
+  if (i >= N) { return; }
+  let j: u32 = bitReverse(i, BITS);
+  let srcIdx: u32 = j * 2u;
+  let dstIdx: u32 = i * 2u;
+  output[dstIdx] = input[srcIdx];
+  output[dstIdx + 1u] = input[srcIdx + 1u];
+}
+''';
+    final ComputeShader shader = gpu.createComputeShader();
+    shader.loadKernelString(shaderTemplate);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', outputTensor.buffer);
+    final int workgroups = (n + 255) ~/ 256;
+    await shader.dispatch(workgroups, 1, 1);
+    shader.destroy();
+  }
+
+  /// Runs a 1D FFT using caller-supplied, pre-allocated workspace tensors and
+  /// buffers.  NOTHING is allocated or destroyed — the caller owns all objects.
+  ///
+  /// [this] must contain the bit-reversed complex input (shape [N*2]).
+  /// [pong] is the scratch tensor (same shape as [this]).
+  /// [twiddleBuffer] must hold N precomputed twiddle factors (N*2 floats).
+  /// [paramBuffer] is a 16-byte uniform-like buffer for per-stage params.
+  ///
+  /// Returns either [this] or [pong] depending on FFT stage count parity —
+  /// the caller must not assume which one holds the result.
+  Future<Tensor> fft1dPreallocated({
+    required Tensor pong,
+    required Buffer twiddleBuffer,
+    required Buffer paramBuffer,
+  }) async {
+    if (shape.length != 1)
+      throw Exception("fft1dPreallocated requires 1D tensor.");
+    final int n = shape[0] ~/ 2;
+    final int stages = (math.log(n) / math.ln2).toInt();
+
+    Tensor ping = this;
+    Tensor pongRef = pong;
+
+    final shaderTemplate = '''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<storage, read_write> params: array<u32>; // [stage, n, m, half]
+@group(0) @binding(3) var<storage, read_write> twiddles: array<f32>;
+
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let n: u32 = params[1];
+  let m: u32 = params[2];
+  let half: u32 = params[3];
+  let numOperations: u32 = n >> 1u;
+  let t: u32 = gid.x;
+  if (t >= numOperations) { return; }
+  let group: u32 = t / half;
+  let pos: u32 = t % half;
+  let i0: u32 = group * m + pos;
+  let i1: u32 = i0 + half;
+  if (i1 >= n) { return; }
+  let idx0: u32 = i0 * 2u;
+  let idx1: u32 = i1 * 2u;
+  let a: vec2<f32> = vec2<f32>(input[idx0], input[idx0 + 1u]);
+  let b: vec2<f32> = vec2<f32>(input[idx1], input[idx1 + 1u]);
+  let twiddle_stride: u32 = n / m;
+  let twiddle_idx: u32 = pos * twiddle_stride * 2u;
+  let w: vec2<f32> = vec2<f32>(twiddles[twiddle_idx], twiddles[twiddle_idx + 1u]);
+  let b_w: vec2<f32> = vec2<f32>(b.x * w.x - b.y * w.y, b.x * w.y + b.y * w.x);
+  let result1: vec2<f32> = a + b_w;
+  let result2: vec2<f32> = a - b_w;
+  output[idx0] = result1.x;
+  output[idx0 + 1u] = result1.y;
+  output[idx1] = result2.x;
+  output[idx1 + 1u] = result2.y;
+}
+''';
+    // Reuse cached shader on this tensor (the caller's persistent complex tensor).
+    if (activeShader?.shaderCode != shaderTemplate) {
+      activeShader?.destroy();
+      activeShader = gpu.createComputeShader();
+      activeShader!.loadKernelString(shaderTemplate);
+    }
+
+    for (int s = 0; s < stages; s++) {
+      final int m = 1 << (s + 1);
+      final int half = m >> 1;
+      final params = Uint32List(4);
+      params[0] = s;
+      params[1] = n;
+      params[2] = m;
+      params[3] = half;
+      await paramBuffer.write(
+        params,
+        params.length,
+        dataType: BufferDataType.uint32,
+      );
+
+      activeShader!.setBuffer('input', ping.buffer);
+      activeShader!.setBuffer('output', pongRef.buffer);
+      activeShader!.setBuffer('params', paramBuffer);
+      activeShader!.setBuffer('twiddles', twiddleBuffer);
+
+      final int numOperations = n >> 1;
+      final int workgroups = (numOperations + 255) ~/ 256;
+      await activeShader!.dispatch(workgroups, 1, 1);
+
+      final Tensor tmp = ping;
+      ping = pongRef;
+      pongRef = tmp;
+    }
+    return ping;
+  }
+
   Future<Tensor> fft1d() async {
     if (shape.length != 1) {
       throw Exception("FFT supports 1D tensors only.");
@@ -166,8 +348,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     Tensor ping = bitReversed;
     Tensor pong = await Tensor.create(shape, gpu: gpu);
-
-    // Optimized shader with precomputed twiddles
     final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
@@ -221,47 +401,54 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     if (activeShader?.shaderCode != shaderTemplate) {
+      activeShader?.destroy();
       activeShader = gpu.createComputeShader();
       activeShader!.loadKernelString(shaderTemplate);
     }
 
     final Buffer paramBuffer = gpu.createBuffer(16, BufferDataType.uint32);
 
-    for (int s = 0; s < stages; s++) {
-      int m = 1 << (s + 1);
-      int half = m >> 1;
+    try {
+      for (int s = 0; s < stages; s++) {
+        int m = 1 << (s + 1);
+        int half = m >> 1;
 
-      final params = Uint32List(4);
-      params[0] = s; // stage
-      params[1] = n; // n
-      params[2] = m; // m
-      params[3] = half; // half
-      await paramBuffer.write(
-        params,
-        params.length,
-        dataType: BufferDataType.uint32,
-      );
+        final params = Uint32List(4);
+        params[0] = s; // stage
+        params[1] = n; // n
+        params[2] = m; // m
+        params[3] = half; // half
+        await paramBuffer.write(
+          params,
+          params.length,
+          dataType: BufferDataType.uint32,
+        );
 
-      activeShader!.setBuffer('input', ping.buffer);
-      activeShader!.setBuffer('output', pong.buffer);
-      activeShader!.setBuffer('params', paramBuffer);
-      activeShader!.setBuffer('twiddles', twiddleBuffer);
+        activeShader!.setBuffer('input', ping.buffer);
+        activeShader!.setBuffer('output', pong.buffer);
+        activeShader!.setBuffer('params', paramBuffer);
+        activeShader!.setBuffer('twiddles', twiddleBuffer);
 
-      int numOperations = n >> 1;
-      int workgroups = (numOperations + 255) ~/ 256;
-      await activeShader!.dispatch(workgroups, 1, 1);
+        int numOperations = n >> 1;
+        int workgroups = (numOperations + 255) ~/ 256;
+        await activeShader!.dispatch(workgroups, 1, 1);
 
-      Tensor temp = ping;
-      ping = pong;
-      pong = temp;
+        Tensor temp = ping;
+        ping = pong;
+        pong = temp;
+      }
+    } finally {
+      paramBuffer.destroy();
+      twiddleBuffer.destroy();
+      // pong is always the stale scratch buffer after the final swap.
+      // ping is the valid result that will be returned to the caller.
+      // Do NOT destroy bitReversed separately: it is always either ping
+      // (returned, freed by caller) or pong (freed here), depending on
+      // whether stages is even or odd. Calling bitReversed.destroy() here
+      // would cause a double-free (if pong==bitReversed) or destroy the
+      // return value (if ping==bitReversed).
+      pong.destroy();
     }
-
-    paramBuffer.destroy();
-    twiddleBuffer.destroy();
-    if (bitReversed != this) {
-      //  bitReversed.destroy();
-    }
-    pong.destroy();
 
     return ping;
   }

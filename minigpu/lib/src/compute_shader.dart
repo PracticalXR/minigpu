@@ -9,6 +9,10 @@ final class ComputeShader {
   }
 
   final PlatformComputeShader _shader;
+
+  /// Expose the underlying platform shader for use by VideoTexture.setOnShader.
+  PlatformComputeShader get platformShader => _shader;
+
   final Map<String, int> _kernelTags = {};
   String? shaderCode;
   static final Finalizer<PlatformComputeShader> _finalizer = Finalizer(
@@ -42,6 +46,15 @@ final class ComputeShader {
     }
   }
 
+  /// Sets a buffer at an explicit binding [slot] index.
+  ///
+  /// Use this when mixing texture bindings (set via [VideoTexture.setOnShader])
+  /// with buffer bindings in the same shader, where slot numbers must be
+  /// coordinated explicitly rather than derived from tag insertion order.
+  void setBufferAtSlot(int slot, Buffer buffer) {
+    _shader.setBuffer(slot, buffer.platformBuffer!);
+  }
+
   /// Dispatches the specified kernel with the given work group counts.
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async =>
       _shader.dispatch(groupsX, groupsY, groupsZ);
@@ -56,40 +69,12 @@ final class ComputeShader {
 /// Internal wrapper that provides caching behavior
 final class CachedComputeShader extends ComputeShader {
   final Minigpu _gpu;
-  ComputeShader? _cachedShader;
 
   CachedComputeShader(PlatformComputeShader shader, this._gpu) : super(shader);
 
   @override
-  void loadKernelString(String kernelString) {
-    // Reuse/create cached shader instance for this kernel source
-    _cachedShader = _gpu.getOrCreateCachedShader(kernelString);
-
-    if (_cachedShader == this) {
-      // This instance owns the platform shader
-      super.loadKernelString(kernelString);
-    } else {
-      // Ensure the cached instance has the kernel loaded
-      _cachedShader!.loadKernelString(kernelString);
-    }
-
-    // Start a fresh bind session
-    _cachedShader!.resetTagOrder();
-    shaderCode = kernelString;
-  }
-
-  @override
-  void setBuffer(String tag, Buffer buffer) {
-    (_cachedShader ?? this).setBuffer(tag, buffer);
-  }
-
-  @override
-  Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
-    return (_cachedShader ?? this).dispatch(groupsX, groupsY, groupsZ);
-  }
-
-  @override
-  bool hasKernel() {
-    return (_cachedShader ?? this).hasKernel();
+  void destroy() {
+    super.destroy();
+    _gpu.onShaderDestroyed(this);
   }
 }

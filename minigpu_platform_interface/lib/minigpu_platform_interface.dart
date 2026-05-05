@@ -138,6 +138,181 @@ abstract class MinigpuPlatform {
   Future<void> destroyContext();
   PlatformComputeShader createComputeShader();
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType);
+
+  /// Returns dedicated VRAM usage in bytes for the primary GPU.
+  /// Returns -1 on platforms where the query is unavailable.
+  int queryVramBytes() => -1;
+
+  // ---------------------------------------------------------------------------
+  // Video texture interop (optional — returns null if unsupported)
+  // ---------------------------------------------------------------------------
+
+  /// Returns true if the given content type can be imported on this platform.
+  bool isExternalContentTypeSupported(ExternalContentType type) => false;
+
+  /// Returns true if the given pixel format can be imported on this platform.
+  bool isExternalPixelFormatSupported(ExternalPixelFormat format) => false;
+
+  /// Import a video frame into GPU texture memory.
+  /// Returns null if unsupported or on failure.
+  PlatformVideoTexture? importVideoFrame(ExternalVideoBuffer buf) => null;
+
+  /// Create a cross-API shared output texture (Windows: D3D12<->D3D11
+  /// zero-copy via NT shared handle). Returns null on unsupported platforms.
+  PlatformSharedOutputTexture? createSharedOutputTexture(
+    int width,
+    int height,
+  ) => null;
+
+  /// Create a D3D11 device on the same DXGI adapter as Dawn's D3D12 device.
+  /// Returns the ID3D11Device* address (non-zero) or 0 on failure.
+  /// Windows-only; returns 0 on all other platforms.
+  int createD3D11DeviceOnDawnAdapter() => 0;
+}
+
+// ---------------------------------------------------------------------------
+// External video buffer types (platform-neutral Dart layer)
+// ---------------------------------------------------------------------------
+
+enum ExternalContentType {
+  cpu,
+  d3d11SharedHandle,
+  metalIOSurface,
+  dmabuf,
+  aHardwareBuffer,
+  webVideoFrame,
+}
+
+enum ExternalPixelFormat {
+  unknown,
+  rgba32,
+  bgra32,
+  nv12,
+  gray8,
+  rgba64Half,
+  yuv420pAsNV12Planes,
+  yuv420pAsRGBPlanes,
+}
+
+class ExternalPlane {
+  final int dataPtr; // Native pointer / fd as integer
+  final int width;
+  final int height;
+  final int strideBytes;
+  final int offsetBytes;
+  final int subresourceIndex;
+  final int dmabufFd;
+  final int drmFormatModifier;
+
+  const ExternalPlane({
+    required this.dataPtr,
+    required this.width,
+    required this.height,
+    required this.strideBytes,
+    this.offsetBytes = 0,
+    this.subresourceIndex = 0,
+    this.dmabufFd = -1,
+    this.drmFormatModifier = 0,
+  });
+}
+
+class ExternalFence {
+  final int syncFd; // -1 if none
+  final int d3d11FencePtr; // 0 if none
+  final int metalSharedEventPtr; // 0 if none
+  final int metalFenceValue;
+
+  const ExternalFence({
+    this.syncFd = -1,
+    this.d3d11FencePtr = 0,
+    this.metalSharedEventPtr = 0,
+    this.metalFenceValue = 0,
+  });
+}
+
+class ExternalVideoBuffer {
+  final ExternalContentType contentType;
+  final ExternalPixelFormat pixelFormat;
+  final int width;
+  final int height;
+  final List<ExternalPlane> planes;
+  final ExternalFence fence;
+  final int timestampUs;
+
+  const ExternalVideoBuffer({
+    required this.contentType,
+    required this.pixelFormat,
+    required this.width,
+    required this.height,
+    required this.planes,
+    this.fence = const ExternalFence(),
+    this.timestampUs = 0,
+  });
+}
+
+/// Opaque handle to an imported video texture on the GPU.
+abstract class PlatformVideoTexture {
+  int get numPlanes;
+  int get width;
+  int get height;
+  ExternalPixelFormat get pixelFormat;
+
+  /// Bind a plane to a compute shader binding slot.
+  void setOnShader(PlatformComputeShader shader, int slot, int planeIndex);
+
+  /// Convert to RGBA8 via an internal compute pass.
+  /// Returns a [PlatformBuffer] (RGBA8, row-major). Caller owns it.
+  PlatformBuffer toRGBA();
+
+  /// Convert a BGRA source video texture into the given cross-API shared
+  /// output RGBA texture (zero-copy on Windows via D3D12/D3D11 shared NT
+  /// handle). Returns true on success. Returns false if unsupported or on
+  /// validation/dispatch failure.
+  bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
+
+  void destroy();
+}
+
+/// Opaque handle to a cross-API shared output texture. On Windows this is a
+/// D3D12 resource exported as an NT shared handle that an external API
+/// (e.g. FFmpeg's D3D11 device) can open with `OpenSharedResource1`.
+abstract class PlatformSharedOutputTexture {
+  int get width;
+  int get height;
+
+  /// Native NT HANDLE (as integer) suitable for D3D11
+  /// `OpenSharedResource1`. Caller MUST NOT call `CloseHandle` on it; it is
+  /// owned by this object and will be closed in [destroy].
+  int get d3d11Handle;
+
+  /// Pointer (as integer) to the underlying `ID3D11Texture2D*` that backs
+  /// this shared output. The texture lives on the same `ID3D11Device` as
+  /// the one returned by [PlatformMinigpu.createD3D11DeviceOnDawnAdapter],
+  /// so an FFmpeg encoder configured with that device may use this texture
+  /// directly without `OpenSharedResource1`. The pointer's lifetime is
+  /// owned by this object — do NOT `Release` it.
+  int get d3d11TexturePtr => 0;
+
+  /// Copy the contents of [src] (an RGBA8 GPU storage buffer, e.g. the output
+  /// of a GpuEffect dispatch) into this shared texture on the GPU.
+  /// Returns true on success, false if unsupported or on failure.
+  bool copyFromBuffer(PlatformBuffer src) => false;
+
+  /// Variant of [copyFromBuffer] for buffers that hold 4 f32 components per
+  /// pixel (R,G,B,A in [0,1]) instead of packed RGBA8 u32.  Used by
+  /// visualizers (e.g. the spectrogram) that produce float colors directly.
+  bool copyFromBufferF32(PlatformBuffer src) => false;
+
+  /// Debug-only: synchronously read the first pixel (BGRA8 packed u32) of the
+  /// underlying D3D11 texture using the cached Dawn-adapter D3D11 device.
+  /// Used to verify that Dawn writes are visible to the D3D11 consumer.
+  /// Returns 0 if unsupported, or 0xDEAD000N codes on failure.
+  int debugReadFirstPixel() => 0;
+
+  /// Debug-only: read the first pixel via Dawn's CopyTextureToBuffer + map.
+  int debugReadFirstPixelDawn() => 0;
+
+  void destroy();
 }
 
 abstract class PlatformComputeShader {

@@ -1,5 +1,9 @@
 #include "../include/minigpu.h"
 #include "../include/log.h"
+#ifdef _WIN32
+#include <dxgi1_4.h>
+#pragma comment(lib, "dxgi.lib")
+#endif
 #ifdef __cplusplus
 using namespace mgpu;
 extern "C" {
@@ -528,6 +532,56 @@ void mgpuWriteAsyncFloat(MGPUBuffer *buffer, const float *data,
     }
   }
 }
+
+// Returns the current dedicated VRAM usage in bytes for the first non-software
+// GPU adapter, using DXGI1_4 QueryVideoMemoryInfo.  Returns -1 on platforms
+// where this query is unsupported or fails.
+int64_t mgpuQueryVramBytes() {
+#ifdef _WIN32
+  IDXGIFactory1 *pFactory = nullptr;
+  HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&pFactory);
+  if (FAILED(hr) || !pFactory) return -1;
+
+  int64_t result = -1;
+  for (UINT adapterIdx = 0;; adapterIdx++) {
+    IDXGIAdapter1 *pAdapter1 = nullptr;
+    if (pFactory->EnumAdapters1(adapterIdx, &pAdapter1) ==
+        DXGI_ERROR_NOT_FOUND)
+      break;
+
+    DXGI_ADAPTER_DESC1 desc;
+    pAdapter1->GetDesc1(&desc);
+
+    // Skip Microsoft Basic Render Driver (software fallback)
+    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+      pAdapter1->Release();
+      continue;
+    }
+
+    IDXGIAdapter3 *pAdapter3 = nullptr;
+    hr = pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3),
+                                   (void **)&pAdapter3);
+    pAdapter1->Release();
+
+    if (SUCCEEDED(hr) && pAdapter3) {
+      DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+      hr = pAdapter3->QueryVideoMemoryInfo(
+          0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info);
+      pAdapter3->Release();
+      if (SUCCEEDED(hr)) {
+        result = static_cast<int64_t>(info.CurrentUsage);
+      }
+      break; // use first non-software adapter
+    }
+  }
+
+  pFactory->Release();
+  return result;
+#else
+  return -1;
+#endif
+}
+
 #ifdef __cplusplus
 }
 #endif // extern "C"

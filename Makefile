@@ -8,12 +8,14 @@ ifeq ($(OS),Windows_NT)
 	RMDIR_CMD := rmdir /s /q
 	MKDIR_CMD := mkdir
 	SLASH := \\
+	CP_CMD := copy /Y
 else
 	DETECTED_OS := $(shell uname)
 	DEL_CMD := rm -rf
 	RMDIR_CMD := rm -rf
 	MKDIR_CMD := mkdir -p
 	SLASH := /
+	CP_CMD := cp
 endif
 
 PLATFORM_INTERFACE_DIR := ./minigpu_platform_interface/
@@ -68,15 +70,17 @@ ffigen:
 build_weblib:
 	@echo "Building ffi lib to web via emscripten..."
 	@cd $(BUILD_WEB_DIR) && emcmake cmake .. -DCMAKE_TOOLCHAIN_FILE=$(EMSDK)/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake && cmake --build .
+	@$(MAKE) copy_weblib
+
+copy_weblib:
+	@echo "Copying web artifacts to minigpu_web/lib/web/ for publishing..."
+	@$(CP_CMD) $(BUILD_WEB_DIR)minigpu_web.js  $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.js
+	@$(CP_CMD) $(BUILD_WEB_DIR)minigpu_web.wasm $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.wasm
+	@echo "  copied minigpu_web.js and minigpu_web.wasm"
 
 build_ffilib:
 	@echo "Building ffi lib to native via emscripten..."
 	@cd $(BUILD_DIR) && cmake cmake .. --fresh && cmake --build .
-
-clean_weblib:
-	@echo "Cleaning web lib dir..."
-	@$(DEL_CMD) "$(BUILD_WEB_DIR)*"
-	@$(RMDIR_CMD) "$(BUILD_WEB_DIR)*"
 
 clean_ffilib:
 	@echo "Cleaning lib dir..."
@@ -98,7 +102,8 @@ help:
 	@echo *  make run_device: Runs the example project on chosen device."
 	@echo *  make run_web: Runs the web example project."
 	@echo *  make ffigen: Generates dart ffi bindings."
-	@echo *  make build_weblib: Builds the ffi lib to web via emscripten."
+	@echo *  make build_weblib: Builds the ffi lib to web via emscripten + copies artifacts to lib/web/."
+	@echo *  make copy_weblib: Copies pre-built wasm artifacts from build_web/ to minigpu_web/lib/web/ for publishing."
 	@echo *  make build_ffilib: Builds the ffi lib to native."
 	@echo *  make clean_weblib: Cleans the web lib."
 	@echo *  make clean_ffilib: Cleans the native lib."

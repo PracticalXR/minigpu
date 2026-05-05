@@ -1048,3 +1048,36 @@ void mgpuWriteDouble(MGPUBuffer buffer, Float64List inputData, int size) {
     _free(ptr);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Web video texture — GPUDevice.importExternalTexture
+// ---------------------------------------------------------------------------
+// The VideoFrame JS object is passed as a JSAny handle.
+// GPUExternalTexture is valid only for the current task (microtask boundary).
+
+@JS()
+@staticInterop
+class GPUDevice {}
+
+extension GPUDeviceImport on GPUDevice {
+  external JSObject importExternalTexture(JSObject descriptor);
+}
+
+// The JS global 'gpuDevice' must be set by the app before calling
+// mgpuImportVideoFrameWeb(). In a Flutter Web app this is the
+// device retrieved from gpu_pipeline or a direct WebGPU init.
+@JS('gpuDevice')
+external GPUDevice? get jsGpuDevice;
+
+/// Import a VideoFrame (WebCodecs) as a GPUExternalTexture.
+/// Returns null if gpuDevice is not set or the browser rejects the import.
+JSObject? mgpuImportExternalTexture(JSAny videoFrame) {
+  final dev = jsGpuDevice;
+  if (dev == null) return null;
+  final desc = {'source': videoFrame}.toJSDeep as JSObject;
+  try {
+    return dev.importExternalTexture(desc);
+  } catch (_) {
+    return null;
+  }
+}

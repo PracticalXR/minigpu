@@ -3,6 +3,7 @@
 
 #include "export.h"
 #include "stdint.h"
+#include "minigpu_external.h"
 #ifdef __cplusplus
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
@@ -118,6 +119,9 @@ EXPORT void mgpuWriteFloat(MGPUBuffer *buffer, const float *inputData,
                                    size_t byteSize);
 EXPORT void mgpuWriteDouble(MGPUBuffer *buffer, const double *inputData,
                                     size_t byteSize);
+// Returns dedicated VRAM usage in bytes for the primary GPU (DXGI on Windows).
+// Returns -1 on unsupported platforms or if the query fails.
+EXPORT int64_t mgpuQueryVramBytes();
 #ifdef __cplusplus
 }
 #endif

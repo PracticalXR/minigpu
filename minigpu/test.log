@@ -1,0 +1,522 @@
+Running build hooks...[FINER] : Looking for Visual Studio Locator in [C:/Program Files \(x86\)/Microsoft Visual Studio/Installer/vswhere.exe, C:/Program Files/Microsoft Visual Studio/Installer/vswhere.exe].
+
+[FINE] : Found [ToolInstance(Visual Studio Locator, null, file:///C:/Program%20Files%20(x86)/Microsoft%20Visual%20Studio/Installer/vswhere.exe)].
+
+[FINER] : Looking up version with --version for ToolInstance(Visual Studio Locator, null, file:///C:/Program%20Files%20(x86)/Microsoft%20Visual%20Studio/Installer/vswhere.exe).
+
+[INFO] : Running `C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`.
+
+[FINE] : Visual Studio Locator version 3.1.7+f39851e70f [query version 3.12.2140.44225]
+Copyright (C) Microsoft Corporation. All rights reserved.
+
+instanceId: 0f1ad02a
+installDate: 12/3/2022 10:49:44 AM
+installationName: VisualStudio/17.12.4+35707.178
+installationPath: C:\Program Files\Microsoft Visual Studio\2022\Community
+installationVersion: 17.12.35707.178
+productId: Microsoft.VisualStudio.Product.Community
+productPath: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\devenv.exe
+state: 4294967295
+isComplete: 1
+isLaunchable: 1
+isPrerelease: 0
+isRebootRequired: 0
+displayName: Visual Studio Community 2022
+description: Powerful IDE, free for students, open-source contributors, and individuals
+channelId: VisualStudio.17.Release
+channelUri: https://aka.ms/vs/17/release/channel
+enginePath: C:\Program Files (x86)\Microsoft Visual Studio\Installer\resources\app\ServiceHub\Services\Microsoft.VisualStudio.Setup.Service
+installedChannelId: VisualStudio.17.Release
+installedChannelUri: https://aka.ms/vs/17/release/channel
+releaseNotes: https://docs.microsoft.com/en-us/visualstudio/releases/2022/release-notes-v17.12#17.12.4
+resolvedInstallationPath: C:\Program Files\Microsoft Visual Studio\2022\Community
+thirdPartyNotices: https://go.microsoft.com/fwlink/?LinkId=661288
+updateDate: 2025-01-28T19:40:44.9094785Z
+catalog_buildBranch: d17.12
+catalog_buildVersion: 17.12.35707.178
+catalog_id: VisualStudio/17.12.4+35707.178
+catalog_localBuild: build-lab
+catalog_manifestName: VisualStudio
+catalog_manifestType: installer
+catalog_productDisplayVersion: 17.12.4
+catalog_productLine: Dev17
+catalog_productLineVersion: 2022
+catalog_productMilestone: RTW
+catalog_productMilestoneIsPreRelease: False
+catalog_productName: Visual Studio
+catalog_productPatchVersion: 4
+catalog_productPreReleaseMilestoneSuffix: 1.0
+catalog_productSemanticVersion: 17.12.4+35707.178
+catalog_requiredEngineVersion: 3.12.2320.19252
+properties_campaignId: 
+properties_channelManifestId: VisualStudio.17.Release/17.12.4+35707.178
+properties_nickname: 
+properties_setupEngineFilePath: C:\Program Files (x86)\Microsoft Visual Studio\Installer\setup.exe
+
+instanceId: 9b0d69a2
+installDate: 3/4/2023 5:47:22 PM
+installationName: VisualStudio/16.11.24+33328.57
+installationPath: C:\Program Files (x86)\Microsoft Visual Studio\2019\Community
+installationVersion: 16.11.33328.57
+productId: Microsoft.VisualStudio.Product.Community
+productPath: C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\Common7\IDE\devenv.exe
+state: 4294967295
+isComplete: 1
+isLaunchable: 1
+isPrerelease: 0
+isRebootRequired: 0
+displayName: Visual Studio Community 2019
+description: Powerful IDE, free for students, open-source contributors, and individuals
+channelId: VisualStudio.16.Release
+channelUri: https://aka.ms/vs/16/release/channel
+enginePath: C:\Program Files (x86)\Microsoft Visual Studio\Installer\resources\app\ServiceHub\Services\Microsoft.VisualStudio.Setup.Service
+installedChannelId: VisualStudio.16.Release
+installedChannelUri: https://aka.ms/vs/16/release/channel
+releaseNotes: https://docs.microsoft.com/en-us/visualstudio/releases/2019/release-notes-v16.11#16.11.24
+resolvedInstallationPath: C:\Program Files (x86)\Microsoft Visual Studio\2019\Community
+thirdPartyNotices: https://go.microsoft.com/fwlink/?LinkId=660909
+updateDate: 2023-03-04T23:47:22.9126695Z
+catalog_buildBranch: d16.11
+catalog_buildVersion: 16.11.33328.57
+catalog_id: VisualStudio/16.11.24+33328.57
+catalog_localBuild: build-lab
+catalog_manifestName: VisualStudio
+catalog_manifestType: installer
+catalog_productDisplayVersion: 16.11.24
+catalog_productLine: Dev16
+catalog_productLineVersion: 2019
+catalog_productMilestone: RTW
+catalog_productMilestoneIsPreRelease: False
+catalog_productName: Visual Studio
+catalog_productPatchVersion: 24
+catalog_productPreReleaseMilestoneSuffix: 1.0
+catalog_productSemanticVersion: 16.11.24+33328.57
+catalog_requiredEngineVersion: 2.11.72.18200
+properties_campaignId: 
+properties_channelManifestId: VisualStudio.16.Release/16.11.24+33328.57
+properties_nickname: 
+properties_setupEngineFilePath: C:\Program File
+
+[FINE] : s (x86)\Microsoft Visual Studio\Installer\setup.exe
+
+
+[FINE] : Found version for ToolInstance(Visual Studio Locator, 3.1.7+f39851e70f, file:///C:/Program%20Files%20(x86)/Microsoft%20Visual%20Studio/Installer/vswhere.exe). 3.1.7+f39851e70f
+
+[INFO] : Running `C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe -format json -utf8 -products *`.
+
+[FINE] : [
+  {
+    "instanceId": "0f1ad02a",
+    "installDate": "2022-12-03T16:49:44Z",
+    "installationName": "VisualStudio/17.12.4+35707.178",
+    "installationPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community",
+    "installationVersion": "17.12.35707.178",
+    "productId": "Microsoft.VisualStudio.Product.Community",
+    "productPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe",
+    "state": 4294967295,
+    "isComplete": true,
+    "isLaunchable": true,
+    "isPrerelease": false,
+    "isRebootRequired": false,
+    "displayName": "Visual Studio Community 2022",
+    "description": "Powerful IDE, free for students, open-source contributors, and individuals",
+    "channelId": "VisualStudio.17.Release",
+    "channelUri": "https://aka.ms/vs/17/release/channel",
+    "engineP
+
+[FINE] : ath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service",
+    "installedChannelId": "VisualStudio.17.Release",
+    "installedChannelUri": "https://aka.ms/vs/17/release/channel",
+    "releaseNotes": "https://docs.microsoft.com/en-us/visualstudio/releases/2022/release-notes-v17.12#17.12.4",
+    "resolvedInstallationPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community",
+    "thirdPartyNotices": "https://go.microsoft.com/fwlink/?LinkId=661288",
+    "updateDate": "2025-01-28T19:40:44.9094785Z",
+    "catalog": {
+      "buildBranch": "d17.12",
+      "buildVersion": "17.12.35707.178",
+      "id": "VisualStudio/17.12.4+35707.178",
+      "localBuild": "build-lab",
+      "manifestName": "VisualStudio",
+      "manifestType": "installer",
+      "productDisplayVersion": "17.12.4",
+      "productLine": "Dev17",
+      "productLineVersion": "2022",
+      "productMilestone": "RTW",
+      "productMilestoneIsPreRelease": "False",
+      "productName": "Visual Studio",
+      "productPatchVersion": "4",
+      "productPreReleaseMilestoneSuffix": "1.0",
+      "productSemanticVersion": "17.12.4+35707.178",
+      "require
+
+[FINE] : dEngineVersion": "3.12.2320.19252"
+    },
+    "properties": {
+      "campaignId": "",
+      "channelManifestId": "VisualStudio.17.Release/17.12.4+35707.178",
+      "nickname": "",
+      "setupEngineFilePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\setup.exe"
+    }
+  },
+  {
+    "instanceId": "9b0d69a2",
+    "installDate": "2023-03-04T23:47:22Z",
+    "installationName": "VisualStudio/16.11.24+33328.57",
+    "installationPath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community",
+    "installationVersion": "16.11.33328.57",
+    "productId": "Microsoft.VisualStudio.Product.Community",
+    "productPath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community\\Common7\\IDE\\devenv.exe",
+    "state": 4294967295,
+    "isComplete": true,
+    "isLaunchable": true,
+    "isPrereleas
+
+[FINE] : e": false,
+    "isRebootRequired": false,
+    "displayName": "Visual Studio Community 2019",
+    "description": "Powerful IDE, free for students, open-source contributors, and individuals",
+    "channelId": "VisualStudio.16.Release",
+    "channelUri": "https://aka.ms/vs/16/release/channel",
+    "enginePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service",
+    "installedChannelId": "VisualStudio.16.Release",
+    "installedChannelUri": "https://aka.ms/vs/16/release/channel",
+    "releaseNotes": "https://docs.microsoft.com/en-us/visualstudio/releases/2019/release-notes-v16.11#16.11.24",
+    "resolvedInstallationPath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Community",
+    "thirdPartyNotices": "https://go.microsoft.com/fwlink/?LinkId=660909",
+    "updateDate": "2023-03-04T23:47:22.9126695Z",
+    "catalog": {
+      "buildBranch": "d16.11",
+      "buildVersion": "16.11.33328.57",
+      "id": "VisualStudio/16.11.24+33328.57",
+      "localBuild": "build-lab",
+      "manifestName": "VisualStudio",
+      "manifestType": "installer",
+      "productDisplayVersion": "16.11.24",
+      "productLine": "Dev
+
+[FINE] : 16",
+      "productLineVersion": "2019",
+      "productMilestone": "RTW",
+      "productMilestoneIsPreRelease": "False",
+      "productName": "Visual Studio",
+      "productPatchVersion": "24",
+      "productPreReleaseMilestoneSuffix": "1.0",
+      "productSemanticVersion": "16.11.24+33328.57",
+      "requiredEngineVersion": "2.11.72.18200"
+    },
+    "properties": {
+      "campaignId": "",
+      "channelManifestId": "VisualStudio.16.Release/16.11.24+33328.57",
+      "nickname": "",
+      "setupEngineFilePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\setup.exe"
+    }
+  }
+]
+
+
+[FINE] : Found ToolInstance(Visual Studio, 17.12.4+35707.178, file:///C:/Program%20Files/Microsoft%20Visual%20Studio/2022/Community/).
+
+[FINE] : Found ToolInstance(Visual Studio, 16.11.24+33328.57, file:///C:/Program%20Files%20(x86)/Microsoft%20Visual%20Studio/2019/Community/).
+
+[FINER] : Looking for vcvars64.bat relative to [ToolInstance(Visual Studio, 17.12.4+35707.178, file:///C:/Program%20Files/Microsoft%20Visual%20Studio/2022/Community/), ToolInstance(Visual Studio, 16.11.24+33328.57, file:///C:/Program%20Files%20(x86)/Microsoft%20Visual%20Studio/2019/Community/)] with VC/Auxiliary/Build/vcvars64.bat.
+
+[FINE] : Found [ToolInstance(vcvars64.bat, null, file:///C:/Program%20Files/Microsoft%20Visual%20Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat)].
+
+[INFO] : Environment variables from Tool(vcvars64.bat): {CommandPromptType: Native, DevEnvDir: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\, EXTERNAL_INCLUDE: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um, Framework40Version: v4.0, FrameworkDir: C:\Windows\Microsoft.NET\Framework64\, FrameworkDir64: C:\Windows\Microsoft.NET\Framework64\, FrameworkVersion: v4.0.30319, FrameworkVersion64: v4.0.30319, INCLUDE: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um, is_x64_arch: true, LIB: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\lib\um\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.22621.0\\um\x64, LIBPATH: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319, NETFXSDKDir: C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\, PATH: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\VCPackages;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer;C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\bin\Roslyn;C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\;C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector;C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\;D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg, Platform: x64, UCRTVersion: 10.0.22621.0, UniversalCRTSdkDir: C:\Program Files (x86)\Windows Kits\10\, VCIDEInstallDir: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\, VCINSTALLDIR: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\, VCPKG_ROOT: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg, VCToolsInstallDir: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\, VCToolsRedistDir: C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\, VCToolsVersion: 14.40.33807, VisualStudioVersion: 17.0, VS170COMNTOOLS: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\, VSCMD_ARG_app_plat: Desktop, VSCMD_ARG_HOST_ARCH: x64, VSCMD_ARG_TGT_ARCH: x64, VSCMD_VER: 17.0, VSINSTALLDIR: C:\Program Files\Microsoft Visual Studio\2022\Community\, WindowsLibPath: C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0, WindowsSdkBinPath: C:\Program Files (x86)\Windows Kits\10\bin\, WindowsSdkDir: C:\Program Files (x86)\Windows Kits\10\, WindowsSDKLibVersion: 10.0.22621.0\, WindowsSdkVerBinPath: C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\, WindowsSDKVersion: 10.0.22621.0\, WindowsSDK_ExecutablePath_x64: C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\, WindowsSDK_ExecutablePath_x86: C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\, __DOTNET_ADD_64BIT: 1, __DOTNET_PREFERRED_BITNESS: 64, __VSCMD_PREINIT_PATH: D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64}
+
+[FINER] : Looking for CMake in [C:\Users\yogii\AppData\Local\Android\Sdk/cmake/*/bin/cmake.exe, $HOME/AppData/Local/Android/Sdk/cmake/*/bin/cmake.exe].
+
+[FINE] : Found [ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe), ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe), ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe)].
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.18.1\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.18.1-g262b901-dirty
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.18.1-g262b901-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe). 3.18.1-g262b901-dirty
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.31.5\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.31.5
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.31.5, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe). 3.31.5
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.22.1\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.22.1-g37088a8-dirty
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.22.1-g37088a8-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe). 3.22.1-g37088a8-dirty
+
+[INFO] : Found Android CMake: ToolInstance(CMake, 3.18.1-g262b901-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe), ToolInstance(CMake, 3.31.5, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe), ToolInstance(CMake, 3.22.1-g37088a8-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe)
+
+[FINER] : Looking for CMake on PATH.
+
+[INFO] : Running `ANDROID_HOME=C:\Users\yogii\AppData\Local\Android\Sdk COMSPEC=C:\WINDOWS\SYSTEM32\cmd.exe PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\VCPackages;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer;C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\bin\Roslyn;C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\;C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector;C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\;D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC PROGRAMDATA=C:\ProgramData PROMPT=$P$G SYSTEMDRIVE=C: SYSTEMROOT=C:\WINDOWS TEMP=C:\Users\yogii\AppData\Local\Temp TMP=C:\Users\yogii\AppData\Local\Temp USERPROFILE=C:\Users\yogii WINDIR=C:\WINDOWS CommandPromptType=Native DevEnvDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\ EXTERNAL_INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um Framework40Version=v4.0 FrameworkDir=C:\Windows\Microsoft.NET\Framework64\ FrameworkDir64=C:\Windows\Microsoft.NET\Framework64\ FrameworkVersion=v4.0.30319 FrameworkVersion64=v4.0.30319 INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um is_x64_arch=true LIB=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\lib\um\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.22621.0\\um\x64 LIBPATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319 NETFXSDKDir=C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\ Platform=x64 UCRTVersion=10.0.22621.0 UniversalCRTSdkDir=C:\Program Files (x86)\Windows Kits\10\ VCIDEInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\ VCINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\ VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg VCToolsInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\ VCToolsRedistDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\ VCToolsVersion=14.40.33807 VisualStudioVersion=17.0 VS170COMNTOOLS=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\ VSCMD_ARG_app_plat=Desktop VSCMD_ARG_HOST_ARCH=x64 VSCMD_ARG_TGT_ARCH=x64 VSCMD_VER=17.0 VSINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\ WindowsLibPath=C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0 WindowsSdkBinPath=C:\Program Files (x86)\Windows Kits\10\bin\ WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\ WindowsSDKLibVersion=10.0.22621.0\ WindowsSdkVerBinPath=C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\ WindowsSDKVersion=10.0.22621.0\ WindowsSDK_ExecutablePath_x64=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\ WindowsSDK_ExecutablePath_x86=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\ __DOTNET_ADD_64BIT=1 __DOTNET_PREFERRED_BITNESS=64 __VSCMD_PREINIT_PATH=D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64 where cmake`.
+
+[FINE] : C:\Program Files\CMake\bin\cmake.exe
+
+[FINE] : 
+
+
+[FINE] : C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+
+[FINE] : 
+
+
+[FINE] : Found ToolInstance(CMake, null, file:///C:/Program%20Files/CMake/bin/cmake.exe).
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Program%20Files/CMake/bin/cmake.exe).
+
+[INFO] : Running `C:\Program Files\CMake\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.30.0
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe). 3.30.0
+
+[INFO] : Found System CMake: ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe)
+
+[INFO] : Found CMake: ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe)
+
+[INFO] : Running `(cd D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b44\; ANDROID_HOME=C:\Users\yogii\AppData\Local\Android\Sdk COMSPEC=C:\WINDOWS\SYSTEM32\cmd.exe PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\VCPackages;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer;C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\bin\Roslyn;C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\;C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector;C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\;D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC PROGRAMDATA=C:\ProgramData PROMPT=$P$G SYSTEMDRIVE=C: SYSTEMROOT=C:\WINDOWS TEMP=C:\Users\yogii\AppData\Local\Temp TMP=C:\Users\yogii\AppData\Local\Temp USERPROFILE=C:\Users\yogii WINDIR=C:\WINDOWS CommandPromptType=Native DevEnvDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\ EXTERNAL_INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um Framework40Version=v4.0 FrameworkDir=C:\Windows\Microsoft.NET\Framework64\ FrameworkDir64=C:\Windows\Microsoft.NET\Framework64\ FrameworkVersion=v4.0.30319 FrameworkVersion64=v4.0.30319 INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um is_x64_arch=true LIB=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\lib\um\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.22621.0\\um\x64 LIBPATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319 NETFXSDKDir=C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\ Platform=x64 UCRTVersion=10.0.22621.0 UniversalCRTSdkDir=C:\Program Files (x86)\Windows Kits\10\ VCIDEInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\ VCINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\ VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg VCToolsInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\ VCToolsRedistDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\ VCToolsVersion=14.40.33807 VisualStudioVersion=17.0 VS170COMNTOOLS=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\ VSCMD_ARG_app_plat=Desktop VSCMD_ARG_HOST_ARCH=x64 VSCMD_ARG_TGT_ARCH=x64 VSCMD_VER=17.0 VSINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\ WindowsLibPath=C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0 WindowsSdkBinPath=C:\Program Files (x86)\Windows Kits\10\bin\ WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\ WindowsSDKLibVersion=10.0.22621.0\ WindowsSdkVerBinPath=C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\ WindowsSDKVersion=10.0.22621.0\ WindowsSDK_ExecutablePath_x64=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\ WindowsSDK_ExecutablePath_x86=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\ __DOTNET_ADD_64BIT=1 __DOTNET_PREFERRED_BITNESS=64 __VSCMD_PREINIT_PATH=D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64 C:\Program Files\CMake\bin\cmake.exe --log-level=STATUS -S D:\Code\git\practical\gpu\minigpu\minigpu_ffi\src\ -B D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b44\ -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=AMD64 -A x64 )`.
+
+[FINE] : -- Building for: Visual Studio 17 2022
+
+
+[FINE] : -- Selecting Windows SDK version 10.0.22621.0 to target Windows .
+
+
+[FINE] : -- The C compiler identification is MSVC 19.40.33818.0
+
+
+[FINE] : -- The CXX compiler identification is MSVC 19.40.33818.0
+
+
+[FINE] : -- Detecting C compiler ABI info
+
+
+[FINE] : -- Detecting C compiler ABI info - done
+
+
+[FINE] : -- Check for working C compiler: C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.40.33807/bin/Hostx86/x64/cl.exe - skipped
+
+
+[FINE] : -- Detecting C compile features
+
+
+[FINE] : -- Detecting C compile features - done
+
+
+[FINE] : -- Detecting CXX compiler ABI info
+
+
+[FINE] : -- Detecting CXX compiler ABI info - done
+
+
+[FINE] : -- Check for working CXX compiler: C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Tools/MSVC/14.40.33807/bin/Hostx86/x64/cl.exe - skipped
+
+
+[FINE] : -- Detecting CXX compile features
+
+
+[FINE] : -- Detecting CXX compile features - done
+
+
+[FINE] : -- Dawn: target OS=win, arch=x86_64, build dir=D:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/external/dawn/build_win_x86_64
+
+
+[FINE] : -- Attempting to find an existing Dawn build...
+
+
+[FINE] : -- Dawn build found on Windows. Debug: WEBGPU_DAWN_DEBUG-NOTFOUND, Release: D:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/external/dawn/build_win_x86_64/src/dawn/native/Release/webgpu_dawn.lib
+-- Dawn build found on Windows.
+
+
+[FINE] : -- minigpu: target OS=win, arch=x86_64, out=D:/Code/git/practical/gpu/minigpu/minigpu/.dart_tool/hooks_runner/shared/minigpu_ffi/build/8e04c28b44/out_win_x86_64
+
+
+[FINE] : -- Configuring done (11.8s)
+
+
+[FINE] : -- Generating done (0.1s)
+
+
+[SEVERE] : CMake Warning:
+
+
+[SEVERE] :   Manually-specified variables were not used by the project:
+
+    CMAKE_BUILD_TYPE
+
+
+
+
+[FINE] : -- Build files have been written to: D:/Code/git/practical/gpu/minigpu/minigpu/.dart_tool/hooks_runner/shared/minigpu_ffi/build/8e04c28b44
+
+
+[FINER] : Looking for CMake in [C:\Users\yogii\AppData\Local\Android\Sdk/cmake/*/bin/cmake.exe, $HOME/AppData/Local/Android/Sdk/cmake/*/bin/cmake.exe].
+
+[FINE] : Found [ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe), ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe), ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe)].
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.18.1\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.18.1-g262b901-dirty
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.18.1-g262b901-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe). 3.18.1-g262b901-dirty
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.31.5\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.31.5
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.31.5, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe). 3.31.5
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe).
+
+[INFO] : Running `C:\Users\yogii\AppData\Local\Android\Sdk\cmake\3.22.1\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.22.1-g37088a8-dirty
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.22.1-g37088a8-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe). 3.22.1-g37088a8-dirty
+
+[INFO] : Found Android CMake: ToolInstance(CMake, 3.18.1-g262b901-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.18.1/bin/cmake.exe), ToolInstance(CMake, 3.31.5, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.31.5/bin/cmake.exe), ToolInstance(CMake, 3.22.1-g37088a8-dirty, file:///C:/Users/yogii/AppData/Local/Android/Sdk/cmake/3.22.1/bin/cmake.exe)
+
+[FINER] : Looking for CMake on PATH.
+
+[INFO] : Running `ANDROID_HOME=C:\Users\yogii\AppData\Local\Android\Sdk COMSPEC=C:\WINDOWS\SYSTEM32\cmd.exe PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\VCPackages;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer;C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\bin\Roslyn;C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\;C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector;C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\;D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC PROGRAMDATA=C:\ProgramData PROMPT=$P$G SYSTEMDRIVE=C: SYSTEMROOT=C:\WINDOWS TEMP=C:\Users\yogii\AppData\Local\Temp TMP=C:\Users\yogii\AppData\Local\Temp USERPROFILE=C:\Users\yogii WINDIR=C:\WINDOWS CommandPromptType=Native DevEnvDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\ EXTERNAL_INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um Framework40Version=v4.0 FrameworkDir=C:\Windows\Microsoft.NET\Framework64\ FrameworkDir64=C:\Windows\Microsoft.NET\Framework64\ FrameworkVersion=v4.0.30319 FrameworkVersion64=v4.0.30319 INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um is_x64_arch=true LIB=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\lib\um\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.22621.0\\um\x64 LIBPATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319 NETFXSDKDir=C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\ Platform=x64 UCRTVersion=10.0.22621.0 UniversalCRTSdkDir=C:\Program Files (x86)\Windows Kits\10\ VCIDEInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\ VCINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\ VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg VCToolsInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\ VCToolsRedistDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\ VCToolsVersion=14.40.33807 VisualStudioVersion=17.0 VS170COMNTOOLS=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\ VSCMD_ARG_app_plat=Desktop VSCMD_ARG_HOST_ARCH=x64 VSCMD_ARG_TGT_ARCH=x64 VSCMD_VER=17.0 VSINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\ WindowsLibPath=C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0 WindowsSdkBinPath=C:\Program Files (x86)\Windows Kits\10\bin\ WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\ WindowsSDKLibVersion=10.0.22621.0\ WindowsSdkVerBinPath=C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\ WindowsSDKVersion=10.0.22621.0\ WindowsSDK_ExecutablePath_x64=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\ WindowsSDK_ExecutablePath_x86=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\ __DOTNET_ADD_64BIT=1 __DOTNET_PREFERRED_BITNESS=64 __VSCMD_PREINIT_PATH=D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64 where cmake`.
+
+[FINE] : C:\Program Files\CMake\bin\cmake.exe
+
+[FINE] : 
+
+
+[FINE] : C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
+
+
+[FINE] : Found ToolInstance(CMake, null, file:///C:/Program%20Files/CMake/bin/cmake.exe).
+
+[FINER] : Looking up version with --version for ToolInstance(CMake, null, file:///C:/Program%20Files/CMake/bin/cmake.exe).
+
+[INFO] : Running `C:\Program Files\CMake\bin\cmake.exe --version`.
+
+[FINE] : cmake version 3.30.0
+
+
+[FINE] : 
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+
+
+[FINE] : Found version for ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe). 3.30.0
+
+[INFO] : Found System CMake: ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe)
+
+[INFO] : Found CMake: ToolInstance(CMake, 3.30.0, file:///C:/Program%20Files/CMake/bin/cmake.exe)
+
+[INFO] : Running `(cd D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b44\; ANDROID_HOME=C:\Users\yogii\AppData\Local\Android\Sdk COMSPEC=C:\WINDOWS\SYSTEM32\cmd.exe PATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\HostX64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\VCPackages;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TestWindow;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\TeamFoundation\Team Explorer;C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\bin\Roslyn;C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\;C:\Program Files\Microsoft Visual Studio\2022\Community\Team Tools\DiagnosticsHub\Collector;C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\\x64;C:\Program Files (x86)\Windows Kits\10\bin\\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\\MSBuild\Current\Bin\amd64;C:\Windows\Microsoft.NET\Framework64\v4.0.30319;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\;D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\Linux\bin\ConnectionManagerExe;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg PATHEXT=.COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC PROGRAMDATA=C:\ProgramData PROMPT=$P$G SYSTEMDRIVE=C: SYSTEMROOT=C:\WINDOWS TEMP=C:\Users\yogii\AppData\Local\Temp TMP=C:\Users\yogii\AppData\Local\Temp USERPROFILE=C:\Users\yogii WINDIR=C:\WINDOWS CommandPromptType=Native DevEnvDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\ EXTERNAL_INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um Framework40Version=v4.0 FrameworkDir=C:\Windows\Microsoft.NET\Framework64\ FrameworkDir64=C:\Windows\Microsoft.NET\Framework64\ FrameworkVersion=v4.0.30319 FrameworkVersion64=v4.0.30319 INCLUDE=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\include;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\VS\include;C:\Program Files (x86)\Windows Kits\10\include\10.0.22621.0\ucrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\um;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\shared;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\winrt;C:\Program Files (x86)\Windows Kits\10\\include\10.0.22621.0\\cppwinrt;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\include\um is_x64_arch=true LIB=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\lib\um\x64;C:\Program Files (x86)\Windows Kits\10\lib\10.0.22621.0\ucrt\x64;C:\Program Files (x86)\Windows Kits\10\\lib\10.0.22621.0\\um\x64 LIBPATH=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\lib\x86\store\references;C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0;C:\Windows\Microsoft.NET\Framework64\v4.0.30319 NETFXSDKDir=C:\Program Files (x86)\Windows Kits\NETFXSDK\4.7.1\ Platform=x64 UCRTVersion=10.0.22621.0 UniversalCRTSdkDir=C:\Program Files (x86)\Windows Kits\10\ VCIDEInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\VC\ VCINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\ VCPKG_ROOT=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\vcpkg VCToolsInstallDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\ VCToolsRedistDir=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC\14.42.34433\ VCToolsVersion=14.40.33807 VisualStudioVersion=17.0 VS170COMNTOOLS=C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\ VSCMD_ARG_app_plat=Desktop VSCMD_ARG_HOST_ARCH=x64 VSCMD_ARG_TGT_ARCH=x64 VSCMD_VER=17.0 VSINSTALLDIR=C:\Program Files\Microsoft Visual Studio\2022\Community\ WindowsLibPath=C:\Program Files (x86)\Windows Kits\10\UnionMetadata\10.0.22621.0;C:\Program Files (x86)\Windows Kits\10\References\10.0.22621.0 WindowsSdkBinPath=C:\Program Files (x86)\Windows Kits\10\bin\ WindowsSdkDir=C:\Program Files (x86)\Windows Kits\10\ WindowsSDKLibVersion=10.0.22621.0\ WindowsSdkVerBinPath=C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\ WindowsSDKVersion=10.0.22621.0\ WindowsSDK_ExecutablePath_x64=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\x64\ WindowsSDK_ExecutablePath_x86=C:\Program Files (x86)\Microsoft SDKs\Windows\v10.0A\bin\NETFX 4.7.1 Tools\ __DOTNET_ADD_64BIT=1 __DOTNET_PREFERRED_BITNESS=64 __VSCMD_PREINIT_PATH=D:\src\flutter\bin\;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\debugCommand;c:\Users\yogii\AppData\Roaming\Code\User\globalStorage\github.copilot-chat\copilotCli;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64;C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin;C:\Program Files (x86)\VMware\VMware Workstation\bin\;C:\Python312\Scripts\;C:\Python312\;C:\Program Files (x86)\Razer\ChromaBroadcast\bin;C:\Program Files\Razer\ChromaBroadcast\bin;C:\Windows\system32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\;C:\Windows\System32\OpenSSH\;C:\Program Files\dotnet\;C:\Windows\system32\config\systemprofile\AppData\Local\Microsoft\WindowsApps;C:\Program Files\Git\cmd;C:\Program Files (x86)\Gpg4win\..\GnuPG\bin;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Program Files\GitHub CLI\;C:\Program Files (x86)\NVIDIA Corporation\PhysX\Common;D:\src\zig;C:\ProgramData\chocolatey\bin;C:\Program Files (x86)\Windows Kits\10\Windows Performance Toolkit\;C:\Program Files\CMake\bin;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin;C:\Python27;C:\Python27\Scripts;C:\Program Files\MongoDB\Tools\100\bin;C:\Program Files\nodejs\;C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\AppData\Local\Android\Sdk\platform-tools;C:\Program Files\OpenSSL-Win64\bin;C:\Program Files\NVIDIA Corporation\Nsight Compute 2025.4.1\;D:\Code\git\clones\emsdk;D:\Code\git\clones\emsdk\upstream\emscripten;C:\Users\yogii\AppData\Local\Programs\Python\Python311\Scripts\;C:\Users\yogii\AppData\Local\Programs\Python\Python311\;C:\Users\yogii\scoop\shims;C:\Users\yogii\.cargo\bin;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code Insiders\bin;C:\Users\yogii\AppData\Local\Programs\Microsoft VS Code\bin;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Local\GitHubDesktop\bin;C:\Users\yogii\AppData\Roaming\nvm;C:\Program Files\nodejs;C:\Users\yogii\.deno\bin;C:\Users\yogii\AppData\Local\Microsoft\WinGet\Links;C:\Users\yogii\AppData\Local\Programs\mongosh\;C:\Users\yogii\.dotnet\tools;C:\Users\yogii\AppData\Roaming\npm;C:\Users\yogii\AppData\Local\Microsoft\WindowsApps;D:\src\flutter\bin;C:\Users\yogii\AppData\Local\Pub\Cache\bin;C:\Users\yogii\AppData\Local\Android\Sdk\ndk\28.0.13004108;C:\Users\yogii\.jdks\corretto-19.0.2\bin;;C:\Users\yogii\.fly\bin;c:\Users\yogii\.vscode\extensions\ms-python.debugpy-2025.14.1-win32-x64\bundled\scripts\noConfigScripts;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64;C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.40.33807\bin\Hostx64\x64 C:\Program Files\CMake\bin\cmake.exe --build D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b44\ --config Release --target minigpu_ffi )`.
+
+[FINE] : MSBuild version 17.12.12+1cce77968 for .NET Framework
+
+
+[FINE] : 
+
+
+[FINE] :   1>Checking Build System
+
+
+[FINE] :   Building Custom Rule D:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/CMakeLists.txt
+
+
+[FINE] :   buffer.cpp
+
+
+[FINE] : D:\Code\git\practical\gpu\minigpu\minigpu_ffi\src\src\buffer.cpp(1046,29): warning C4805: '!=': unsafe mix of type 'WGPUBool' and type 'bool' in operation [D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b4
+
+[FINE] : 4\minigpu_ffi.vcxproj]
+
+
+[FINE] :       D:\Code\git\practical\gpu\minigpu\minigpu_ffi\src\src\buffer.cpp(1046,29):
+      the template instantiation context (the oldest one first) is
+          D:\Code\git\practical\gpu\minigpu\minigpu_ffi\src\src\buffer.cpp(678,3):
+          see referenc
+
+[FINE] : e to function template instantiation 'void mgpu::Buffer::readDirect<float>(T *,size_t,size_t)' being compiled
+          with
+          [
+              T=float
+          ]
+  
+
+
+[FINE] :   compute_shader.cpp
+
+
+[FINE] :   conversion_kernels.cpp
+
+
+[FINE] :   minigpu.cpp
+
+
+[FINE] :   minigpu_external.cpp
+
+
+[FINE] :      Creating library D:/Code/git/practical/gpu/minigpu/minigpu/.dart_tool/hooks_runner/shared/minigpu_ffi/build/8e04c28b44/out_win_x86_64/lib/minigpu_ffi.lib and object D:/Code/git/practical/gpu/minigpu/minigpu/.dart_tool/hooks_runner/shared/minigpu_ffi/b
+
+[FINE] : uild/8e04c28b44/out_win_x86_64/lib/minigpu_ffi.exp
+
+
+[FINE] :   Generating code
+
+
+[FINE] :   Finished generating code
+
+
+[FINE] :   minigpu_ffi.vcxproj -> D:\Code\git\practical\gpu\minigpu\minigpu\.dart_tool\hooks_runner\shared\minigpu_ffi\build\8e04c28b44\out_win_x86_64\bin\minigpu_ffi.dll
+
+
+[INFO] build: Added file: file:///D:/Code/git/practical/gpu/minigpu/minigpu/.dart_tool/hooks_runner/shared/minigpu_ffi/build/8e04c28b44/out_win_x86_64/bin/minigpu_ffi.dll
+
+[INFO] build: Added file: file:///D:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/external/dawn/build_win_x86_64/Release/webgpu_dawn.dll
+
+Running build hooks...00:00 +0: loading test/minigpu_test.dart
+00:00 +0: Minigpu Library Tests Context Initialization
+00:00 +1: Minigpu Library Tests Buffer creation and data transfer
+00:00 +2: Minigpu Library Tests Compute Shader: adds 0.2 to each element
+00:00 +3: All tests passed!

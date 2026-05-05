@@ -149,6 +149,8 @@ class Tensor<T extends TypedData> {
   /// Destroys the tensor's GPU buffer.
   void destroy() {
     _bufferFinalizer.detach(this);
+    activeShader?.destroy();
+    activeShader = null;
     buffer.destroy();
   }
 
