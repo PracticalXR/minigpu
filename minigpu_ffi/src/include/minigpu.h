@@ -19,6 +19,21 @@ extern "C" {
 typedef struct MGPUComputeShader MGPUComputeShader;
 typedef struct MGPUBuffer MGPUBuffer;
 typedef void (*MGPUCallback)(void);
+typedef void (*MGPULogCallback)(int level, const char* message);
+
+EXPORT void mgpuInitializeContext();
+EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);
+EXPORT void mgpuDestroyContext();
+/// Install a log callback. [callback] is invoked on the thread that produces
+/// the log line. Pass NULL to revert to the default stderr output.
+/// [level]: 0=DEBUG 1=INFO 2=WARN 3=ERROR  (-1 = silence all)
+EXPORT void mgpuSetLogCallback(MGPULogCallback callback);
+EXPORT void mgpuSetLogLevel(int level);
+/// Free a log message string returned via the log callback.
+/// The log callback passes a heap-allocated copy of each message so the
+/// pointer stays valid until the asynchronous Dart listener reads it.
+/// Dart MUST call this after consuming the string.
+EXPORT void mgpuFreeLogMessage(const char* msg);
 
 EXPORT void mgpuInitializeContext();
 EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);

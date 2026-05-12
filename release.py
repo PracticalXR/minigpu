@@ -362,7 +362,7 @@ def add_message_to_current_version(file_path, message):
     content = content.strip() + '\n'
     save_changelog(file_path, content)
 
-PACKAGES = ["minigpu", "minigpu_platform_interface", "minigpu_ffi", "minigpu_web", "gpu_tensor"]
+PACKAGES = ["minigpu", "minigpu_platform_interface", "minigpu_ffi", "minigpu_web", "gpu_tensor", "minigpu_view", "gpu_pipeline", "minigpu_flutter"]
 
 def main_version_update(version, is_release, message):
     root_dir = os.path.dirname(os.path.abspath(__file__))

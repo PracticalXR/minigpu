@@ -1,0 +1,49 @@
+name: minigpu_view
+description: Zero-copy Flutter rendering for minigpu SharedOutputTexture and miniav GPU buffers.
+version: 1.4.7
+environment:
+  sdk: ^3.11.4
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
+  plugin_platform_interface: ^2.1.8
+  meta: ^1.16.0
+
+  # Core minigpu — required for SharedOutputTexture adapter.
+  minigpu: 1.4.7
+  minigpu_platform_interface: 1.4.7
+
+  # miniav — required for MiniAVBuffer adapter.
+  # Uses a path override; version constraint is informational.
+  miniav: ^0.5.2
+
+  # Used by web plugin only; pulled in unconditionally because Dart-only
+  # web plugins cannot conditionally import native deps.
+  web: ^1.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^5.0.0
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: dev.minigpu.view
+        pluginClass: MinigpuViewPlugin
+      windows:
+        pluginClass: MinigpuViewPlugin
+      macos:
+        pluginClass: MinigpuViewPlugin
+      ios:
+        pluginClass: MinigpuViewPlugin
+      linux:
+        pluginClass: MinigpuViewPlugin
+      web:
+        pluginClass: MinigpuViewWebPlugin
+        fileName: src/web/minigpu_view_web.dart

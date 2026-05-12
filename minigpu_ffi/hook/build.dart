@@ -2,8 +2,8 @@ import 'package:code_assets/code_assets.dart';
 import 'package:hooks/hooks.dart';
 import 'package:logging/logging.dart';
 import 'package:native_toolchain_cmake/native_toolchain_cmake.dart';
+import 'package:path/path.dart' as p;
 
-// Needs web conditional import
 import 'dart:io';
 
 final sourceDir = Directory('./src');
@@ -12,22 +12,78 @@ void main(List<String> args) async {
   await build(args, (input, output) async {
     if (!input.config.buildCodeAssets) return;
 
-    Logger logger = Logger('build');
+    final logger = Logger('build');
+    _clearStaleCmakeCache(
+      input.outputDirectory,
+      sourceDir.absolute.uri,
+      logger,
+    );
     await runBuild(input, output, sourceDir.absolute.uri);
 
-    // Removed dangling expression and restrict Dawn search to arch/OS-specific dir.
     final minigpuLib = await output.findAndAddCodeAssets(
       input,
       names: {'minigpu_ffi': 'minigpu_ffi_bindings.dart'},
     );
 
-    final dawnNativeOutDir = _dawnNativeOutDir(input, sourceDir.absolute.uri);
+    final dawnSearchDirs = _dawnSearchDirs(input, sourceDir.absolute.uri);
     if (input.config.code.targetOS != OS.iOS) {
-      // Only search/runtime-package Dawn on platforms where it’s a shared library
+      // Find the pre-built Dawn shared library. We search multiple directories
+      // in priority order:
+      //   1. MINIGPU_DAWN_DIR env var (explicit override)
+      //   2. Platform AppData / data-home (shared across all projects)
+      //   3. Package-nested src/external/dawn/ (local dev fallback)
+      //
+      // Once found, copy it into input.outputDirectory alongside the built
+      // minigpu_ffi library, then register it as a code asset.
+      //
+      // Registering a CodeAsset whose file lives outside outputDirectory is not
+      // reliable -- some versions of the hooks runner only bundle files that
+      // originate from outputDirectory. Copying first guarantees the DLL ends
+      // up in the final app output.
+      final dawnDll = _findDawnDll(input, dawnSearchDirs, logger);
+      if (dawnDll == null) {
+        final searched = dawnSearchDirs
+            .map((u) => '  - ${Directory.fromUri(u).path}')
+            .join('\n');
+        final systemDir = _systemDawnRoot();
+        final osKey = _osKey(input);
+        final archKey = _archKey(
+          input.config.code.targetArchitecture,
+          input.config.code.targetOS,
+        );
+        throw StateError(
+          'webgpu_dawn shared library not found.\n'
+          'Searched:\n$searched\n\n'
+          'To fix, pre-build Dawn for '
+          '${input.config.code.targetOS}/${input.config.code.targetArchitecture}'
+          ' and place the output in one of:\n'
+          '  A) Set MINIGPU_DAWN_DIR=<dawn-root> (env var), then put the\n'
+          '     build_${osKey}_$archKey/ folder inside it.\n'
+          '  B) Copy build_${osKey}_$archKey/ to:\n'
+          '     ${systemDir != null ? p.join(systemDir, 'build_${osKey}_$archKey') : "(system dir unavailable)"}\n'
+          '  C) Place it at: '
+          '${sourceDir.absolute.uri.resolve('external/dawn/build_${osKey}_$archKey/').toFilePath()}',
+        );
+      }
+
+      // Copy into outputDirectory so the hooks runner bundles it reliably.
+      final destFile = File.fromUri(
+        input.outputDirectory.resolve(p.basename(dawnDll.path)),
+      );
+      if (!destFile.existsSync() ||
+          destFile.lastModifiedSync() != dawnDll.lastModifiedSync()) {
+        dawnDll.copySync(destFile.path);
+        logger.info('Copied ${dawnDll.path} -> ${destFile.path}');
+      }
+
+      // Declare the source DLL as a build dependency so the hook re-runs
+      // whenever Dawn is rebuilt.
+      output.dependencies.add(dawnDll.uri);
+
+      // Register both libraries as code assets from outputDirectory.
       final webgpuLib = await output.findAndAddCodeAssets(
         input,
         names: {'webgpu_dawn': 'webgpu_dawn.dart'},
-        outDir: dawnNativeOutDir,
       );
 
       final assets = <List<dynamic>>[minigpuLib, webgpuLib];
@@ -37,7 +93,7 @@ void main(List<String> args) async {
         }
       }
     } else {
-      // iOS: linked statically, nothing to add as an asset
+      // iOS: linked statically, nothing to add as an asset.
       for (final asset in minigpuLib) {
         logger.info('Added file: ${asset.file}');
       }
@@ -58,7 +114,6 @@ Future<void> runBuild(
       generator = Generator.ninja;
       break;
     case OS.iOS:
-      // Use Xcode so deployment target sticks
       generator = Generator.ninja;
       break;
     case OS.macOS:
@@ -75,7 +130,6 @@ Future<void> runBuild(
       break;
   }
 
-  // Map Dart arch to CMake arch for iOS
   String? cmakeArch;
   if (input.config.code.targetOS == OS.iOS) {
     final a = input.config.code.targetArchitecture;
@@ -97,6 +151,11 @@ Future<void> runBuild(
         'ENABLE_ARC': 'OFF',
       if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
         'CMAKE_OSX_ARCHITECTURES': cmakeArch,
+      // Always pass the system Dawn root so dawn.cmake never falls back to
+      // the pub-cache-nested path.  cmake receives this as -DDAWN_DIR=…
+      // before any in-file set() calls, guaranteeing the correct directory
+      // even when the cmake subprocess inherits a minimal environment.
+      if (_systemDawnRoot() case final dawnRoot?) 'DAWN_DIR': dawnRoot,
     },
   );
   await builder.run(
@@ -108,33 +167,112 @@ Future<void> runBuild(
   );
 }
 
-Uri _dawnNativeOutDir(BuildInput input, Uri srcDir) {
+/// Returns a prioritised list of directories to search for the pre-built Dawn
+/// shared library, for the current target OS + architecture:
+///
+///   1. `MINIGPU_DAWN_DIR` env var — set this to a "dawn root" that contains a
+///      `build_{os}_{arch}/` subdirectory.  Good for CI or custom builds.
+///   2. Platform AppData / data-home (`%LOCALAPPDATA%\minigpu\dawn` on Windows,
+///      `~/Library/Application Support/minigpu/dawn` on macOS,
+///      `~/.local/share/minigpu/dawn` on Linux).  One Dawn build shared across
+///      all projects on the machine.
+///   3. Package-nested `src/external/dawn/` — the original location, kept as a
+///      fallback for local development or when packaging Dawn with the source.
+List<Uri> _dawnSearchDirs(BuildInput input, Uri srcDir) {
   final osKey = _osKey(input);
   final archKey = _archKey(
     input.config.code.targetArchitecture,
     input.config.code.targetOS,
   );
-  return srcDir
-      .resolve('external/')
-      .resolve('dawn/')
-      .resolve('build_${osKey}_${archKey}/');
+  final buildSubdir = 'build_${osKey}_$archKey/';
+  final dirs = <Uri>[];
+
+  // 1. Explicit env-var override.
+  final envOverride = Platform.environment['MINIGPU_DAWN_DIR'];
+  if (envOverride != null && envOverride.isNotEmpty) {
+    dirs.add(Uri.directory(p.join(envOverride, buildSubdir)));
+  }
+
+  // 2. System-level shared location.
+  final systemRoot = _systemDawnRoot();
+  if (systemRoot != null) {
+    dirs.add(Uri.directory(p.join(systemRoot, buildSubdir)));
+  }
+
+  // 3. Package-nested fallback (local dev / bundled source).
+  dirs.add(srcDir.resolve('external/dawn/$buildSubdir'));
+
+  return dirs;
+}
+
+/// Returns the platform-specific root directory for the shared Dawn builds,
+/// or null if the platform provides no suitable location (e.g. Android, iOS).
+///
+/// The layout under this root mirrors the package-nested layout:
+///   <root>/build_{os}_{arch}/   — same convention as src/external/dawn/
+String? _systemDawnRoot() {
+  if (Platform.isWindows) {
+    final localAppData = Platform.environment['LOCALAPPDATA'];
+    if (localAppData != null && localAppData.isNotEmpty) {
+      return p.join(localAppData, 'minigpu', 'dawn');
+    }
+  } else if (Platform.isMacOS) {
+    final home = Platform.environment['HOME'];
+    if (home != null && home.isNotEmpty) {
+      return p.join(home, 'Library', 'Application Support', 'minigpu', 'dawn');
+    }
+  } else if (Platform.isLinux) {
+    final xdgData = Platform.environment['XDG_DATA_HOME'];
+    if (xdgData != null && xdgData.isNotEmpty) {
+      return p.join(xdgData, 'minigpu', 'dawn');
+    }
+    final home = Platform.environment['HOME'];
+    if (home != null && home.isNotEmpty) {
+      return p.join(home, '.local', 'share', 'minigpu', 'dawn');
+    }
+  }
+  return null;
+}
+
+/// Searches [searchDirs] in order, recursively, for `webgpu_dawn.dll` /
+/// `libwebgpu_dawn.so` / `libwebgpu_dawn.dylib` matching the current target OS.
+/// Returns the first match found, or null.
+File? _findDawnDll(BuildInput input, List<Uri> searchDirs, Logger logger) {
+  final os = input.config.code.targetOS;
+  final filename = switch (os) {
+    OS.windows => 'webgpu_dawn.dll',
+    OS.macOS => 'libwebgpu_dawn.dylib',
+    OS.linux || OS.android => 'libwebgpu_dawn.so',
+    _ => 'libwebgpu_dawn.so',
+  };
+
+  for (final dirUri in searchDirs) {
+    final dir = Directory.fromUri(dirUri);
+    if (!dir.existsSync()) {
+      logger.fine('Dawn search dir does not exist, skipping: ${dir.path}');
+      continue;
+    }
+    for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+      if (entity is File && p.basename(entity.path) == filename) {
+        logger.info('Found Dawn at: ${entity.path}');
+        return entity;
+      }
+    }
+    logger.fine('$filename not found under ${dir.path}');
+  }
+  return null;
 }
 
 String _osKey(BuildInput input) {
   final os = input.config.code.targetOS;
   if (os == OS.iOS) {
-    // Prefer SDK info if available to distinguish simulator vs device
     try {
-      // code_assets exposes iOS SDK in the config package
-      final sdk =
-          input.config.code.iOS.targetSdk; // IosSdk.device | IosSdk.simulator
+      final sdk = input.config.code.iOS.targetSdk;
       if (sdk.toString().contains('simulator')) return 'iossim';
       return 'ios';
     } catch (_) {
-      // Heuristic fallback: x86_64 is always simulator; arm64 could be either
       final arch = input.config.code.targetArchitecture;
       if (arch.name == 'ia32' || arch.name == 'x86_64') return 'iossim';
-      // Default to device when unknown
       return 'ios';
     }
   }
@@ -149,7 +287,6 @@ String _osKey(BuildInput input) {
 }
 
 String _archKey(Architecture arch, OS os) {
-  // Mirror dawn.cmake normalization
   if (os == OS.android) {
     if (arch == Architecture.arm64) return 'arm64-v8a';
     if (arch == Architecture.arm) return 'armv7';
@@ -160,5 +297,53 @@ String _archKey(Architecture arch, OS os) {
     if (arch == Architecture.arm64) return 'arm64';
     if (arch == Architecture.arm) return 'armv7';
   }
-  return arch.name; // fallback
+  return arch.name;
+}
+
+/// Deletes the CMake output directory when its cached source path no longer
+/// matches [currentSourceDir].
+///
+/// CMake records the absolute source path in CMakeCache.txt. When the package
+/// switches between a pub-cache copy and a local path override, that path
+/// changes and CMake refuses to proceed:
+///
+///   "The source X does not match the source Y used to generate cache."
+///
+/// `flutter clean` only removes `build/`; it leaves `.dart_tool/hooks_runner/`
+/// intact, so the stale cache survives. This helper detects the mismatch and
+/// deletes the output directory before CMake runs, forcing a clean configure.
+void _clearStaleCmakeCache(Uri outputDir, Uri currentSourceDir, Logger logger) {
+  final cacheFile = File.fromUri(outputDir.resolve('CMakeCache.txt'));
+  if (!cacheFile.existsSync()) return;
+
+  final lines = cacheFile.readAsLinesSync();
+  String? cachedSrc;
+  for (final line in lines) {
+    if (line.startsWith('CMAKE_HOME_DIRECTORY:INTERNAL=')) {
+      final eq = line.indexOf('=');
+      cachedSrc = eq >= 0 ? line.substring(eq + 1).trim() : null;
+      break;
+    }
+  }
+  if (cachedSrc == null) return;
+
+  final cached = cachedSrc.replaceAll(r'\', '/').toLowerCase();
+  final current = currentSourceDir
+      .toFilePath()
+      .replaceAll(r'\', '/')
+      .toLowerCase();
+
+  if (cached == current) return;
+
+  logger.warning(
+    '[minigpu_ffi] Stale CMakeCache.txt detected.\n'
+    '  Cached source : $cachedSrc\n'
+    '  Current source: ${currentSourceDir.toFilePath()}\n'
+    '  Deleting output directory to force a clean CMake configure.',
+  );
+
+  final outDirectory = Directory.fromUri(outputDir);
+  if (outDirectory.existsSync()) {
+    outDirectory.deleteSync(recursive: true);
+  }
 }

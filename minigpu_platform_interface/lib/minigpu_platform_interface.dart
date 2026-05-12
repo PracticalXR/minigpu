@@ -139,6 +139,19 @@ abstract class MinigpuPlatform {
   PlatformComputeShader createComputeShader();
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType);
 
+  /// Install a log callback for the native minigpu/Dawn layer.
+  ///
+  /// [callback] receives `(int level, String message)` where level matches
+  /// `mgpu::LogLevel`: 0=DEBUG 1=INFO 2=WARN 3=ERROR.
+  /// Pass `null` to revert to the default (native stderr) output.
+  ///
+  /// [level] sets the minimum verbosity; messages below this level are
+  /// suppressed before the callback is invoked. -1 silences everything.
+  void setLogCallback(
+    void Function(int level, String message)? callback, {
+    int level = 1,
+  }) {}
+
   /// Returns dedicated VRAM usage in bytes for the primary GPU.
   /// Returns -1 on platforms where the query is unavailable.
   int queryVramBytes() => -1;

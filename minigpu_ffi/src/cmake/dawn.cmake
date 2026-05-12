@@ -9,9 +9,55 @@ include(FetchContent)
 set(ENABLE_DAWN_FIND ON CACHE BOOL "Attempt to find an existing Dawn build" FORCE)
 set(DAWN_BUILD_FOUND OFF CACHE BOOL "Dawn build found" FORCE)
 
-# Setup directories and basic paths
-set(FETCHCONTENT_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external")
-set(DAWN_DIR           "${FETCHCONTENT_BASE_DIR}/dawn" CACHE INTERNAL "Dawn source directory")
+# FetchContent tracking files go into the cmake build dir (writable; not
+# inside the potentially read-only pub-cache package directory).
+set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_fetchcontent")
+
+# ---------------------------------------------------------------------------
+# Determine where Dawn source lives.
+#
+# Priority (highest to lowest):
+#   0. DAWN_DIR already set from the cmake command line (-DDAWN_DIR=…)
+#      The Dart build hook (hook/build.dart) always passes this, so this is
+#      the normal path when building through Flutter / dart pub.
+#   1. MINIGPU_DAWN_DIR env var  — explicit path override
+#   2. Platform AppData / data-home  — shared checkout across all projects
+#   3. Package-nested src/external/dawn — local dev / bundled source fallback
+#
+# Uses CMAKE_HOST_WIN32 / CMAKE_HOST_APPLE / CMAKE_HOST_UNIX rather than
+# WIN32 / APPLE / UNIX so cross-compilation (e.g. Android on a Windows host)
+# resolves to the correct HOST filesystem layout.
+# ---------------------------------------------------------------------------
+if(NOT DEFINED DAWN_DIR OR DAWN_DIR STREQUAL "")
+  # DAWN_DIR was not provided from outside; detect automatically.
+  if(DEFINED ENV{MINIGPU_DAWN_DIR} AND NOT "$ENV{MINIGPU_DAWN_DIR}" STREQUAL "")
+    set(_dawn_root "$ENV{MINIGPU_DAWN_DIR}")
+    message(STATUS "Dawn: using MINIGPU_DAWN_DIR env override")
+  elseif(NOT EMSCRIPTEN)
+    # CMAKE_HOST_APPLE must be tested before CMAKE_HOST_UNIX (macOS satisfies both).
+    if(CMAKE_HOST_WIN32 AND DEFINED ENV{LOCALAPPDATA} AND NOT "$ENV{LOCALAPPDATA}" STREQUAL "")
+      set(_dawn_root "$ENV{LOCALAPPDATA}/minigpu/dawn")
+    elseif(CMAKE_HOST_APPLE AND DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+      set(_dawn_root "$ENV{HOME}/Library/Application Support/minigpu/dawn")
+    elseif(CMAKE_HOST_UNIX AND DEFINED ENV{XDG_DATA_HOME} AND NOT "$ENV{XDG_DATA_HOME}" STREQUAL "")
+      set(_dawn_root "$ENV{XDG_DATA_HOME}/minigpu/dawn")
+    elseif(CMAKE_HOST_UNIX AND DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+      set(_dawn_root "$ENV{HOME}/.local/share/minigpu/dawn")
+    else()
+      set(_dawn_root "${CMAKE_CURRENT_SOURCE_DIR}/external/dawn")
+    endif()
+  else()
+    # Emscripten build: use package-nested source.
+    set(_dawn_root "${CMAKE_CURRENT_SOURCE_DIR}/external/dawn")
+  endif()
+  set(DAWN_DIR "${_dawn_root}" CACHE INTERNAL "Dawn source directory" FORCE)
+else()
+  # DAWN_DIR was provided via -D (typically from the Dart build hook).
+  message(STATUS "Dawn: using externally provided DAWN_DIR")
+  # Re-write to cache so it persists across re-runs.
+  set(DAWN_DIR "${DAWN_DIR}" CACHE INTERNAL "Dawn source directory" FORCE)
+endif()
+message(STATUS "Dawn: source root -> ${DAWN_DIR}")
 
 # For Emscripten builds (if desired)
 set(EM_SDK_DIR         $ENV{EMSDK} CACHE INTERNAL "")

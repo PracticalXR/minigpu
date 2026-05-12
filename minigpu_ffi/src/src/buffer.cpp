@@ -10,6 +10,12 @@
 #include <thread>
 #include <vector>
 
+#ifndef __EMSCRIPTEN__
+// Dawn C++ native API — lets us enumerate all adapters and pick by name
+// without any platform-specific DXGI/Metal code.
+#include "dawn/native/DawnNative.h"
+#endif
+
 namespace mgpu {
 
 WebGPUThread::WebGPUThread() {
@@ -67,17 +73,29 @@ void MGPU::initializeContext() {
   if (ctx && ctx->initialized) {
     return; // Already initialized
   }
-  std::fprintf(stderr,
-      "[mgpu] initializeContext() entering: ctx=%p ctx_initialized=%d\n",
+  MGPU_LOG(mgpu::LOG_DEBUG,
+      "[mgpu] initializeContext() entering: ctx=%p ctx_initialized=%d",
       (void*)ctx.get(),
       ctx ? (int)ctx->initialized : -1);
 
   ctx = std::make_unique<Context>();
 
-  // Create WebGPU instance
+  // Create WebGPU instance via dawn::native::Instance on native platforms so
+  // we can use EnumerateAdapters for MGPU_ADAPTER_NAME selection below.
   WGPUInstanceDescriptor instanceDesc = {};
   instanceDesc.nextInChain = nullptr;
+#ifndef __EMSCRIPTEN__
+  {
+    auto* nativeInst = new dawn::native::Instance(&instanceDesc);
+    ctx->dawnNativeInstance = nativeInst;
+    ctx->instance = nativeInst->Get();
+    // Take our own ref so destroyContext's wgpuInstanceRelease is balanced
+    // regardless of whether the native wrapper also holds one.
+    wgpuInstanceAddRef(ctx->instance);
+  }
+#else
   ctx->instance = wgpuCreateInstance(&instanceDesc);
+#endif
 
   if (!ctx->instance) {
     throw std::runtime_error("Failed to create WebGPU instance");
@@ -107,9 +125,109 @@ void MGPU::initializeContext() {
     else if (s == "opengles")  adapterOptions.backendType = WGPUBackendType_OpenGLES;
     else if (s == "undefined") adapterOptions.backendType = WGPUBackendType_Undefined;
   }
-  std::fprintf(stderr,
-      "[mgpu] requesting adapter backendType=%d (MGPU_BACKEND env to override)\n",
-      (int)adapterOptions.backendType);
+  // Adapter selection via dawn::native::EnumerateAdapters.
+  //
+  // Automatic preference order (no env vars required):
+  //   1. Discrete GPU  (dedicated adapter — NVIDIA, AMD, etc.)
+  //   2. Integrated GPU
+  //   3. Any non-CPU adapter
+  //
+  // This is more reliable than WGPUPowerPreference_HighPerformance, which is
+  // only a hint and has been observed to pick the wrong adapter on Optimus
+  // laptops. By checking adapterType explicitly we always land on the
+  // dedicated GPU when one is present.
+  //
+  // FFmpeg's D3D11VA encoder receives the SAME ID3D11Device via
+  // createD3D11DeviceOnDawnAdapter(), so the encoder is automatically
+  // aligned to whichever GPU minigpu selected — no separate env var needed.
+  //
+  // Power-user override: MGPU_ADAPTER_NAME=<substring> (case-insensitive
+  // match against the device name, e.g. "Intel" or "NVIDIA"). Useful when
+  // the display is on the iGPU and cross-adapter sharing causes issues.
+  {
+    auto* nativeInst = static_cast<dawn::native::Instance*>(ctx->dawnNativeInstance);
+
+    // Enumerate without powerPreference so we see ALL adapters for this
+    // backend and can sort by adapterType ourselves.
+    WGPURequestAdapterOptions enumOpts = adapterOptions;
+    enumOpts.powerPreference = WGPUPowerPreference_Undefined;
+    auto adapters = nativeInst->EnumerateAdapters(&enumOpts);
+
+    // Collect info for all adapters up-front and log them.
+    struct Entry {
+      WGPUAdapter        handle = nullptr;
+      WGPUAdapterType    type   = WGPUAdapterType_Unknown;
+      std::string        name;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(adapters.size());
+    for (std::size_t i = 0; i < adapters.size(); ++i) {
+      Entry e;
+      e.handle = adapters[i].Get();
+      WGPUAdapterInfo info{};
+      if (wgpuAdapterGetInfo(e.handle, &info) == WGPUStatus_Success) {
+        e.type = info.adapterType;
+        if (info.device.data && info.device.length)
+          e.name = std::string(info.device.data, info.device.length);
+        MGPU_LOG(mgpu::LOG_DEBUG,
+            "[mgpu] adapter[%zu]: '%s' type=%d backend=%d vendor=0x%X device=0x%X",
+            i, e.name.c_str(), (int)info.adapterType, (int)info.backendType,
+            (unsigned)info.vendorID, (unsigned)info.deviceID);
+        wgpuAdapterInfoFreeMembers(info);
+      }
+      entries.push_back(std::move(e));
+    }
+
+    // 1. MGPU_ADAPTER_NAME env-var override (substring, case-insensitive).
+    if (const char* nameFilter = std::getenv("MGPU_ADAPTER_NAME")) {
+      std::string filter(nameFilter);
+      for (auto& c : filter) c = (char)std::tolower((unsigned char)c);
+      for (auto& e : entries) {
+        if (e.type == WGPUAdapterType_CPU) continue;
+        std::string lower = e.name;
+        for (auto& c : lower) c = (char)std::tolower((unsigned char)c);
+        if (lower.find(filter) != std::string::npos) {
+          ctx->adapter = e.handle;
+          wgpuAdapterAddRef(ctx->adapter);
+          MGPU_LOG(mgpu::LOG_INFO, "[mgpu] MGPU_ADAPTER_NAME='%s': selected '%s'",
+              nameFilter, e.name.c_str());
+          break;
+        }
+      }
+      if (!ctx->adapter)
+        MGPU_LOG(mgpu::LOG_WARN,
+            "[mgpu] MGPU_ADAPTER_NAME='%s': no match - using auto-select", nameFilter);
+    }
+
+    // 2. Automatic: discrete GPU first, then integrated, then any non-CPU.
+    if (!ctx->adapter) {
+      const WGPUAdapterType kPasses[] = {
+        WGPUAdapterType_DiscreteGPU,   // dedicated adapter (NVIDIA/AMD)
+        WGPUAdapterType_IntegratedGPU, // built-in (Intel/Apple)
+        WGPUAdapterType_Unknown,       // catch-all (matches any non-CPU)
+      };
+      for (auto want : kPasses) {
+        if (ctx->adapter) break;
+        for (auto& e : entries) {
+          if (e.type == WGPUAdapterType_CPU) continue;
+          // For the catch-all pass accept anything; otherwise require exact type.
+          if (want != WGPUAdapterType_Unknown && e.type != want) continue;
+          ctx->adapter = e.handle;
+          wgpuAdapterAddRef(ctx->adapter);
+          MGPU_LOG(mgpu::LOG_INFO,
+              "[mgpu] auto-selected '%s' (adapterType=%d"
+              " - 1=Discrete 2=Integrated 4=Unknown)",
+              e.name.c_str(), (int)e.type);
+          break;
+        }
+      }
+    }
+
+    if (!ctx->adapter)
+      MGPU_LOG(mgpu::LOG_WARN,
+          "[mgpu] EnumerateAdapters: no usable adapter found"
+          " - falling back to wgpuInstanceRequestAdapter");
+  }
 #endif
 
   struct AdapterRequestState {
@@ -140,12 +258,20 @@ void MGPU::initializeContext() {
   };
   adapterCallbackInfo.userdata1 = &adapterState;
 
-  WGPUFuture adapterFuture = wgpuInstanceRequestAdapter(
-      ctx->instance, &adapterOptions, adapterCallbackInfo);
-
-  // Process events until the adapter request completes
-  while (!adapterState.completed) {
-    platformSleep(1, ctx->instance);
+  // Only call wgpuInstanceRequestAdapter if EnumerateAdapters above found
+  // nothing (e.g. very old driver, Emscripten, unsupported platform).
+  WGPUFuture adapterFuture{};
+  if (!ctx->adapter) {
+    adapterFuture = wgpuInstanceRequestAdapter(
+        ctx->instance, &adapterOptions, adapterCallbackInfo);
+    // Process events until the adapter request completes
+    while (!adapterState.completed) {
+      platformSleep(1, ctx->instance);
+    }
+  } else {
+    // Adapter already selected via EnumerateAdapters — synthesise completed state.
+    adapterState.adapter = ctx->adapter;
+    adapterState.completed = true;
   }
 
   LOG_INFO("WebGPU adapter request completed");
@@ -157,12 +283,22 @@ void MGPU::initializeContext() {
 
   ctx->adapter = adapterState.adapter;
 
-  // Log adapter backend so we know exactly which Dawn backend Dawn chose.
+  // Log which adapter was selected so it's easy to confirm the right GPU.
+  // adapterType: 1=DiscreteGpu 2=IntegratedGpu 3=Cpu 4=Unknown
   {
     WGPUAdapterInfo info{};
     if (wgpuAdapterGetInfo(ctx->adapter, &info) == WGPUStatus_Success) {
-      std::fprintf(stderr,
-        "[mgpu adapter] backendType=%d adapterType=%d vendorID=0x%X deviceID=0x%X\n",
+      // WGPUStringView.data is NOT null-terminated; copy into std::string first.
+      std::string devStr = (info.device.data && info.device.length)
+          ? std::string(info.device.data, info.device.length) : "";
+      std::string vendorStr = (info.vendor.data && info.vendor.length)
+          ? std::string(info.vendor.data, info.vendor.length) : "";
+      MGPU_LOG(mgpu::LOG_INFO,
+        "[mgpu adapter] SELECTED: '%s' (%s) backendType=%d adapterType=%d "
+        "vendorID=0x%X deviceID=0x%X "
+        "(adapterType: 1=Discrete 2=Integrated 3=CPU 4=Unknown) "
+        "Set MGPU_ADAPTER_NAME=<substring> to override",
+        devStr.c_str(), vendorStr.c_str(),
         (int)info.backendType, (int)info.adapterType,
         (unsigned)info.vendorID, (unsigned)info.deviceID);
       wgpuAdapterInfoFreeMembers(info);
@@ -184,8 +320,8 @@ void MGPU::initializeContext() {
 #if !defined(__EMSCRIPTEN__)
   auto adapterHas = [&](WGPUFeatureName f) -> bool {
     bool has = wgpuAdapterHasFeature(ctx->adapter, f) != 0;
-    std::fprintf(stderr,
-        "[mgpu adapter feature] %d => %d\n", (int)f, (int)has);
+    MGPU_LOG(mgpu::LOG_DEBUG,
+        "[mgpu adapter feature] %d => %d", (int)f, (int)has);
     return has;
   };
 #ifdef _WIN32
@@ -252,8 +388,8 @@ void MGPU::initializeContext() {
 
         LOG_ERROR("WebGPU Device Lost: %s - %.*s", reasonStr,
                   (int)message.length, message.data);
-        std::fprintf(stderr,
-            "[wgpu DEVICE LOST] reason=%s msg=%.*s\n",
+        MGPU_LOG(mgpu::LOG_ERROR,
+            "[wgpu DEVICE LOST] reason=%s msg=%.*s",
             reasonStr, (int)message.length,
             message.data ? message.data : "");
 
@@ -280,8 +416,8 @@ void MGPU::initializeContext() {
       case WGPUErrorType_Unknown: t = "Unknown"; break;
       default: break;
     }
-    std::fprintf(stderr,
-        "[wgpu uncaptured %s] %.*s\n",
+    MGPU_LOG(mgpu::LOG_ERROR,
+        "[wgpu uncaptured %s] %.*s",
         t, (int)message.length, message.data ? message.data : "");
   };
   deviceDesc.uncapturedErrorCallbackInfo = uncapErr;
@@ -389,6 +525,15 @@ void MGPU::destroyContext() {
     wgpuInstanceRelease(ctx->instance);
     ctx->instance = nullptr;
   }
+
+#ifndef __EMSCRIPTEN__
+  // Delete the dawn::native::Instance wrapper AFTER all WGPUInstance users
+  // have released their references so the final refcount drop is orderly.
+  if (ctx->dawnNativeInstance) {
+    delete static_cast<dawn::native::Instance*>(ctx->dawnNativeInstance);
+    ctx->dawnNativeInstance = nullptr;
+  }
+#endif
 
   ctx->initialized = false;
   ctx.reset();

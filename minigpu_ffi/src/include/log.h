@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
 #include <iostream>
 #include <string>
 #include <mutex>
@@ -19,6 +23,10 @@ enum LogLevel {
     LOG_ERROR = 3
 };
 
+/// Signature for the Dart-side log bridge.
+/// level: 0=DEBUG 1=INFO 2=WARN 3=ERROR
+using LogCallback = void(*)(int level, const char* message);
+
 class Logger {
 public:
     static Logger& getInstance() {
@@ -31,41 +39,66 @@ public:
         level_ = level;
     }
 
+    /// Install a callback that receives every log message (after level filter).
+    /// Pass nullptr to revert to the default stderr output.
+    void setCallback(LogCallback cb) {
+        mgpu::lock_guard<mgpu::mutex> lock(mutex_);
+        callback_ = cb;
+    }
+
     template<typename... Args>
     void log(LogLevel level, const char* file, int line, const char* format, Args... args) {
         if (level_ == LOG_NONE || level < level_) return;
 
         mgpu::lock_guard<mgpu::mutex> lock(mutex_);
-        
-        auto now = std::chrono::system_clock::now();
-        auto time_t = std::chrono::system_clock::to_time_t(now);
-        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now.time_since_epoch()) % 1000;
 
-        std::stringstream ss;
-        ss << std::put_time(std::localtime(&time_t), "%H:%M:%S");
-        ss << '.' << std::setfill('0') << std::setw(3) << ms.count();
-        
         const char* levelStr[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-        const char* filename = strrchr(file, '/');
-        if (!filename) filename = strrchr(file, '\\');
-        if (!filename) filename = file;
-        else filename++;
-
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), format, args...);
 
-        std::string logLine = ss.str() + " [" + levelStr[level] + "] " + 
-                             filename + ":" + std::to_string(line) + " " + buffer;
+        if (callback_) {
+            // NativeCallable.listener dispatches asynchronously on the Dart
+            // event loop.  By the time Dart runs, this stack frame has
+            // returned and `buffer` is gone.  Heap-copy so the pointer
+            // stays valid; Dart must call mgpuFreeLogMessage() after reading.
+            char* heap_msg = static_cast<char*>(malloc(strlen(buffer) + 1));
+            if (heap_msg) {
+                memcpy(heap_msg, buffer, strlen(buffer) + 1);
+                callback_(static_cast<int>(level), heap_msg);
+            }
+        } else {
+            const char* filename = strrchr(file, '/');
+            if (!filename) filename = strrchr(file, '\\');
+            if (!filename) filename = file;
+            else filename++;
+            std::fprintf(stderr, "[mgpu %s] %s:%d %s\n",
+                levelStr[level], filename, line, buffer);
+        }
+    }
 
-        std::cout << logLine << std::endl;
+    /// Log a pre-formatted message at the given level (no file/line decoration).
+    /// Used by the MGPU_LOG macro for raw fprintf-style messages.
+    void logRaw(LogLevel level, const char* message) {
+        if (level_ == LOG_NONE || level < level_) return;
+        mgpu::lock_guard<mgpu::mutex> lock(mutex_);
+        if (callback_) {
+            // Same heap-copy requirement as log() — see comment above.
+            char* heap_msg = static_cast<char*>(malloc(strlen(message) + 1));
+            if (heap_msg) {
+                memcpy(heap_msg, message, strlen(message) + 1);
+                callback_(static_cast<int>(level), heap_msg);
+            }
+        } else {
+            std::fprintf(stderr, "%s\n", message);
+        }
     }
 
 private:
-    Logger() : level_(LOG_INFO) {}
+    Logger() : level_(LOG_INFO), callback_(nullptr) {}
     ~Logger() = default;
 
     LogLevel level_;
+    LogCallback callback_;
     mgpu::mutex mutex_;
 };
 
@@ -79,3 +112,16 @@ private:
 
 // Helper to set log level
 #define SET_LOG_LEVEL(level) mgpu::Logger::getInstance().setLevel(level)
+#define SET_LOG_CALLBACK(cb) mgpu::Logger::getInstance().setCallback(cb)
+
+// MGPU_LOG — format a message into a stack buffer then forward to Logger::logRaw.
+// Use this in place of std::fprintf(stderr, "[mgpu ...] fmt", ...) so all
+// messages pass through the single Logger (and its optional Dart callback).
+// Level: 0=DEBUG 1=INFO 2=WARN 3=ERROR
+#define MGPU_LOG(lvl, ...) \
+    do { \
+        char _mgpu_buf[1024]; \
+        snprintf(_mgpu_buf, sizeof(_mgpu_buf), __VA_ARGS__); \
+        mgpu::Logger::getInstance().logRaw( \
+            static_cast<mgpu::LogLevel>(lvl), _mgpu_buf); \
+    } while (0)

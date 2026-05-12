@@ -54,6 +54,32 @@ Then run:
 dart pub get
 ```
 
+### Flutter apps: use `minigpu_flutter` instead
+
+If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that fires registered teardown callbacks during hot reload — preventing stale `NativeCallable` invocations when the Dart isolate is rebuilt mid-dispatch.
+
+```yaml
+dependencies:
+  minigpu_flutter: ^1.4.0
+```
+
+Wrap your root widget with `MinigpuBinding` and register a `destroySync` callback for any long-lived `Minigpu` instance:
+
+```dart
+import 'package:minigpu_flutter/minigpu_flutter.dart';
+
+void main() {
+  runApp(const MinigpuBinding(child: MyApp()));
+}
+
+// After gpu.init():
+MinigpuFlutterBinding.addDisposeCallback(gpu.destroySync);
+
+// When the resource is torn down normally (not via hot reload):
+MinigpuFlutterBinding.removeDisposeCallback(gpu.destroySync);
+await gpu.destroy();
+```
+
 ## Getting Started
 
 ```console

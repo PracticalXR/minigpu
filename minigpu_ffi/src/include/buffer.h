@@ -94,6 +94,12 @@ public:
     WGPUInstance instance = nullptr;
     WGPUAdapter adapter = nullptr;
     bool initialized = false;
+    // Owned dawn::native::Instance* (non-Emscripten only). Stored as void* so
+    // buffer.h need not include dawn/native headers — the cast is done in
+    // buffer.cpp where the include is available.
+#ifndef __EMSCRIPTEN__
+    void* dawnNativeInstance = nullptr;
+#endif
   };
 
   void initializeContext();

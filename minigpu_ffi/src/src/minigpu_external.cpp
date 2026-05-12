@@ -10,6 +10,7 @@
 #include "../include/minigpu_external.h"
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
+#include "../include/log.h"
 
 // webgpu.h is pulled in through buffer.h / minigpu.h
 #include "webgpu.h"
@@ -370,9 +371,7 @@ static MGPUVideoTexture* import_d3d11(const MGPUExternalVideoBuffer* buf) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> srcOnDawnDev;
     HRESULT hr = d11_1->OpenSharedResource1(srcHandle, IID_PPV_ARGS(&srcOnDawnDev));
     if (FAILED(hr) || !srcOnDawnDev) {
-        std::fprintf(stderr,
-            "[minigpu_external] import_d3d11: OpenSharedResource1 on Dawn d11 "
-            "failed: 0x%08lX\n", (unsigned long)hr);
+        LOG_ERROR("[minigpu_external] import_d3d11: OpenSharedResource1 on Dawn d11 failed: 0x%08lX", (unsigned long)hr);
         return nullptr;
     }
 
@@ -381,8 +380,7 @@ static MGPUVideoTexture* import_d3d11(const MGPUExternalVideoBuffer* buf) {
     {
         static int s_probed = 0;
         if (s_probed++ < 2) {
-            std::fprintf(stderr,
-                "[minigpu_external] miniav source MiscFlags=0x%X format=%d %ux%u\n",
+            LOG_DEBUG("[minigpu_external] miniav source MiscFlags=0x%X format=%d %ux%u",
                 (unsigned)sd.MiscFlags, (int)sd.Format, sd.Width, sd.Height);
         }
     }
@@ -402,9 +400,7 @@ static MGPUVideoTexture* import_d3d11(const MGPUExternalVideoBuffer* buf) {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> dst;
     hr = d11->CreateTexture2D(&dd, nullptr, &dst);
     if (FAILED(hr) || !dst) {
-        std::fprintf(stderr,
-            "[minigpu_external] import_d3d11: CreateTexture2D(private dst) "
-            "failed: 0x%08lX\n", (unsigned long)hr);
+        LOG_ERROR("[minigpu_external] import_d3d11: CreateTexture2D(private dst) failed: 0x%08lX", (unsigned long)hr);
         return nullptr;
     }
     ctx->CopyResource(dst.Get(), srcOnDawnDev.Get());
@@ -439,16 +435,13 @@ static MGPUVideoTexture* import_d3d11(const MGPUExternalVideoBuffer* buf) {
                 static_cast<const wgpu::ChainedStruct*>(&d11Desc)));
     WGPUSharedTextureMemory mem = wgpuDeviceImportSharedTextureMemory(device, &desc);
     if (!mem) {
-        std::fprintf(stderr,
-            "[minigpu_external] import_d3d11: importSharedTextureMemory(D3D11Texture2D) "
-            "failed.\n");
+        LOG_ERROR("[minigpu_external] import_d3d11: importSharedTextureMemory(D3D11Texture2D) failed.");
         return nullptr;
     }
     {
         static int s_logged = 0;
         if (s_logged++ < 3) {
-            std::fprintf(stderr,
-                "[minigpu_external] import_d3d11: device=%p mem=%p (CopyResource path)\n",
+            LOG_DEBUG("[minigpu_external] import_d3d11: device=%p mem=%p (CopyResource path)",
                 (void*)device, (void*)mem);
         }
     }
@@ -675,8 +668,7 @@ MGPUBuffer* mgpuVideoTextureToRGBA(MGPUVideoTexture* tex) {
     {
         static int s_logged = 0;
         if (s_logged++ < 3) {
-            std::fprintf(stderr,
-                "[minigpu_external] toRGBA: device=%p tex.plane0=%p tex.view0=%p\n",
+            LOG_DEBUG("[minigpu_external] toRGBA: device=%p tex.plane0=%p tex.view0=%p",
                 (void*)device, (void*)tex->planes[0], (void*)tex->views[0]);
         }
     }
@@ -1005,8 +997,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
 
     WGPUDevice device = get_device();
     if (!device) {
-        std::fprintf(stderr,
-            "[minigpu_external] get_or_create_d3d11_device: no WGPUDevice\n");
+        LOG_ERROR("[minigpu_external] get_or_create_d3d11_device: no WGPUDevice");
         return nullptr;
     }
 
@@ -1024,8 +1015,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
             if (SUCCEEDED(g_d3d11_device.As(&mt)) && mt) {
                 mt->SetMultithreadProtected(TRUE);
             }
-            std::fprintf(stderr,
-                "[minigpu_external] Using Dawn's own ID3D11Device @%p\n",
+            LOG_INFO("[minigpu_external] Using Dawn's own ID3D11Device @%p",
                 (void*)g_d3d11_device.Get());
             return g_d3d11_device.Get();
         }
@@ -1034,8 +1024,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12Device =
         dawn::native::d3d12::GetD3D12Device(device);
     if (!d3d12Device) {
-        std::fprintf(stderr,
-            "[minigpu_external] get_or_create_d3d11_device: GetD3D12Device failed\n");
+        LOG_ERROR("[minigpu_external] get_or_create_d3d11_device: GetD3D12Device failed");
         return nullptr;
     }
 
@@ -1044,19 +1033,15 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
     Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
     HRESULT hr = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
     if (FAILED(hr)) {
-        std::fprintf(stderr,
-            "[minigpu_external] CreateDXGIFactory1 failed: 0x%08lX\n",
-            (unsigned long)hr);
+        LOG_ERROR("[minigpu_external] CreateDXGIFactory1 failed: 0x%08lX", (unsigned long)hr);
         return nullptr;
     }
 
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     hr = factory->EnumAdapterByLuid(luid, IID_PPV_ARGS(&adapter));
     if (FAILED(hr)) {
-        std::fprintf(stderr,
-            "[minigpu_external] EnumAdapterByLuid(LUID=%08lX:%08lX) failed: 0x%08lX\n",
-            (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
-            (unsigned long)hr);
+        LOG_ERROR("[minigpu_external] EnumAdapterByLuid(LUID=%08lX:%08lX) failed: 0x%08lX",
+            (unsigned long)luid.HighPart, (unsigned long)luid.LowPart, (unsigned long)hr);
         return nullptr;
     }
 
@@ -1081,11 +1066,8 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
         &featureLevel,
         &g_d3d11_context);
     if (FAILED(hr) || !g_d3d11_device) {
-        std::fprintf(stderr,
-            "[minigpu_external] D3D11CreateDevice on Dawn adapter "
-            "(LUID=%08lX:%08lX) failed: 0x%08lX\n",
-            (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
-            (unsigned long)hr);
+        LOG_ERROR("[minigpu_external] D3D11CreateDevice on Dawn adapter (LUID=%08lX:%08lX) failed: 0x%08lX",
+            (unsigned long)luid.HighPart, (unsigned long)luid.LowPart, (unsigned long)hr);
         return nullptr;
     }
 
@@ -1099,9 +1081,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
         }
     }
 
-    std::fprintf(stderr,
-        "[minigpu_external] Created cached D3D11 device on Dawn adapter "
-        "(LUID=%08lX:%08lX, FL=0x%04X)\n",
+    LOG_INFO("[minigpu_external] Created cached D3D11 device on Dawn adapter (LUID=%08lX:%08lX, FL=0x%04X)",
         (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
         static_cast<unsigned>(featureLevel));
     return g_d3d11_device.Get();
@@ -1114,8 +1094,7 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
 
     ID3D11Device* d3d11Device = get_or_create_d3d11_device_on_dawn_adapter();
     if (!d3d11Device) {
-        std::fprintf(stderr,
-            "[minigpu_external] create_shared_output_texture: no D3D11 device.\n");
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: no D3D11 device.");
         return nullptr;
     }
 
@@ -1156,9 +1135,7 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
         td.MiscFlags        = D3D11_RESOURCE_MISC_SHARED;
         HRESULT hr = d3d11Device->CreateTexture2D(&td, nullptr, &d3d11Tex);
         if (FAILED(hr) || !d3d11Tex) {
-            std::fprintf(stderr,
-                "[minigpu_external] CreateTexture2D(SharedOutput, single-device) "
-                "failed: 0x%08lX\n", (unsigned long)hr);
+            LOG_ERROR("[minigpu_external] CreateTexture2D(SharedOutput, single-device) failed: 0x%08lX", (unsigned long)hr);
             return nullptr;
         }
 
@@ -1174,13 +1151,11 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
                     static_cast<const wgpu::ChainedStruct*>(&d11Desc)));
         mem = wgpuDeviceImportSharedTextureMemory(device, &smDesc);
         if (!mem) {
-            std::fprintf(stderr,
-                "[minigpu_external] importSharedTextureMemory(D3D11Texture2D) failed.\n");
+            LOG_ERROR("[minigpu_external] importSharedTextureMemory(D3D11Texture2D) failed.");
             return nullptr;
         }
-        std::fprintf(stderr,
-            "[minigpu_external] SharedOutputTexture (D3D11 single-device) "
-            "d11=%p mem=%p\n", (void*)d3d11Tex.Get(), (void*)mem);
+        LOG_INFO("[minigpu_external] SharedOutputTexture (D3D11 single-device) d11=%p mem=%p",
+            (void*)d3d11Tex.Get(), (void*)mem);
 
         // Get the legacy DXGI shared HANDLE so other D3D11 devices (e.g.
         // Flutter's ANGLE D3D11 device) can OpenSharedResource() it.  This
@@ -1192,20 +1167,13 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
             HRESULT shr = dxgiRes->GetSharedHandle(&shareH);
             if (SUCCEEDED(shr) && shareH) {
                 ntHandle = shareH;
-                std::fprintf(stderr,
-                    "[minigpu_external] SharedOutputTexture share handle=%p\n",
-                    (void*)shareH);
+                LOG_DEBUG("[minigpu_external] SharedOutputTexture share handle=%p", (void*)shareH);
             } else {
-                std::fprintf(stderr,
-                    "[minigpu_external] GetSharedHandle failed: 0x%08lX\n",
-                    (unsigned long)shr);
+                LOG_WARN("[minigpu_external] GetSharedHandle failed: 0x%08lX", (unsigned long)shr);
             }
         }
     } else {
-        std::fprintf(stderr,
-            "[minigpu_external] create_shared_output_texture: Dawn is not on "
-            "D3D11 backend; cross-API path not implemented in this build. "
-            "Set MGPU_BACKEND=d3d11.\n");
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: Dawn is not on D3D11 backend; cross-API path not implemented in this build. Set MGPU_BACKEND=d3d11.");
         return nullptr;
     }
     WGPUTextureDescriptor td{};
@@ -1222,8 +1190,7 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
 
     WGPUTexture wgpuTex = wgpuSharedTextureMemoryCreateTexture(mem, &td);
     if (!wgpuTex) {
-        std::fprintf(stderr,
-            "[minigpu_external] wgpuSharedTextureMemoryCreateTexture failed.\n");
+        LOG_ERROR("[minigpu_external] wgpuSharedTextureMemoryCreateTexture failed.");
         wgpuSharedTextureMemoryRelease(mem);
         CloseHandle(ntHandle);
         return nullptr;
@@ -1253,8 +1220,7 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
     priv_td.sampleCount   = 1;
     WGPUTexture priv_tex = wgpuDeviceCreateTexture(device, &priv_td);
     if (!priv_tex) {
-        std::fprintf(stderr,
-            "[minigpu_external] wgpuDeviceCreateTexture(intermediate UAV) failed.\n");
+        LOG_ERROR("[minigpu_external] wgpuDeviceCreateTexture(intermediate UAV) failed.");
         wgpuTextureViewRelease(view);
         wgpuTextureRelease(wgpuTex);
         wgpuSharedTextureMemoryRelease(mem);
@@ -1360,8 +1326,7 @@ EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
     if (!device || !queue) return 0;
 
     if (!ensure_shared_output_pipeline(dst, device)) {
-        std::fprintf(stderr,
-            "[minigpu_external] ensure_shared_output_pipeline failed.\n");
+        LOG_ERROR("[minigpu_external] ensure_shared_output_pipeline failed.");
         return 0;
     }
 
@@ -1454,7 +1419,7 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
     if (!wgpuBuf || bufSize == 0) return 0;
 
     if (!ensure_copy_pipeline(dst, device)) {
-        std::fprintf(stderr, "[minigpu_external] ensure_copy_pipeline failed.\n");
+        LOG_ERROR("[minigpu_external] ensure_copy_pipeline failed.");
         return 0;
     }
 
@@ -1562,8 +1527,7 @@ EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(
     if (!wgpuBuf || bufSize == 0) return 0;
 
     if (!ensure_copy_pipeline_f32(dst, device)) {
-        std::fprintf(stderr,
-            "[minigpu_external] ensure_copy_pipeline_f32 failed.\n");
+        LOG_ERROR("[minigpu_external] ensure_copy_pipeline_f32 failed.");
         return 0;
     }
 
@@ -1655,9 +1619,7 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixel(
     if (SUCCEEDED(tex->d3d11_texture.As(&km)) && km) {
         HRESULT ahr = km->AcquireSync(0, 200);
         if (FAILED(ahr)) {
-            std::fprintf(stderr,
-                "[minigpu_external] debug AcquireSync failed: 0x%08lX\n",
-                (unsigned long)ahr);
+            LOG_ERROR("[minigpu_external] debug AcquireSync failed: 0x%08lX", (unsigned long)ahr);
             return 0xDEAD0003u;
         }
     }

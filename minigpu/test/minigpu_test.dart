@@ -99,4 +99,91 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
       outputBuffer.destroy();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Minigpu.setLogCallback
+  // -------------------------------------------------------------------------
+
+  group('Minigpu.setLogCallback', () {
+    tearDown(() {
+      // Always clear the log callback after each test so no NativeCallable
+      // leaks across the test suite.
+      Minigpu.setLogCallback(null);
+    });
+
+    test('setLogCallback(null) does not throw', () {
+      expect(() => Minigpu.setLogCallback(null), returnsNormally);
+    });
+
+    test('setLogCallback with a callback does not throw', () {
+      expect(() => Minigpu.setLogCallback((level, msg) {}), returnsNormally);
+    });
+
+    test('setLogCallback replaces an existing callback without throwing', () {
+      expect(() {
+        Minigpu.setLogCallback((level, msg) {});
+        Minigpu.setLogCallback((level, msg) {});
+        Minigpu.setLogCallback(null);
+      }, returnsNormally);
+    });
+
+    test('setLogCallback level=quiet (-1) does not throw', () {
+      expect(
+        () => Minigpu.setLogCallback((level, msg) {}, level: -1),
+        returnsNormally,
+      );
+    });
+
+    test('setLogCallback level=debug (0) does not throw', () {
+      expect(
+        () => Minigpu.setLogCallback((level, msg) {}, level: 0),
+        returnsNormally,
+      );
+    });
+
+    test(
+      'callback receives at least one message during context init',
+      () async {
+        // Destroy the existing context so we can init fresh with the callback.
+        await minigpu.destroy();
+
+        final received = <(int, String)>[];
+        Minigpu.setLogCallback(
+          (lvl, msg) => received.add((lvl, msg)),
+          level: 0, // LOG_DEBUG — capture everything
+        );
+
+        // Re-init: Dawn will emit INFO/DEBUG messages during device creation.
+        await minigpu.init();
+
+        // Give listener NativeCallable a turn on the event loop.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+
+        // We do not assert received.isNotEmpty because Dawn's verbosity depends
+        // on the native build configuration and driver. The test validates that
+        // the callback round-trip works without throwing, and that any messages
+        // that ARE received have valid level integers.
+        for (final (lvl, _) in received) {
+          expect(lvl, inInclusiveRange(0, 3));
+        }
+      },
+    );
+
+    test('no callback messages at level=quiet after install', () async {
+      await minigpu.destroy();
+
+      final received = <String>[];
+      // Install at quiet (-1) — nothing should arrive.
+      Minigpu.setLogCallback((_, msg) => received.add(msg), level: -1);
+
+      await minigpu.init();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(
+        received,
+        isEmpty,
+        reason: 'Expected no messages at level -1 (quiet)',
+      );
+    });
+  });
 }

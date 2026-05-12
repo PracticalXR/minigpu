@@ -70,6 +70,36 @@ final class Minigpu {
     isInitialized = false;
   }
 
+  /// Install a log callback for the native minigpu/Dawn layer.
+  ///
+  /// [callback] receives `(int level, String message)` where level matches
+  /// `mgpu::LogLevel`: 0=DEBUG 1=INFO 2=WARN 3=ERROR.
+  /// Pass `null` to revert to the default (native stderr) output.
+  ///
+  /// [level] controls minimum verbosity (-1=none 0=debug 1=info 2=warn 3=error).
+  ///
+  /// This is a static method — there is one native log channel regardless of
+  /// how many [Minigpu] instances exist.
+  static void setLogCallback(
+    void Function(int level, String message)? callback, {
+    int level = 1,
+  }) {
+    MinigpuPlatform.instance.setLogCallback(callback, level: level);
+  }
+
+  /// Synchronous variant of [destroy] intended for use in Flutter hot-restart
+  /// teardown hooks where `await` is not available (e.g. inside
+  /// [WidgetsBindingObserver.reassemble]).
+  ///
+  /// The underlying C call (`mgpuDestroyContext`) is synchronous; the async
+  /// wrapper on [destroy] exists only for API consistency.  This method is
+  /// a no-op if the context is not initialized.
+  void destroySync() {
+    if (!isInitialized) return;
+    _platform.destroyContext();
+    isInitialized = false;
+  }
+
   /// Creates a compute shader.
   ComputeShader createComputeShader() {
     final platformShader = _platform.createComputeShader();

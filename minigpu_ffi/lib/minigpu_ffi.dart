@@ -1,6 +1,7 @@
 // ignore_for_file: omit_local_variable_types
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:typed_data';
 
@@ -97,6 +98,50 @@ class MinigpuFfi extends MinigpuPlatform {
   @override
   int createD3D11DeviceOnDawnAdapter() {
     return ffi.mgpuCreateD3D11DeviceOnDawnAdapter().address;
+  }
+
+  NativeCallable<Void Function(Int, Pointer<Char>)>? _logCallable;
+
+  /// Decodes a null-terminated C string using [Utf8Decoder] with
+  /// [allowMalformed] so that log messages containing non-UTF-8 bytes
+  /// (e.g. driver strings with Latin-1 characters) never throw.
+  static String _decodeCString(Pointer<Char> ptr) {
+    if (ptr.address == 0) return '';
+    final bytes = ptr.cast<Uint8>();
+    var len = 0;
+    while (bytes[len] != 0) len++;
+    return const Utf8Decoder(
+      allowMalformed: true,
+    ).convert(Uint8List.view(bytes.asTypedList(len).buffer, 0, len));
+  }
+
+  @override
+  void setLogCallback(
+    void Function(int level, String message)? callback, {
+    int level = 1,
+  }) {
+    ffi.mgpuSetLogLevel(level);
+    final old = _logCallable;
+    _logCallable = null;
+    old?.close();
+
+    if (callback == null) {
+      ffi.mgpuSetLogCallback(Pointer.fromAddress(0));
+      return;
+    }
+
+    final nc = NativeCallable<Void Function(Int, Pointer<Char>)>.listener((
+      int lvl,
+      Pointer<Char> msg,
+    ) {
+      final str = _decodeCString(msg);
+      // C++ heap-allocated this copy so the pointer stays valid across the
+      // async dispatch.  Free it now that we've consumed the string.
+      ffi.mgpuFreeLogMessage(msg);
+      callback(lvl, str);
+    });
+    ffi.mgpuSetLogCallback(nc.nativeFunction);
+    _logCallable = nc;
   }
 
   Pointer<ffi.MGPUExternalVideoBuffer> _allocExternalVideoBuffer(

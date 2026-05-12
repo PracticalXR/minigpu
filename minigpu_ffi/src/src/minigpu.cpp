@@ -11,15 +11,26 @@ extern "C" {
 
 MGPU minigpu;
 
-mgpu::LogLevel level = mgpu::LOG_NONE;
+mgpu::LogLevel level = mgpu::LOG_INFO;
+
+void mgpuSetLogCallback(MGPULogCallback callback) {
+  SET_LOG_CALLBACK(callback);
+}
+
+void mgpuSetLogLevel(int lvl) {
+  level = static_cast<mgpu::LogLevel>(lvl);
+  SET_LOG_LEVEL(level);
+}
+
+void mgpuFreeLogMessage(const char* msg) {
+  free(const_cast<char*>(msg));
+}
 
 void mgpuInitializeContext() {
-  SET_LOG_LEVEL(level);
   minigpu.initializeContext();
 }
 
 void mgpuInitializeContextAsync(MGPUCallback callback) {
-  SET_LOG_LEVEL(level);
   minigpu.initializeContextAsync(callback);
 }
 
