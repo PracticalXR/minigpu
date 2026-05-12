@@ -1,6 +1,0 @@
-[submodule "minigpu_ffi/src/external/dawn"]
-	path = minigpu_ffi/src/external/dawn
-	url = https://github.com/google/dawn.git
-[submodule "minigpu_ffi/src/external/gpu"]
-	path = minigpu_ffi/src/external/gpu
-	url = https://github.com/AnswerDotAI/gpu.cpp.git
