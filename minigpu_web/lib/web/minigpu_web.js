@@ -616,49 +616,6 @@ async function createWasm() {
       runtimeKeepaliveCounter = 0;
     };
 
-  var isLeapYear = (year) => year%4 === 0 && (year%100 !== 0 || year%400 === 0);
-  
-  var MONTH_DAYS_LEAP_CUMULATIVE = [0,31,60,91,121,152,182,213,244,274,305,335];
-  
-  var MONTH_DAYS_REGULAR_CUMULATIVE = [0,31,59,90,120,151,181,212,243,273,304,334];
-  var ydayFromDate = (date) => {
-      var leap = isLeapYear(date.getFullYear());
-      var monthDaysCumulative = (leap ? MONTH_DAYS_LEAP_CUMULATIVE : MONTH_DAYS_REGULAR_CUMULATIVE);
-      var yday = monthDaysCumulative[date.getMonth()] + date.getDate() - 1; // -1 since it's days since Jan 1
-  
-      return yday;
-    };
-  
-  var INT53_MAX = 9007199254740992;
-  
-  var INT53_MIN = -9007199254740992;
-  var bigintToI53Checked = (num) => (num < INT53_MIN || num > INT53_MAX) ? NaN : Number(num);
-  function __localtime_js(time, tmPtr) {
-    time = bigintToI53Checked(time);
-  
-  
-      var date = new Date(time*1000);
-      HEAP32[((tmPtr)>>2)] = date.getSeconds();
-      HEAP32[(((tmPtr)+(4))>>2)] = date.getMinutes();
-      HEAP32[(((tmPtr)+(8))>>2)] = date.getHours();
-      HEAP32[(((tmPtr)+(12))>>2)] = date.getDate();
-      HEAP32[(((tmPtr)+(16))>>2)] = date.getMonth();
-      HEAP32[(((tmPtr)+(20))>>2)] = date.getFullYear()-1900;
-      HEAP32[(((tmPtr)+(24))>>2)] = date.getDay();
-  
-      var yday = ydayFromDate(date)|0;
-      HEAP32[(((tmPtr)+(28))>>2)] = yday;
-      HEAP32[(((tmPtr)+(36))>>2)] = -(date.getTimezoneOffset() * 60);
-  
-      // Attention: DST is in December in South, and some regions don't have DST at all.
-      var start = new Date(date.getFullYear(), 0, 1);
-      var summerOffset = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-      var winterOffset = start.getTimezoneOffset();
-      var dst = (summerOffset != winterOffset && date.getTimezoneOffset() == Math.min(winterOffset, summerOffset))|0;
-      HEAP32[(((tmPtr)+(32))>>2)] = dst;
-    ;
-  }
-
   var timers = {
   };
   
@@ -736,127 +693,37 @@ async function createWasm() {
       return 0;
     };
 
-  var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
-      // Parameter maxBytesToWrite is not optional. Negative values, 0, null,
-      // undefined and false each don't write out any bytes.
-      if (!(maxBytesToWrite > 0))
-        return 0;
-  
-      var startIdx = outIdx;
-      var endIdx = outIdx + maxBytesToWrite - 1; // -1 for string null terminator.
-      for (var i = 0; i < str.length; ++i) {
-        // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description
-        // and https://www.ietf.org/rfc/rfc2279.txt
-        // and https://tools.ietf.org/html/rfc3629
-        var u = str.codePointAt(i);
-        if (u <= 0x7F) {
-          if (outIdx >= endIdx) break;
-          heap[outIdx++] = u;
-        } else if (u <= 0x7FF) {
-          if (outIdx + 1 >= endIdx) break;
-          heap[outIdx++] = 0xC0 | (u >> 6);
-          heap[outIdx++] = 0x80 | (u & 63);
-        } else if (u <= 0xFFFF) {
-          if (outIdx + 2 >= endIdx) break;
-          heap[outIdx++] = 0xE0 | (u >> 12);
-          heap[outIdx++] = 0x80 | ((u >> 6) & 63);
-          heap[outIdx++] = 0x80 | (u & 63);
-        } else {
-          if (outIdx + 3 >= endIdx) break;
-          heap[outIdx++] = 0xF0 | (u >> 18);
-          heap[outIdx++] = 0x80 | ((u >> 12) & 63);
-          heap[outIdx++] = 0x80 | ((u >> 6) & 63);
-          heap[outIdx++] = 0x80 | (u & 63);
-          // Gotcha: if codePoint is over 0xFFFF, it is represented as a surrogate pair in UTF-16.
-          // We need to manually skip over the second code unit for correct iteration.
-          i++;
-        }
+  var readEmAsmArgsArray = [];
+  var readEmAsmArgs = (sigPtr, buf) => {
+      readEmAsmArgsArray.length = 0;
+      var ch;
+      // Most arguments are i32s, so shift the buffer pointer so it is a plain
+      // index into HEAP32.
+      while (ch = HEAPU8[sigPtr++]) {
+        // Floats are always passed as doubles, so all types except for 'i'
+        // are 8 bytes and require alignment.
+        var wide = (ch != 105);
+        wide &= (ch != 112);
+        buf += wide && (buf % 8) ? 4 : 0;
+        readEmAsmArgsArray.push(
+          // Special case for pointers under wasm64 or CAN_ADDRESS_2GB mode.
+          ch == 112 ? HEAPU32[((buf)>>2)] :
+          ch == 106 ? HEAP64[((buf)>>3)] :
+          ch == 105 ?
+            HEAP32[((buf)>>2)] :
+            HEAPF64[((buf)>>3)]
+        );
+        buf += wide ? 8 : 4;
       }
-      // Null-terminate the pointer to the buffer.
-      heap[outIdx] = 0;
-      return outIdx - startIdx;
+      return readEmAsmArgsArray;
     };
-  var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
-      return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
+  var runEmAsmFunction = (code, sigPtr, argbuf) => {
+      var args = readEmAsmArgs(sigPtr, argbuf);
+      return ASM_CONSTS[code](...args);
     };
-  var __tzset_js = (timezone, daylight, std_name, dst_name) => {
-      // TODO: Use (malleable) environment variables instead of system settings.
-      var currentYear = new Date().getFullYear();
-      var winter = new Date(currentYear, 0, 1);
-      var summer = new Date(currentYear, 6, 1);
-      var winterOffset = winter.getTimezoneOffset();
-      var summerOffset = summer.getTimezoneOffset();
-  
-      // Local standard timezone offset. Local standard time is not adjusted for
-      // daylight savings.  This code uses the fact that getTimezoneOffset returns
-      // a greater value during Standard Time versus Daylight Saving Time (DST).
-      // Thus it determines the expected output during Standard Time, and it
-      // compares whether the output of the given date the same (Standard) or less
-      // (DST).
-      var stdTimezoneOffset = Math.max(winterOffset, summerOffset);
-  
-      // timezone is specified as seconds west of UTC ("The external variable
-      // `timezone` shall be set to the difference, in seconds, between
-      // Coordinated Universal Time (UTC) and local standard time."), the same
-      // as returned by stdTimezoneOffset.
-      // See http://pubs.opengroup.org/onlinepubs/009695399/functions/tzset.html
-      HEAPU32[((timezone)>>2)] = stdTimezoneOffset * 60;
-  
-      HEAP32[((daylight)>>2)] = Number(winterOffset != summerOffset);
-  
-      var extractZone = (timezoneOffset) => {
-        // Why inverse sign?
-        // Read here https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/getTimezoneOffset
-        var sign = timezoneOffset >= 0 ? "-" : "+";
-  
-        var absOffset = Math.abs(timezoneOffset)
-        var hours = String(Math.floor(absOffset / 60)).padStart(2, "0");
-        var minutes = String(absOffset % 60).padStart(2, "0");
-  
-        return `UTC${sign}${hours}${minutes}`;
-      }
-  
-      var winterName = extractZone(winterOffset);
-      var summerName = extractZone(summerOffset);
-      if (summerOffset < winterOffset) {
-        // Northern hemisphere
-        stringToUTF8(winterName, std_name, 17);
-        stringToUTF8(summerName, dst_name, 17);
-      } else {
-        stringToUTF8(winterName, dst_name, 17);
-        stringToUTF8(summerName, std_name, 17);
-      }
+  var _emscripten_asm_const_int = (code, sigPtr, argbuf) => {
+      return runEmAsmFunction(code, sigPtr, argbuf);
     };
-
-  
-  var _emscripten_date_now = () => Date.now();
-  
-  var nowIsMonotonic = 1;
-  
-  var checkWasiClock = (clock_id) => clock_id >= 0 && clock_id <= 3;
-  
-  function _clock_time_get(clk_id, ignored_precision, ptime) {
-    ignored_precision = bigintToI53Checked(ignored_precision);
-  
-  
-      if (!checkWasiClock(clk_id)) {
-        return 28;
-      }
-      var now;
-      // all wasi clocks but realtime are monotonic
-      if (clk_id === 0) {
-        now = _emscripten_date_now();
-      } else if (nowIsMonotonic) {
-        now = _emscripten_get_now();
-      } else {
-        return 52;
-      }
-      // "now" is in ms, and wasi times are in ns.
-      var nsec = Math.round(now * 1000 * 1000);
-      HEAP64[((ptime)>>3)] = BigInt(nsec);
-      return 0;
-    ;
-  }
 
   var _emscripten_has_asyncify = () => 1;
 
@@ -993,6 +860,49 @@ async function createWasm() {
       return len;
     };
   
+  var stringToUTF8Array = (str, heap, outIdx, maxBytesToWrite) => {
+      // Parameter maxBytesToWrite is not optional. Negative values, 0, null,
+      // undefined and false each don't write out any bytes.
+      if (!(maxBytesToWrite > 0))
+        return 0;
+  
+      var startIdx = outIdx;
+      var endIdx = outIdx + maxBytesToWrite - 1; // -1 for string null terminator.
+      for (var i = 0; i < str.length; ++i) {
+        // For UTF8 byte structure, see http://en.wikipedia.org/wiki/UTF-8#Description
+        // and https://www.ietf.org/rfc/rfc2279.txt
+        // and https://tools.ietf.org/html/rfc3629
+        var u = str.codePointAt(i);
+        if (u <= 0x7F) {
+          if (outIdx >= endIdx) break;
+          heap[outIdx++] = u;
+        } else if (u <= 0x7FF) {
+          if (outIdx + 1 >= endIdx) break;
+          heap[outIdx++] = 0xC0 | (u >> 6);
+          heap[outIdx++] = 0x80 | (u & 63);
+        } else if (u <= 0xFFFF) {
+          if (outIdx + 2 >= endIdx) break;
+          heap[outIdx++] = 0xE0 | (u >> 12);
+          heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+          heap[outIdx++] = 0x80 | (u & 63);
+        } else {
+          if (outIdx + 3 >= endIdx) break;
+          heap[outIdx++] = 0xF0 | (u >> 18);
+          heap[outIdx++] = 0x80 | ((u >> 12) & 63);
+          heap[outIdx++] = 0x80 | ((u >> 6) & 63);
+          heap[outIdx++] = 0x80 | (u & 63);
+          // Gotcha: if codePoint is over 0xFFFF, it is represented as a surrogate pair in UTF-16.
+          // We need to manually skip over the second code unit for correct iteration.
+          i++;
+        }
+      }
+      // Null-terminate the pointer to the buffer.
+      heap[outIdx] = 0;
+      return outIdx - startIdx;
+    };
+  var stringToUTF8 = (str, outPtr, maxBytesToWrite) => {
+      return stringToUTF8Array(str, HEAPU8, outPtr, maxBytesToWrite);
+    };
   
   var stackAlloc = (sz) => __emscripten_stack_alloc(sz);
   var stringToUTF8OnStack = (str) => {
@@ -1639,6 +1549,10 @@ async function createWasm() {
           };
   
   
+  var INT53_MAX = 9007199254740992;
+  
+  var INT53_MIN = -9007199254740992;
+  var bigintToI53Checked = (num) => (num < INT53_MIN || num > INT53_MAX) ? NaN : Number(num);
   function _emwgpuAdapterRequestDevice(adapterPtr, futureId, deviceLostFutureId, devicePtr, queuePtr, descriptor) {
     futureId = bigintToI53Checked(futureId);
     deviceLostFutureId = bigintToI53Checked(deviceLostFutureId);
@@ -2081,10 +1995,6 @@ async function createWasm() {
     };
 
   var _fd_close = (fd) => {
-      return 52;
-    };
-
-  var _fd_read = (fd, iov, iovcnt, pnum) => {
       return 52;
     };
 
@@ -2913,9 +2823,17 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 
 // end include: postlibrary.js
 
+var ASM_CONSTS = {
+  27964: ($0) => { window.gpuDevice = WebGPU.getJsObject($0); }
+};
 
 // Imports from the Wasm binary.
-var _mgpuInitializeContext,
+var _malloc,
+  _mgpuSetLogCallback,
+  _mgpuSetLogLevel,
+  _mgpuFreeLogMessage,
+  _free,
+  _mgpuInitializeContext,
   _mgpuInitializeContextAsync,
   _mgpuDestroyContext,
   _mgpuCreateComputeShader,
@@ -2973,9 +2891,12 @@ var _mgpuInitializeContext,
   _mgpuCreateD3D11DeviceOnDawnAdapter,
   _mgpuVideoTextureBGRAToRGBASharedOutput,
   _mgpuCopyBufferToSharedOutputTexture,
+  _mgpuCopyBufferF32ToSharedOutputTexture,
   _mgpuSharedOutputTextureDebugReadFirstPixel,
   _mgpuSharedOutputTextureDebugReadFirstPixelDawn,
   _mgpuDestroySharedOutputTexture,
+  _mgpuGetWGPUDeviceHandle,
+  _mgpuGetWGPUBufferHandle,
   _emwgpuCreateBindGroup,
   _emwgpuCreateBindGroupLayout,
   _emwgpuCreateCommandBuffer,
@@ -3007,11 +2928,9 @@ var _mgpuInitializeContext,
   _emwgpuOnRequestDeviceCompleted,
   _emwgpuOnWorkDoneCompleted,
   _emwgpuOnUncapturedError,
-  _free,
   _memcpy,
   __emscripten_timeout,
   _memalign,
-  _malloc,
   __emscripten_stack_restore,
   __emscripten_stack_alloc,
   _emscripten_stack_get_current,
@@ -3027,16 +2946,6 @@ var _mgpuInitializeContext,
   dynCall_iidiiii,
   dynCall_iiii,
   dynCall_jiji,
-  dynCall_viijii,
-  dynCall_iiiii,
-  dynCall_iiiiii,
-  dynCall_iiiiiiiii,
-  dynCall_iiiiiii,
-  dynCall_iiiiij,
-  dynCall_iiiiid,
-  dynCall_iiiiijj,
-  dynCall_iiiiiiii,
-  dynCall_iiiiiijj,
   dynCall_viiiiii,
   _asyncify_start_unwind,
   _asyncify_stop_unwind,
@@ -3045,6 +2954,11 @@ var _mgpuInitializeContext,
 
 
 function assignWasmExports(wasmExports) {
+  Module['_malloc'] = _malloc = wasmExports['malloc'];
+  Module['_mgpuSetLogCallback'] = _mgpuSetLogCallback = wasmExports['mgpuSetLogCallback'];
+  Module['_mgpuSetLogLevel'] = _mgpuSetLogLevel = wasmExports['mgpuSetLogLevel'];
+  Module['_mgpuFreeLogMessage'] = _mgpuFreeLogMessage = wasmExports['mgpuFreeLogMessage'];
+  Module['_free'] = _free = wasmExports['free'];
   Module['_mgpuInitializeContext'] = _mgpuInitializeContext = wasmExports['mgpuInitializeContext'];
   Module['_mgpuInitializeContextAsync'] = _mgpuInitializeContextAsync = wasmExports['mgpuInitializeContextAsync'];
   Module['_mgpuDestroyContext'] = _mgpuDestroyContext = wasmExports['mgpuDestroyContext'];
@@ -3103,9 +3017,12 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuCreateD3D11DeviceOnDawnAdapter'] = _mgpuCreateD3D11DeviceOnDawnAdapter = wasmExports['mgpuCreateD3D11DeviceOnDawnAdapter'];
   Module['_mgpuVideoTextureBGRAToRGBASharedOutput'] = _mgpuVideoTextureBGRAToRGBASharedOutput = wasmExports['mgpuVideoTextureBGRAToRGBASharedOutput'];
   Module['_mgpuCopyBufferToSharedOutputTexture'] = _mgpuCopyBufferToSharedOutputTexture = wasmExports['mgpuCopyBufferToSharedOutputTexture'];
+  Module['_mgpuCopyBufferF32ToSharedOutputTexture'] = _mgpuCopyBufferF32ToSharedOutputTexture = wasmExports['mgpuCopyBufferF32ToSharedOutputTexture'];
   Module['_mgpuSharedOutputTextureDebugReadFirstPixel'] = _mgpuSharedOutputTextureDebugReadFirstPixel = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixel'];
   Module['_mgpuSharedOutputTextureDebugReadFirstPixelDawn'] = _mgpuSharedOutputTextureDebugReadFirstPixelDawn = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixelDawn'];
   Module['_mgpuDestroySharedOutputTexture'] = _mgpuDestroySharedOutputTexture = wasmExports['mgpuDestroySharedOutputTexture'];
+  Module['_mgpuGetWGPUDeviceHandle'] = _mgpuGetWGPUDeviceHandle = wasmExports['mgpuGetWGPUDeviceHandle'];
+  Module['_mgpuGetWGPUBufferHandle'] = _mgpuGetWGPUBufferHandle = wasmExports['mgpuGetWGPUBufferHandle'];
   _emwgpuCreateBindGroup = wasmExports['emwgpuCreateBindGroup'];
   _emwgpuCreateBindGroupLayout = wasmExports['emwgpuCreateBindGroupLayout'];
   _emwgpuCreateCommandBuffer = wasmExports['emwgpuCreateCommandBuffer'];
@@ -3137,11 +3054,9 @@ function assignWasmExports(wasmExports) {
   _emwgpuOnRequestDeviceCompleted = wasmExports['emwgpuOnRequestDeviceCompleted'];
   _emwgpuOnWorkDoneCompleted = wasmExports['emwgpuOnWorkDoneCompleted'];
   _emwgpuOnUncapturedError = wasmExports['emwgpuOnUncapturedError'];
-  Module['_free'] = _free = wasmExports['free'];
   Module['_memcpy'] = _memcpy = wasmExports['memcpy'];
   __emscripten_timeout = wasmExports['_emscripten_timeout'];
   _memalign = wasmExports['memalign'];
-  Module['_malloc'] = _malloc = wasmExports['malloc'];
   __emscripten_stack_restore = wasmExports['_emscripten_stack_restore'];
   __emscripten_stack_alloc = wasmExports['_emscripten_stack_alloc'];
   _emscripten_stack_get_current = wasmExports['emscripten_stack_get_current'];
@@ -3157,16 +3072,6 @@ function assignWasmExports(wasmExports) {
   dynCalls['iidiiii'] = dynCall_iidiiii = wasmExports['dynCall_iidiiii'];
   dynCalls['iiii'] = dynCall_iiii = wasmExports['dynCall_iiii'];
   dynCalls['jiji'] = dynCall_jiji = wasmExports['dynCall_jiji'];
-  dynCalls['viijii'] = dynCall_viijii = wasmExports['dynCall_viijii'];
-  dynCalls['iiiii'] = dynCall_iiiii = wasmExports['dynCall_iiiii'];
-  dynCalls['iiiiii'] = dynCall_iiiiii = wasmExports['dynCall_iiiiii'];
-  dynCalls['iiiiiiiii'] = dynCall_iiiiiiiii = wasmExports['dynCall_iiiiiiiii'];
-  dynCalls['iiiiiii'] = dynCall_iiiiiii = wasmExports['dynCall_iiiiiii'];
-  dynCalls['iiiiij'] = dynCall_iiiiij = wasmExports['dynCall_iiiiij'];
-  dynCalls['iiiiid'] = dynCall_iiiiid = wasmExports['dynCall_iiiiid'];
-  dynCalls['iiiiijj'] = dynCall_iiiiijj = wasmExports['dynCall_iiiiijj'];
-  dynCalls['iiiiiiii'] = dynCall_iiiiiiii = wasmExports['dynCall_iiiiiiii'];
-  dynCalls['iiiiiijj'] = dynCall_iiiiiijj = wasmExports['dynCall_iiiiiijj'];
   dynCalls['viiiiii'] = dynCall_viiiiii = wasmExports['dynCall_viiiiii'];
   _asyncify_start_unwind = wasmExports['asyncify_start_unwind'];
   _asyncify_stop_unwind = wasmExports['asyncify_stop_unwind'];
@@ -3183,13 +3088,9 @@ var wasmImports = {
   /** @export */
   _emscripten_runtime_keepalive_clear: __emscripten_runtime_keepalive_clear,
   /** @export */
-  _localtime_js: __localtime_js,
-  /** @export */
   _setitimer_js: __setitimer_js,
   /** @export */
-  _tzset_js: __tzset_js,
-  /** @export */
-  clock_time_get: _clock_time_get,
+  emscripten_asm_const_int: _emscripten_asm_const_int,
   /** @export */
   emscripten_has_asyncify: _emscripten_has_asyncify,
   /** @export */
@@ -3224,8 +3125,6 @@ var wasmImports = {
   environ_sizes_get: _environ_sizes_get,
   /** @export */
   fd_close: _fd_close,
-  /** @export */
-  fd_read: _fd_read,
   /** @export */
   fd_seek: _fd_seek,
   /** @export */

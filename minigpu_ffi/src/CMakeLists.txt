@@ -235,7 +235,7 @@ if(NOT EMSCRIPTEN)
   endif()
   # Platform-specific libs for minigpu_external.cpp
   if(WIN32)
-    target_link_libraries(${MAIN_LIB} PRIVATE d3d11 dxgi)
+    target_link_libraries(${MAIN_LIB} PRIVATE d3d11 d3d12 dxgi)
   endif()
   if(APPLE)
     target_link_libraries(${MAIN_LIB} PRIVATE
@@ -261,7 +261,7 @@ if(NOT EMSCRIPTEN)
     target_link_libraries(minigpu_test PRIVATE ${MAIN_LIB})
     target_link_libraries(minigpu_test PRIVATE webgpu_dawn)
     if(WIN32)
-        target_link_libraries(minigpu_test PRIVATE d3d11 dxgi)
+        target_link_libraries(minigpu_test PRIVATE d3d11 d3d12 dxgi)
     endif()
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
     # Dawn native include dirs needed for minigpu_external.cpp and test headers

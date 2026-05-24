@@ -325,6 +325,10 @@ abstract class PlatformSharedOutputTexture {
   /// Debug-only: read the first pixel via Dawn's CopyTextureToBuffer + map.
   int debugReadFirstPixelDawn() => 0;
 
+  /// On web, returns the JS GPUTexture object from the Emscripten WebGPU
+  /// object table. Null on all native platforms.
+  Object? get webGpuTextureJs => null;
+
   void destroy();
 }
 

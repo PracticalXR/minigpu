@@ -55,6 +55,19 @@ class MinigpuWeb extends MinigpuPlatform {
     return null;
   }
 
+  @override
+  PlatformSharedOutputTexture? createSharedOutputTexture(
+    int width,
+    int height,
+  ) {
+    // On web we expose the GPU buffer handle directly to the view layer via
+    // webGpuTextureJs.  There is no separate WGPUTexture allocation here —
+    // the view plugin reads the buffer handle and blits via copyBufferToTexture
+    // on the canvas device.  We use a lightweight wrapper that carries only
+    // width/height and a reference to nothing until copyFromBufferF32 is called.
+    return WebPlatformSharedOutputTexture(width, height);
+  }
+
   /// Web-specific: import a VideoFrame (WebCodecs) as a GPUExternalTexture.
   /// [videoFrame] must be a [JSAny] pointing to a VideoFrame JS object.
   WebVideoTexture? importVideoFrameWeb(
@@ -354,5 +367,73 @@ class WebVideoTexture implements PlatformVideoTexture {
   @override
   void destroy() {
     // GPUExternalTexture lifetime is managed by the browser; no explicit destroy.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Web shared-output texture — GPU buffer → JS GPUBuffer handle → canvas blit
+// ---------------------------------------------------------------------------
+
+/// Web implementation of [PlatformSharedOutputTexture].
+///
+/// On web there is no D3D12/D3D11 texture sharing.  Instead the Dart view
+/// layer reads [webGpuTextureJs] to obtain the JS GPUBuffer object for the
+/// last buffer written via [copyFromBufferF32], then blits it to the canvas
+/// using `device.queue.copyBufferToTexture` (handled by `minigpu_view_web`).
+class WebPlatformSharedOutputTexture implements PlatformSharedOutputTexture {
+  WebPlatformSharedOutputTexture(this._width, this._height);
+
+  final int _width;
+  final int _height;
+
+  /// The last buffer that was passed to [copyFromBufferF32].
+  /// Its WGPUBuffer handle is exposed as [webGpuTextureJs].
+  wasm.MGPUBuffer? _lastBuffer;
+
+  @override
+  int get width => _width;
+
+  @override
+  int get height => _height;
+
+  @override
+  int get d3d11Handle => 0;
+
+  @override
+  int get d3d11TexturePtr => 0;
+
+  @override
+  bool copyFromBuffer(PlatformBuffer src) => false;
+
+  @override
+  bool copyFromBufferF32(PlatformBuffer src) {
+    if (src is! WebBuffer) return false;
+    // Store the buffer reference so that webGpuTextureJs can return the
+    // correct JS object when asPreviewSource() is called immediately after.
+    _lastBuffer = src._buffer;
+    return true;
+  }
+
+  /// Returns the Emscripten integer handle for the WGPUBuffer last written
+  /// via [copyFromBufferF32].  The view plugin resolves the JS GPUBuffer via
+  /// `WebGPU.getJsObject(handle)` locally — integers are codec-safe.
+  /// Returns 0 if no buffer has been written yet.
+  @override
+  Object? get webGpuTextureJs {
+    final buf = _lastBuffer;
+    if (buf == null) return null;
+    final handle = wasm.mgpuGetWGPUBufferHandle(buf);
+    return handle == 0 ? null : handle; // int, not JSObject — codec-safe
+  }
+
+  @override
+  int debugReadFirstPixel() => 0;
+
+  @override
+  int debugReadFirstPixelDawn() => 0;
+
+  @override
+  void destroy() {
+    _lastBuffer = null;
   }
 }

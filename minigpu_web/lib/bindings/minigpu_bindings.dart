@@ -1050,7 +1050,7 @@ void mgpuWriteDouble(MGPUBuffer buffer, Float64List inputData, int size) {
 }
 
 // ---------------------------------------------------------------------------
-// Web video texture — GPUDevice.importExternalTexture
+// Web video texture ï¿½ GPUDevice.importExternalTexture
 // ---------------------------------------------------------------------------
 // The VideoFrame JS object is passed as a JSAny handle.
 // GPUExternalTexture is valid only for the current task (microtask boundary).
@@ -1081,3 +1081,25 @@ JSObject? mgpuImportExternalTexture(JSAny videoFrame) {
     return null;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Emscripten WASM exports â€” device and buffer handles
+// ---------------------------------------------------------------------------
+// Note: getWebGpuJsObject() lives in webgpu_interop.dart (no @JS('Module')
+// scope) so it accesses the global window.WebGPU object, not Module.WebGPU.
+
+@JS('_mgpuGetWGPUDeviceHandle')
+external JSNumber _mgpuGetWGPUDeviceHandleJs();
+
+/// Returns the Emscripten integer handle for the WGPUDevice.
+/// Pass to [getWebGpuJsObject] from webgpu_interop.dart to get the JS GPUDevice.
+int mgpuGetWGPUDeviceHandle() =>
+    _mgpuGetWGPUDeviceHandleJs().toDartDouble.toInt();
+
+@JS('_mgpuGetWGPUBufferHandle')
+external JSNumber _mgpuGetWGPUBufferHandleJs(MGPUBuffer buf);
+
+/// Returns the Emscripten integer handle for a WGPUBuffer inside [buf].
+/// Pass to [getWebGpuJsObject] from webgpu_interop.dart to get the JS GPUBuffer.
+int mgpuGetWGPUBufferHandle(MGPUBuffer buf) =>
+    _mgpuGetWGPUBufferHandleJs(buf).toDartDouble.toInt();

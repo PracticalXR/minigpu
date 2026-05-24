@@ -258,6 +258,9 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
       ffi.mgpuSharedOutputTextureGetD3D11Handle(_self).address;
 
   @override
+  Object? get webGpuTextureJs => null; // native-only; no JS objects on FFI
+
+  @override
   int get d3d11TexturePtr =>
       ffi.mgpuSharedOutputTextureGetD3D11Texture(_self).address;
 

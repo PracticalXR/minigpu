@@ -57,12 +57,14 @@ void main(List<String> args) async {
           'To fix, pre-build Dawn for '
           '${input.config.code.targetOS}/${input.config.code.targetArchitecture}'
           ' and place the output in one of:\n'
-          '  A) Set MINIGPU_DAWN_DIR=<dawn-root> (env var), then put the\n'
-          '     build_${osKey}_$archKey/ folder inside it.\n'
-          '  B) Copy build_${osKey}_$archKey/ to:\n'
-          '     ${systemDir != null ? p.join(systemDir, 'build_${osKey}_$archKey') : "(system dir unavailable)"}\n'
-          '  C) Place it at: '
-          '${sourceDir.absolute.uri.resolve('external/dawn/build_${osKey}_$archKey/').toFilePath()}',
+          '  A) Central path (recommended):\n'
+          '     ${systemDir != null ? p.join(systemDir, 'build_${osKey}_$archKey') : "(unavailable on this platform)"}\n'
+          '     On Windows this is %SYSTEMDRIVE%\\dawn\\build_${osKey}_$archKey\n'
+          '     (Dawn is cloned here automatically on first build)\n\n'
+          '  B) Set MINIGPU_DAWN_DIR=<dawn-root> (env var override), then put\n'
+          '     build_${osKey}_$archKey/ inside it.\n\n'
+          '  C) Package-nested fallback:\n'
+          '     ${p.join(sourceDir.absolute.path, 'external', 'dawn', 'build_${osKey}_$archKey')}',
         );
       }
 
@@ -170,14 +172,18 @@ Future<void> runBuild(
 /// Returns a prioritised list of directories to search for the pre-built Dawn
 /// shared library, for the current target OS + architecture:
 ///
-///   1. `MINIGPU_DAWN_DIR` env var — set this to a "dawn root" that contains a
+///   1. `MINIGPU_DAWN_DIR` env var — set this to a Dawn root that contains a
 ///      `build_{os}_{arch}/` subdirectory.  Good for CI or custom builds.
-///   2. Platform AppData / data-home (`%LOCALAPPDATA%\minigpu\dawn` on Windows,
-///      `~/Library/Application Support/minigpu/dawn` on macOS,
-///      `~/.local/share/minigpu/dawn` on Linux).  One Dawn build shared across
-///      all projects on the machine.
-///   3. Package-nested `src/external/dawn/` — the original location, kept as a
-///      fallback for local development or when packaging Dawn with the source.
+///      Example (Windows): `set MINIGPU_DAWN_DIR=D:\my_dawn`
+///
+///   2. Platform central path — shared across all projects on the machine.
+///      Windows : `%SYSTEMDRIVE%\dawn`  (e.g. `C:\dawn`)
+///      macOS   : `~/dawn`
+///      Linux   : `~/dawn`
+///      Short paths are used on Windows to stay within MAX_PATH (260 chars).
+///      On first build, Dawn is cloned here automatically.
+///
+///   3. Package-nested `src/external/dawn/` — Emscripten / last-resort fallback.
 List<Uri> _dawnSearchDirs(BuildInput input, Uri srcDir) {
   final osKey = _osKey(input);
   final archKey = _archKey(
@@ -210,25 +216,24 @@ List<Uri> _dawnSearchDirs(BuildInput input, Uri srcDir) {
 ///
 /// The layout under this root mirrors the package-nested layout:
 ///   <root>/build_{os}_{arch}/   — same convention as src/external/dawn/
+///
+/// Windows uses a short root-level path (%SYSTEMDRIVE%\dawn, e.g. C:\dawn)
+/// to stay well within the 260-char MAX_PATH limit that Dawn's deeply-nested
+/// source tree can otherwise exceed.
 String? _systemDawnRoot() {
   if (Platform.isWindows) {
-    final localAppData = Platform.environment['LOCALAPPDATA'];
-    if (localAppData != null && localAppData.isNotEmpty) {
-      return p.join(localAppData, 'minigpu', 'dawn');
-    }
+    // Short path avoids MAX_PATH issues with Dawn's deeply nested source tree.
+    final drive = Platform.environment['SYSTEMDRIVE'] ?? 'C:';
+    return p.join(drive, 'dawn');
   } else if (Platform.isMacOS) {
     final home = Platform.environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      return p.join(home, 'Library', 'Application Support', 'minigpu', 'dawn');
+      return p.join(home, 'dawn');
     }
   } else if (Platform.isLinux) {
-    final xdgData = Platform.environment['XDG_DATA_HOME'];
-    if (xdgData != null && xdgData.isNotEmpty) {
-      return p.join(xdgData, 'minigpu', 'dawn');
-    }
     final home = Platform.environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      return p.join(home, '.local', 'share', 'minigpu', 'dawn');
+      return p.join(home, 'dawn');
     }
   }
   return null;

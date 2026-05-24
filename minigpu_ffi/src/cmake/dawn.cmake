@@ -17,12 +17,25 @@ set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/_fetchcontent")
 # Determine where Dawn source lives.
 #
 # Priority (highest to lowest):
-#   0. DAWN_DIR already set from the cmake command line (-DDAWN_DIR=…)
+#   0. DAWN_DIR cmake variable (-DDAWN_DIR=…)
 #      The Dart build hook (hook/build.dart) always passes this, so this is
 #      the normal path when building through Flutter / dart pub.
-#   1. MINIGPU_DAWN_DIR env var  — explicit path override
-#   2. Platform AppData / data-home  — shared checkout across all projects
-#   3. Package-nested src/external/dawn — local dev / bundled source fallback
+#      The hook resolves DAWN_DIR from the same priority chain below.
+#
+#   1. MINIGPU_DAWN_DIR environment variable
+#      Set this to override the default central path on any platform.
+#      Example:  set MINIGPU_DAWN_DIR=D:\my_dawn
+#      The build expects a build_{os}_{arch}/ subdirectory inside it.
+#
+#   2. Platform central path  (default for all normal builds)
+#      Windows : %SYSTEMDRIVE%\dawn          (e.g. C:\dawn)
+#      macOS   : ~/dawn
+#      Linux   : ~/dawn
+#      Short paths are used on Windows to stay within the 260-char MAX_PATH
+#      limit that Dawn's deeply-nested source tree can otherwise exceed.
+#      On first build, Dawn is cloned here automatically.
+#
+#   3. Package-nested src/external/dawn  (Emscripten / last-resort fallback)
 #
 # Uses CMAKE_HOST_WIN32 / CMAKE_HOST_APPLE / CMAKE_HOST_UNIX rather than
 # WIN32 / APPLE / UNIX so cross-compilation (e.g. Android on a Windows host)
@@ -35,14 +48,18 @@ if(NOT DEFINED DAWN_DIR OR DAWN_DIR STREQUAL "")
     message(STATUS "Dawn: using MINIGPU_DAWN_DIR env override")
   elseif(NOT EMSCRIPTEN)
     # CMAKE_HOST_APPLE must be tested before CMAKE_HOST_UNIX (macOS satisfies both).
-    if(CMAKE_HOST_WIN32 AND DEFINED ENV{LOCALAPPDATA} AND NOT "$ENV{LOCALAPPDATA}" STREQUAL "")
-      set(_dawn_root "$ENV{LOCALAPPDATA}/minigpu/dawn")
+    # Windows uses a short root-level path (%SYSTEMDRIVE%\dawn, e.g. C:\dawn) to
+    # stay within the 260-char MAX_PATH limit that Dawn's nested source can exceed.
+    if(CMAKE_HOST_WIN32)
+      if(DEFINED ENV{SYSTEMDRIVE} AND NOT "$ENV{SYSTEMDRIVE}" STREQUAL "")
+        set(_dawn_root "$ENV{SYSTEMDRIVE}/dawn")
+      else()
+        set(_dawn_root "C:/dawn")
+      endif()
     elseif(CMAKE_HOST_APPLE AND DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-      set(_dawn_root "$ENV{HOME}/Library/Application Support/minigpu/dawn")
-    elseif(CMAKE_HOST_UNIX AND DEFINED ENV{XDG_DATA_HOME} AND NOT "$ENV{XDG_DATA_HOME}" STREQUAL "")
-      set(_dawn_root "$ENV{XDG_DATA_HOME}/minigpu/dawn")
+      set(_dawn_root "$ENV{HOME}/dawn")
     elseif(CMAKE_HOST_UNIX AND DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
-      set(_dawn_root "$ENV{HOME}/.local/share/minigpu/dawn")
+      set(_dawn_root "$ENV{HOME}/dawn")
     else()
       set(_dawn_root "${CMAKE_CURRENT_SOURCE_DIR}/external/dawn")
     endif()

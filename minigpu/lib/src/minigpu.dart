@@ -66,6 +66,9 @@ final class Minigpu {
   Future<void> destroy() async {
     if (!isInitialized) throw MinigpuNotInitializedError();
 
+    _copyShader?.destroy();
+    _copyShader = null;
+
     await _platform.destroyContext();
     isInitialized = false;
   }
@@ -115,6 +118,7 @@ final class Minigpu {
   void onShaderDestroyed(ComputeShader shader) {
     if (_liveShaderCount > 0) _liveShaderCount--;
     _liveShaders.remove(shader);
+    if (identical(shader, _copyShader)) _copyShader = null;
   }
 
   /// Destroys all currently tracked live shaders and clears the tracking list.
@@ -186,5 +190,52 @@ final class Minigpu {
   int createD3D11DeviceOnDawnAdapter() {
     if (!isInitialized) throw MinigpuNotInitializedError();
     return _platform.createD3D11DeviceOnDawnAdapter();
+  }
+
+  // -------------------------------------------------------------------------
+  // Buffer copy
+  // -------------------------------------------------------------------------
+
+  /// WGSL kernel: copies [elementCount] u32 words from src to dst.
+  static const _kCopyWgsl = r'''
+@group(0) @binding(0) var<storage, read_write> src : array<u32>;
+@group(0) @binding(1) var<storage, read_write> dst : array<u32>;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let n = arrayLength(&src);
+  if (gid.x >= n) { return; }
+  dst[gid.x] = src[gid.x];
+}
+''';
+
+  /// Lazily-created shader for [copyBuffer].
+  ComputeShader? _copyShader;
+
+  /// GPU-side buffer copy — copies [elementCount] elements from [src] to [dst]
+  /// entirely on the GPU using a WGSL compute shader (no CPU round-trip).
+  ///
+  /// Both buffers must have been created on this [Minigpu] instance and must
+  /// be large enough for [elementCount] elements at their respective data types.
+  ///
+  /// [elementCount] must be provided — use [getBufferSizeForType] divided by
+  /// the element byte-size if you only know the byte size.
+  ///
+  /// The shader is created once and reused across calls.
+  Future<void> copyBuffer(
+    Buffer src,
+    Buffer dst, {
+    required int elementCount,
+  }) async {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+
+    _copyShader ??= createComputeShader()..loadKernelString(_kCopyWgsl);
+
+    _copyShader!
+      ..setBufferAtSlot(0, src)
+      ..setBufferAtSlot(1, dst);
+
+    final int groups = (elementCount + 63) ~/ 64;
+    await _copyShader!.dispatch(groups, 1, 1);
   }
 }

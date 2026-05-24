@@ -13,7 +13,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:minigpu/minigpu.dart';
-import 'package:minigpu_view/miniav_view.dart';
+import 'package:minigpu_view/minigpu_view.dart';
 
 void main() {
   runApp(const MinigpuViewExampleApp());

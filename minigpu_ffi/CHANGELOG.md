@@ -1,5 +1,41 @@
 # minigpu_ffi CHANGELOG
 
+## 1.5.2
+
+- Add buffer copy
+
+## 1.5.1
+
+- fix frame wait and timeouts
+
+## 1.5.0
+
+- Fix handle issue, release 1.5.0
+
+## 1.4.15
+
+- fix fallback paths
+
+## 1.4.14
+
+- fix Tier C
+
+## 1.4.12
+
+- fix texture path
+
+## 1.4.11
+
+- fixing build hook
+
+## 1.4.9
+
+- tryfix central dawn location
+
+## 1.4.8
+
+- fixes texture path on windows, fixes texture view on web
+
 ## 1.4.7
 
 - Fixes logger characters

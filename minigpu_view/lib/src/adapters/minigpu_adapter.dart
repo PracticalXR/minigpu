@@ -3,6 +3,7 @@ library;
 
 import 'dart:ui' show Size;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:minigpu/minigpu.dart';
 
 import '../preview_source.dart';
@@ -12,7 +13,19 @@ extension MinigpuPreviewSourceAdapter on SharedOutputTexture {
   /// Wrap as a [PreviewSource]. The widget borrows the underlying GPU
   /// texture; do **not** destroy the [SharedOutputTexture] until the
   /// preview controller has been disposed.
-  PreviewSource asPreviewSource() => _SharedOutputPreviewSource(this);
+  PreviewSource asPreviewSource() {
+    if (kIsWeb) {
+      // On web: ALWAYS return a webGpuTexture kind source — the web plugin
+      // does not handle nativeSharedTexture.  webGpuTextureJs may be null if
+      // copyFromBufferF32 hasn't been called yet (first frame); the view
+      // plugin skips the frame gracefully when 'buffer' is null.
+      return _WebGpuBufferPreviewSource(
+        platformTexture.webGpuTextureJs,
+        Size(width.toDouble(), height.toDouble()),
+      );
+    }
+    return _SharedOutputPreviewSource(this);
+  }
 }
 
 class _SharedOutputPreviewSource extends PreviewSource {
@@ -40,5 +53,34 @@ class _SharedOutputPreviewSource extends PreviewSource {
     'height': _tex.height,
     // Pixel format is implicit RGBA8 from minigpu's SharedOutputTexture.
     'pixelFormat': 'rgba8',
+  };
+}
+
+/// Web-only: carries the Emscripten WGPUBuffer integer handle as a
+/// [PreviewSourceKind.webGpuTexture] source.  Passing an integer (not a
+/// JSObject) through the method channel avoids StandardMessageCodec crashes.
+/// The view plugin resolves the JS GPUBuffer via WebGPU.getJsObject(handle).
+/// [_bufferHandle] is 0 / null when no buffer has been written yet; the view
+/// plugin skips the blit gracefully.
+class _WebGpuBufferPreviewSource extends PreviewSource {
+  final int? _bufferHandle; // Emscripten integer handle, 0/null = skip frame
+  final Size _size;
+
+  const _WebGpuBufferPreviewSource(Object? handle, this._size)
+    : _bufferHandle = handle is int ? handle : null;
+
+  @override
+  PreviewSourceKind get kind => PreviewSourceKind.webGpuTexture;
+
+  @override
+  Size get size => _size;
+
+  @override
+  Map<String, Object?> toChannelMessage() => {
+    // Integer handle — codec-safe.  0/null means skip this frame.
+    'bufferHandle': _bufferHandle,
+    'width': _size.width.toInt(),
+    'height': _size.height.toInt(),
+    'format': 'rgba32float',
   };
 }
