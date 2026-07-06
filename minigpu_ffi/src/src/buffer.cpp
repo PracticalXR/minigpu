@@ -1176,6 +1176,32 @@ void Buffer::readAsync(uint64_t *outputData, size_t elementCount, size_t offset,
   readAsyncImpl(outputData, elementCount, offset, kUInt64, callback);
 }
 
+void Buffer::writeBytesAt(const void *inputData, size_t byteSize,
+                          size_t dstByteOffset) {
+  if (!inputData || byteSize == 0) {
+    return;
+  }
+  if (!mgpu.isDeviceValid()) {
+    LOG_ERROR("MGPU context is not valid, cannot perform buffer operation");
+    throw std::runtime_error("WebGPU context not valid for buffer operation");
+  }
+  if (dstByteOffset + byteSize > bufferData.size) {
+    throw std::runtime_error(
+        "writeBytesAt out of range: offset=" + std::to_string(dstByteOffset) +
+        " size=" + std::to_string(byteSize) +
+        " buffer=" + std::to_string(bufferData.size));
+  }
+  // 4-byte alignment is a WebGPU requirement for queue writes.
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  WGPUQueue queue = mgpu.getQueue();
+  if (!queue || !bufferData.buffer) {
+    LOG_ERROR("Invalid WebGPU handles for writeBytesAt");
+    throw std::runtime_error("WebGPU handles not valid for buffer operation");
+  }
+  wgpuQueueWriteBuffer(queue, bufferData.buffer, dstByteOffset, inputData,
+                       byteSize);
+}
+
 template <typename T>
 void Buffer::writeDirect(const T *inputData, size_t byteSize,
                          BufferDataType type) {
@@ -1428,10 +1454,13 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   waitInfo.future = future;
   wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
   if (waitInfo.completed != true) {
-    LOG_WARN("wgpuInstanceWaitAny returned status %d, falling back to polling",
-             (int)waitInfo.completed);
+    // Hot-poll: Sleep(1) on Windows actually sleeps ~15ms under the default
+    // timer resolution which makes per-frame read-back dominate encoder
+    // throughput. Use ms=0 so platformSleep just calls
+    // wgpuInstanceProcessEvents + Sleep(0) (yield only). The GPU side
+    // typically completes within microseconds for small read-backs.
     while (!readState.completed) {
-      platformSleep(1, instance);
+      platformSleep(0, instance);
     }
   }
 

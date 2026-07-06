@@ -6,3 +6,17 @@ tags:
     #   --enable-unsafe-webgpu --disable-dawn-features=disallow_unsafe_apis
     # Tests tagged webgpu skip gracefully on non-GPU browsers.
     test_on: chrome
+
+# Chrome flags for WebGPU + SharedArrayBuffer (the pthread wasm build) in the
+# test runner. `flutter test --platform chrome` honors this file.
+override_platforms:
+  chrome:
+    settings:
+      # headless chrome grants no WebGPU adapter on this machine; headed
+      # chrome uses the real GPU (the window flashes briefly during tests).
+      headless: false
+      arguments: >-
+        --enable-unsafe-webgpu
+        --disable-dawn-features=disallow_unsafe_apis
+        --enable-features=SharedArrayBuffer
+        --enable-unsafe-swiftshader

@@ -1,8 +1,38 @@
 # minigpu
 
+## 1.5.5
+
+## 1.5.4
+
+- fix release version pins
+
+## 1.5.3
+
+- Add async shared-output-texture copy: `SharedOutputTexture.copyFromBufferAsync`
+  and `VideoTexture.bgraToRgbaSharedOutputAsync`. These run the GPU copy and the
+  cross-device present sync on minigpu's WebGPU worker thread and complete a
+  `Future` when finished, instead of busy-polling the present-wait on the calling
+  isolate — removing the dominant per-frame blocking cost on the shared-output
+  (zero-copy encode) path. The synchronous `copyFromBuffer` /
+  `bgraToRgbaSharedOutput` are unchanged.
+
 ## 1.5.2
 
-- Add buffer copy
+- Add `Minigpu.copyBuffer(src, dst, {required int elementCount})`: GPU-side
+  buffer-to-buffer copy using a WGSL compute shader — no CPU round-trip. The
+  copy shader (64-element workgroup, `array<u32>` storage bindings) is created
+  once per `Minigpu` instance on first call and reused for all subsequent calls.
+  Non-multiple-of-64 element counts are handled correctly via an `arrayLength`
+  guard in the shader.
+- `Minigpu.onShaderDestroyed` now nulls the cached copy-shader reference when
+  that shader is destroyed, preventing a double-destroy if
+  `destroyAllTrackedShaders()` is called before `destroy()`.
+- `Minigpu.destroy()` explicitly tears down the cached copy shader before
+  releasing the Dawn context.
+- New test suite `test/minigpu_copy_buffer_test.dart`: 14 tests covering
+  correctness (u32, f32, bit-pattern sentinel), partial copy, workgroup
+  boundary alignment, shader reuse, and `liveShaderCount` / `liveBufferCount`
+  stability.
 
 ## 1.5.1
 

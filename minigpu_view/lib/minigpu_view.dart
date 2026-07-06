@@ -4,7 +4,7 @@
 /// without any CPU readback on every frame.
 ///
 /// ```dart
-/// final controller = MiniavPreviewController();
+/// final controller = MinigpuPreviewController();
 /// final shared = gpu.createSharedOutputTexture(W, H);
 /// // ... write to `shared` via minigpu pipeline ...
 /// await controller.present(shared.asPreviewSource());

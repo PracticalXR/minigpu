@@ -13,7 +13,7 @@
 namespace minigpu_view {
 
 // Plugin entry point. Owns one D3D11TextureHandler per Dart-side
-// MiniavPreviewController instance (keyed by `instanceId`).
+// MinigpuPreviewController instance (keyed by `instanceId`).
 class MinigpuViewPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(

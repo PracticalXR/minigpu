@@ -12,7 +12,7 @@ GPU frames produced by a minigpu compute pipeline or a miniav capture device are
 │                                                             │
 │  SharedOutputTexture ──.asPreviewSource()──► PreviewSource  │
 │                                                    │        │
-│  MiniavPreviewController.present(source) ◄─────────┘        │
+│  MinigpuPreviewController.present(source) ◄─────────┘        │
 │           │                                                  │
 │           │  platform channel  'minigpu_view'                │
 └───────────┼──────────────────────────────────────────────────┘
@@ -57,7 +57,7 @@ dependency_overrides:
 ### 1 — Create a controller
 
 ```dart
-final controller = MiniavPreviewController();
+final controller = MinigpuPreviewController();
 ```
 
 Hold this in your `State` and dispose it in `dispose()`.
@@ -107,7 +107,7 @@ MiniavGpuPreview(
 
 ## API reference
 
-### `MiniavPreviewController`
+### `MinigpuPreviewController`
 
 | Member | Description |
 |---|---|
@@ -117,7 +117,7 @@ MiniavGpuPreview(
 | `presentedAtUs` | Broadcast stream of host-side ack timestamps (µs). Use for backpressure. |
 | `dispose()` | Releases platform resources. Must be called when no longer needed. |
 
-`MiniavPreviewController` is a `ChangeNotifier` — widgets rebuild automatically when `textureId` or `size` changes.
+`MinigpuPreviewController` is a `ChangeNotifier` — widgets rebuild automatically when `textureId` or `size` changes.
 
 ### `MiniavGpuPreview`
 

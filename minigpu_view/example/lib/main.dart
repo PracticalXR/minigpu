@@ -76,7 +76,7 @@ class _GpuPreviewPageState extends State<GpuPreviewPage> {
   late final Buffer _outputBuffer;
   late final Buffer _paramBuffer;
   late final SharedOutputTexture _sharedTex;
-  late final MiniavPreviewController _controller;
+  late final MinigpuPreviewController _controller;
   Timer? _timer;
   double _time = 0.0;
   bool _ready = false;
@@ -85,7 +85,7 @@ class _GpuPreviewPageState extends State<GpuPreviewPage> {
   @override
   void initState() {
     super.initState();
-    _controller = MiniavPreviewController();
+    _controller = MinigpuPreviewController();
     _init();
   }
 

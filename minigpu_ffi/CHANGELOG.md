@@ -1,5 +1,25 @@
 # minigpu_ffi CHANGELOG
 
+## 1.5.5
+
+- Raise per-device GPU submission priority (`IDXGIDevice::SetGPUThreadPriority(+7)`)
+  on the cached D3D11 device (both the Dawn-native-D3D11 fast path and the
+  created-on-Dawn-adapter path), so minigpu's compute/copy submissions are less
+  starved when another process saturates the GPU. Best-effort; failure is logged.
+
+## 1.5.4
+
+- fix release version pins
+
+## 1.5.3
+
+- Implement `copyFromBufferAsync` / `bgraToRgbaSharedOutputAsync`. New native
+  exports `mgpuCopyBufferToSharedOutputTextureAsync` /
+  `mgpuVideoTextureBGRAToRGBASharedOutputAsync` run the copy (including the
+  `wgpuQueueOnSubmittedWorkDone` present sync) on the WebGPU worker thread and
+  invoke a Dart `NativeCallable` completion callback, so the calling isolate is
+  no longer blocked on the present-wait busy-poll.
+
 ## 1.5.2
 
 - Add buffer copy

@@ -51,6 +51,13 @@ final class VideoTexture {
     return _platformTex!.bgraToRgbaSharedOutput(dst.platformTexture);
   }
 
+  /// Async variant of [bgraToRgbaSharedOutput]: completes when the GPU work
+  /// (including the cross-device present sync) has finished, without blocking
+  /// the calling isolate on a busy-poll. Prefer this on a per-frame hot path.
+  Future<bool> bgraToRgbaSharedOutputAsync(SharedOutputTexture dst) {
+    return _platformTex!.bgraToRgbaSharedOutputAsync(dst.platformTexture);
+  }
+
   /// Release the GPU texture.
   void destroy() {
     if (!_isValid) return;

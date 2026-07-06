@@ -516,6 +516,14 @@ void mgpuWriteUint32(MGPUBuffer *buffer, const uint32_t *inputData,
   }
 }
 
+void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
+                       size_t byteSize, size_t dstByteOffset) {
+  if (buffer && inputData) {
+    reinterpret_cast<mgpu::Buffer *>(buffer)->writeBytesAt(inputData, byteSize,
+                                                           dstByteOffset);
+  }
+}
+
 void mgpuWriteUint64(MGPUBuffer *buffer, const uint64_t *inputData,
                              size_t byteSize) {
   if (buffer && inputData) {

@@ -283,6 +283,14 @@ abstract class PlatformVideoTexture {
   /// validation/dispatch failure.
   bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
 
+  /// Async variant of [bgraToRgbaSharedOutput] that completes when the GPU
+  /// work (including the cross-device present sync) has finished, without
+  /// blocking the calling isolate on a busy-poll. The default implementation
+  /// runs the synchronous [bgraToRgbaSharedOutput]; backends with a worker
+  /// thread should override it to actually run off-thread.
+  Future<bool> bgraToRgbaSharedOutputAsync(PlatformSharedOutputTexture dst) async =>
+      bgraToRgbaSharedOutput(dst);
+
   void destroy();
 }
 
@@ -310,6 +318,14 @@ abstract class PlatformSharedOutputTexture {
   /// of a GpuEffect dispatch) into this shared texture on the GPU.
   /// Returns true on success, false if unsupported or on failure.
   bool copyFromBuffer(PlatformBuffer src) => false;
+
+  /// Async variant of [copyFromBuffer] that completes when the GPU copy
+  /// (including the cross-device present sync) has finished, without blocking
+  /// the calling isolate on a busy-poll. The default implementation runs the
+  /// synchronous [copyFromBuffer]; backends with a worker thread should override
+  /// it to actually run off-thread.
+  Future<bool> copyFromBufferAsync(PlatformBuffer src) async =>
+      copyFromBuffer(src);
 
   /// Variant of [copyFromBuffer] for buffers that hold 4 f32 components per
   /// pixel (R,G,B,A in [0,1]) instead of packed RGBA8 u32.  Used by

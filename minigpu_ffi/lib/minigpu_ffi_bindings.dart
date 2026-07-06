@@ -193,6 +193,36 @@ external int mgpuCopyBufferToSharedOutputTexture(
   ffi.Pointer<MGPUSharedOutputTexture> dst,
 );
 
+/// Async variant of [mgpuCopyBufferToSharedOutputTexture]: runs the copy on the
+/// WebGPU worker thread and invokes [callback] with the result (1/0) when the
+/// GPU work completes, without blocking the calling isolate on the present-wait.
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<MGPUSharedOutputTexture>,
+    MGPUCallbackInt,
+  )
+>()
+external void mgpuCopyBufferToSharedOutputTextureAsync(
+  ffi.Pointer<MGPUBuffer> buf,
+  ffi.Pointer<MGPUSharedOutputTexture> dst,
+  MGPUCallbackInt callback,
+);
+
+/// Async variant of [mgpuVideoTextureBGRAToRGBASharedOutput].
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUVideoTexture>,
+    ffi.Pointer<MGPUSharedOutputTexture>,
+    MGPUCallbackInt,
+  )
+>()
+external void mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+  ffi.Pointer<MGPUVideoTexture> src,
+  ffi.Pointer<MGPUSharedOutputTexture> dst,
+  MGPUCallbackInt callback,
+);
+
 /// Like mgpuCopyBufferToSharedOutputTexture but reads the source as
 /// `array<f32>` with 4 floats per pixel (R,G,B,A in [0,1]).  Used by
 /// visualizers (e.g. the spectrogram) that produce float colors directly.
@@ -952,3 +982,9 @@ final class MGPUSharedOutputTexture extends ffi.Opaque {}
 typedef MGPUCallbackFunction = ffi.Void Function();
 typedef DartMGPUCallbackFunction = void Function();
 typedef MGPUCallback = ffi.Pointer<ffi.NativeFunction<MGPUCallbackFunction>>;
+
+// Completion callback carrying an int result (1 = success, 0 = failure), used
+// by the async shared-output-texture copy paths.
+typedef MGPUCallbackIntFunction = ffi.Void Function(ffi.Int);
+typedef MGPUCallbackInt =
+    ffi.Pointer<ffi.NativeFunction<MGPUCallbackIntFunction>>;

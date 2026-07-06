@@ -112,9 +112,23 @@ class Tensor<T extends TypedData> {
   }
 
   /// Returns the data from the GPU buffer as type T.
-  Future<T> getData() async {
+  ///
+  /// Pass [into] to reuse an already-allocated typed list instead of
+  /// allocating a fresh one on every call. This is the hot path for streaming
+  /// pipelines (one readback per frame): supplying a persistent scratch list
+  /// eliminates per-frame heap allocation and the associated GC pressure.
+  /// [into] must be the correct list type for `T` and have `length >= size`.
+  Future<T> getData({T? into}) async {
     late T result;
-    if (T == TypedData) {
+    if (into != null) {
+      if ((into as TypedData).lengthInBytes <
+          size * _elementSizeBytes(dataType)) {
+        throw ArgumentError(
+          'getData(into:) target is too small: needs $size elements',
+        );
+      }
+      result = into;
+    } else if (T == TypedData) {
       result = Float32List(size) as T;
     } else if (T == Int8List) {
       result = Int8List(size) as T;
@@ -141,6 +155,26 @@ class Tensor<T extends TypedData> {
     return result;
   }
 
+  static int _elementSizeBytes(BufferDataType t) {
+    switch (t) {
+      case BufferDataType.int8:
+      case BufferDataType.uint8:
+        return 1;
+      case BufferDataType.int16:
+      case BufferDataType.uint16:
+      case BufferDataType.float16:
+        return 2;
+      case BufferDataType.int32:
+      case BufferDataType.uint32:
+      case BufferDataType.float32:
+        return 4;
+      case BufferDataType.int64:
+      case BufferDataType.uint64:
+      case BufferDataType.float64:
+        return 8;
+    }
+  }
+
   /// Writes [data] of type T to the GPU buffer.
   Future<void> write(T data) async {
     await buffer.write(data, size, dataType: dataType);
@@ -164,6 +198,20 @@ class Tensor<T extends TypedData> {
        size = shape.reduce((a, b) => a * b) {
     _bufferFinalizer.attach(this, buffer);
   }
+
+  /// Creates a non-owning tensor view over an existing [buffer].
+  ///
+  /// Unlike [Tensor.fromBuffer], this constructor does **not** attach a
+  /// finalizer.  The caller is responsible for keeping [buffer] alive and
+  /// destroying it when appropriate.  The Tensor itself must **not** be used
+  /// after the underlying buffer has been destroyed.
+  Tensor.external(
+    this.buffer,
+    this.shape, {
+    Minigpu? gpu,
+    this.dataType = BufferDataType.float32,
+  }) : gpu = gpu ?? DefaultMinigpu.instance,
+       size = shape.reduce((a, b) => a * b);
 
   /// Creates a tensor filled with zeros using GPU shader.
   static Future<Tensor<T>> zeros<T extends TypedData>(

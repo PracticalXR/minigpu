@@ -129,6 +129,11 @@ EXPORT void mgpuWriteUint32(MGPUBuffer *buffer,
                                     const uint32_t *inputData, size_t byteSize);
 EXPORT void mgpuWriteUint64(MGPUBuffer *buffer,
                                     const uint64_t *inputData, size_t byteSize);
+// Partial RAW write at a byte offset (dirty-region upload): copies byteSize
+// bytes into the buffer at dstByteOffset. Both must be 4-byte aligned and stay
+// within the buffer. Bypasses per-type packing (caller supplies final bytes).
+EXPORT void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
+                              size_t byteSize, size_t dstByteOffset);
 // Floating Point Number Types
 EXPORT void mgpuWriteFloat(MGPUBuffer *buffer, const float *inputData,
                                    size_t byteSize);

@@ -1843,6 +1843,23 @@ static bool ensure_copy_pipeline_f32(MGPUSharedOutputTexture* tex,
 static Microsoft::WRL::ComPtr<ID3D11Device>        g_d3d11_device;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_d3d11_context;
 
+// Best-effort per-device GPU submission-priority boost. When another process
+// (e.g. a game) saturates the GPU, minigpu's compute/copy submissions queue
+// behind its work and the recorder's per-frame GPU stage balloons; +7 raises
+// this device's scheduling priority so those submissions preempt. (The
+// recorder additionally raises the process-wide D3DKMT scheduling priority
+// when screen capture starts, which covers this device too.) Non-fatal on
+// failure.
+static void boost_d3d11_device_gpu_priority(ID3D11Device* dev) {
+    if (!dev) return;
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
+    if (SUCCEEDED(dev->QueryInterface(IID_PPV_ARGS(&dxgiDev))) && dxgiDev) {
+        HRESULT hr = dxgiDev->SetGPUThreadPriority(7);
+        LOG_INFO("[minigpu_external] SetGPUThreadPriority(+7) on D3D11 "
+                 "device: 0x%08lX", (unsigned long)hr);
+    }
+}
+
 static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
     if (g_d3d11_device) return g_d3d11_device.Get();
 
@@ -1866,6 +1883,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
             if (SUCCEEDED(g_d3d11_device.As(&mt)) && mt) {
                 mt->SetMultithreadProtected(TRUE);
             }
+            boost_d3d11_device_gpu_priority(g_d3d11_device.Get());
             LOG_INFO("[minigpu_external] Using Dawn's own ID3D11Device @%p",
                 (void*)g_d3d11_device.Get());
             return g_d3d11_device.Get();
@@ -1931,6 +1949,7 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
             mt->SetMultithreadProtected(TRUE);
         }
     }
+    boost_d3d11_device_gpu_priority(g_d3d11_device.Get());
 
     LOG_INFO("[minigpu_external] Created cached D3D11 device on Dawn adapter (LUID=%08lX:%08lX, FL=0x%04X)",
         (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
@@ -2348,17 +2367,82 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
 
-    // EndAccess returns the resource to COMMON so the D3D11 client can read
-    // it.  See mgpuVideoTextureBGRAToRGBASharedOutput for why no CPU wait is
-    // needed on the D3D11 single-device path.
+    // EndAccess returns the resource to COMMON so the D3D11 client can read it.
     WGPUSharedTextureMemoryEndAccessState endState{};
     wgpuSharedTextureMemoryEndAccess(dst->shared_mem, dst->texture, &endState);
 
-    pump_dawn_events_nonblocking();
+    // CROSS-DEVICE PRESENT SYNC (ghost fix): the shared texture is legacy
+    // D3D11_RESOURCE_MISC_SHARED (no keyed mutex), and the consumer (Flutter)
+    // samples it on its OWN GPU device the moment MarkTextureFrameAvailable
+    // fires. With no fence exported, a consumer read could race this producer
+    // copy: under motion the compose+deblock+copy take longer, so Flutter read
+    // a HALF-WRITTEN texture = torn/blended frames ("GPU ghosting at higher
+    // bandwidth"; on a still image producer+consumer settle and it looks
+    // clean). BLOCK until the copy actually completes on the producer GPU
+    // before returning, so by the time the host hands the handle to Flutter the
+    // pixels are final. Timeout-protected (a hung driver errors, never freezes
+    // the caller). Cost: a sub-millisecond-to-few-ms producer stall per frame;
+    // a keyed-mutex / double-buffer would remove even that, but this is the
+    // certain fix that does not depend on the consumer honoring a fence.
+    {
+        std::promise<void> presentDone;
+        auto presentFut = presentDone.get_future();
+        WGPUQueueWorkDoneCallbackInfo cbInfo{};
+        cbInfo.mode      = WGPUCallbackMode_AllowProcessEvents;
+        cbInfo.callback  = [](WGPUQueueWorkDoneStatus, WGPUStringView,
+                              void* ud1, void*) {
+            static_cast<std::promise<void>*>(ud1)->set_value();
+        };
+        cbInfo.userdata1 = &presentDone;
+        wgpuQueueOnSubmittedWorkDone(queue, cbInfo);
+        drain_dawn_events_with_timeout(presentFut,
+                                       "copyBufToShTex: present copy");
+    }
     return 1;
 #else
     (void)buf; (void)dst;
     return 0;
+#endif
+}
+
+/// Async variant of mgpuCopyBufferToSharedOutputTexture. Runs the whole copy
+/// (compute pass + cross-device present sync) on the WebGPU worker thread — the
+/// same thread the dispatch path already uses — and invokes [callback] with the
+/// result (1 = success, 0 = failure) once the GPU work has actually completed.
+/// This moves the present-wait busy-poll OFF the calling (Dart) thread: the
+/// caller awaits a Completer instead of blocking the isolate for the copy's
+/// duration. The present-sync ordering (and thus the ghost/tearing fix) is
+/// preserved because the work — including the OnSubmittedWorkDone wait — still
+/// completes before the callback fires.
+EXPORT void mgpuCopyBufferToSharedOutputTextureAsync(
+        MGPUBuffer*                buf,
+        MGPUSharedOutputTexture*   dst,
+        void                     (*callback)(int)) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([buf, dst, callback]() {
+        int r = mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        if (callback) callback(r);
+    });
+#else
+    (void)buf; (void)dst;
+    if (callback) callback(0);
+#endif
+}
+
+/// Async variant of mgpuVideoTextureBGRAToRGBASharedOutput — same worker-thread
+/// + Completer treatment as mgpuCopyBufferToSharedOutputTextureAsync above.
+EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+        MGPUVideoTexture*          src,
+        MGPUSharedOutputTexture*   dst,
+        void                     (*callback)(int)) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([src, dst, callback]() {
+        int r = mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        if (callback) callback(r);
+    });
+#else
+    (void)src; (void)dst;
+    if (callback) callback(0);
 #endif
 }
 

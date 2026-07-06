@@ -365,6 +365,11 @@ class WebVideoTexture implements PlatformVideoTexture {
   bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
 
   @override
+  Future<bool> bgraToRgbaSharedOutputAsync(
+    PlatformSharedOutputTexture dst,
+  ) async => false;
+
+  @override
   void destroy() {
     // GPUExternalTexture lifetime is managed by the browser; no explicit destroy.
   }
@@ -404,6 +409,9 @@ class WebPlatformSharedOutputTexture implements PlatformSharedOutputTexture {
 
   @override
   bool copyFromBuffer(PlatformBuffer src) => false;
+
+  @override
+  Future<bool> copyFromBufferAsync(PlatformBuffer src) async => false;
 
   @override
   bool copyFromBufferF32(PlatformBuffer src) {

@@ -166,6 +166,37 @@ fn main(
 }
   ```
 
+## GPU Buffer Copy
+
+Copy a GPU buffer to another GPU buffer entirely on the GPU — no CPU round-trip, no PCIe transfer.
+
+```dart
+final gpu = Minigpu();
+await gpu.init();
+
+const n = 1024; // number of u32 elements
+final src = gpu.createBuffer(n * 4, BufferDataType.uint32);
+final dst = gpu.createBuffer(n * 4, BufferDataType.uint32);
+
+// ... fill src with data via src.write() or a compute shader ...
+
+// Copy src → dst on the GPU.  The WGSL copy shader is created once and
+// reused across subsequent calls.
+await gpu.copyBuffer(src, dst, elementCount: n);
+
+// Read results back to verify (or pass dst to the next shader stage).
+final result = Uint32List(n);
+await dst.read(result, n, dataType: BufferDataType.uint32);
+```
+
+`elementCount` is the number of **elements** (not bytes) to copy. Both buffers
+must be at least `elementCount × 4` bytes. Partial copies are supported:
+elements beyond `elementCount` in `dst` are untouched.
+
+The copy uses a cached WGSL compute shader bound via `setBufferAtSlot`; the
+shader is created on the first `copyBuffer` call and reused for all subsequent
+ones on the same `Minigpu` instance.
+
 ## VRAM Usage
 
 Query dedicated GPU memory usage on supported platforms (Windows D3D12 via DXGI). Returns `-1` on unsupported platforms (Linux, Mac, Web, Android, iOS).

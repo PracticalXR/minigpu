@@ -155,6 +155,22 @@ Future<void> main() async {
 }
 ```
 
+## Performance tips
+
+### Reuse readback buffers
+
+`getData()` allocates a new `TypedData` on every call. In a tight render or encode loop, supply a pre-allocated buffer to avoid per-frame GC pressure:
+
+```dart
+// Allocate once
+final scratch = Float32List(tensor.size);
+
+// Reuse every frame — no allocation, no GC pressure
+final data = await tensor.getData(into: scratch) as Float32List;
+```
+
+The `into` buffer must have at least `tensor.size × elementSizeBytes` bytes; an `ArgumentError` is thrown if it is too small.
+
 ## Funding
 
   If you are interested in funding further easy-to-port gpu development, please submit an inquiry on [https://practicalXR.com](https://practicalxr.com).

@@ -153,6 +153,15 @@ public:
   void write(const int64_t *inputData, size_t elementCount);
   void write(const uint64_t *inputData, size_t elementCount);
 
+  // Partial RAW write: copy [byteSize] bytes of [inputData] into this buffer
+  // starting at [dstByteOffset] bytes. Bypasses the per-type packing path --
+  // the caller supplies bytes already in final buffer layout. Used for
+  // dirty-region uploads (write only the tiles that changed instead of the
+  // whole plane). WebGPU requires dstByteOffset and byteSize to be multiples
+  // of 4; dstByteOffset + byteSize must be <= getSize().
+  void writeBytesAt(const void *inputData, size_t byteSize,
+                    size_t dstByteOffset);
+
   void read(float *outputData, size_t elementCount, size_t offset = 0);
   void read(int32_t *outputData, size_t elementCount, size_t offset = 0);
   void read(uint32_t *outputData, size_t elementCount, size_t offset = 0);

@@ -16,6 +16,7 @@ library minigpu_view_web;
 import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
+import 'dart:typed_data';
 import 'dart:ui_web' as ui_web;
 
 import 'package:flutter/services.dart';
@@ -308,11 +309,21 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   ///   2. Render pass with WGSL passthrough shader → canvas render-attachment
   ///      (handles any format mismatch, e.g. rgba32float → bgra8unorm).
   /// Both steps are encoded in a single command buffer.
+  ///
+  /// format == 'rgba8': the buffer holds tightly-packed RGBA8 pixels (one u32
+  /// per pixel, R in the low byte) and takes the DIRECT storage-buffer path —
+  /// a single render pass with unpack4x8unorm, no intermediate texture and no
+  /// 256-byte bytesPerRow constraint (tightly-packed rows of arbitrary width).
   void copyFromGpuBuffer(JSObject src, int width, int height, String format) {
     if (_disposed) return;
     final device = _resolveDevice();
     if (device == null) return;
     _ensureContext(device);
+
+    if (format == 'rgba8') {
+      _blitRgba8Direct(device, src, width, height);
+      return;
+    }
 
     if (canvas.width != width) canvas.width = width;
     if (canvas.height != height) canvas.height = height;
@@ -395,6 +406,139 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   /// Returns [byteCount] rounded up to the nearest multiple of 256
   /// (WebGPU's required [bytesPerRow] alignment).
   static int _alignBytesPerRow(int byteCount) => (byteCount + 255) & ~255;
+
+  // ── rgba8 DIRECT path: storage-buffer read + unpack4x8unorm ──
+  // The zero-readback display route for packed-RGBA8 producers (e.g. the
+  // gsplats420 codec framebuffer): the producer buffer is bound straight into
+  // the fragment shader; unpack4x8unorm maps the little-endian u32 (R in the
+  // low byte) to vec4f exactly as the bytes lie in memory.
+  JSObject? _rgba8Pipeline;
+  JSObject? _rgba8Device;
+  String? _rgba8CanvasFormat;
+  JSObject? _rgba8ParamBuf;
+
+  static const _kRgba8BlitShader = '''
+@group(0) @binding(0) var<storage, read> src : array<u32>;
+struct Params { w: u32, h: u32 };
+@group(0) @binding(1) var<uniform> p : Params;
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -1.0),
+    vec2f( 3.0, -1.0),
+    vec2f(-1.0,  3.0),
+  );
+  return vec4f(pos[vi], 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let x = u32(pos.x);
+  let y = u32(pos.y);
+  if (x >= p.w || y >= p.h) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+  return unpack4x8unorm(src[y * p.w + x]);
+}
+''';
+
+  void _ensureRgba8Pipeline(JSObject device, String canvasFormat) {
+    if (_rgba8Pipeline != null &&
+        identical(_rgba8Device, device) &&
+        _rgba8CanvasFormat == canvasFormat) {
+      return;
+    }
+    final shader = device.callMethod<JSObject>(
+      'createShaderModule'.toJS,
+      {'code': _kRgba8BlitShader}.jsify(),
+    );
+    _rgba8Pipeline = device.callMethod<JSObject>(
+      'createRenderPipeline'.toJS,
+      {
+        'layout': 'auto',
+        'vertex': {'module': shader, 'entryPoint': 'vs'},
+        'fragment': {
+          'module': shader,
+          'entryPoint': 'fs',
+          'targets': [
+            <String, Object?>{'format': canvasFormat},
+          ],
+        },
+        'primitive': {'topology': 'triangle-list'},
+      }.jsify(),
+    );
+    // 16 bytes (uniform min alignment); holds w, h.
+    _rgba8ParamBuf ??= device.callMethod<JSObject>(
+      'createBuffer'.toJS,
+      {'size': 16, 'usage': 0x40 | 0x08}.jsify(), // UNIFORM | COPY_DST
+    );
+    _rgba8Device = device;
+    _rgba8CanvasFormat = canvasFormat;
+  }
+
+  void _blitRgba8Direct(JSObject device, JSObject src, int width, int height) {
+    if (canvas.width != width) canvas.width = width;
+    if (canvas.height != height) canvas.height = height;
+
+    final canvasFormat = _canvasFormat ?? 'bgra8unorm';
+    _ensureRgba8Pipeline(device, canvasFormat);
+
+    final queue = device['queue'] as JSObject;
+    final params = Uint32List.fromList([width, height, 0, 0]);
+    queue.callMethodVarArgs<JSAny?>('writeBuffer'.toJS, [
+      _rgba8ParamBuf!,
+      0.toJS,
+      params.buffer.toJS,
+    ]);
+
+    final pipeline = _rgba8Pipeline!;
+    final bindGroup = device.callMethod<JSObject>(
+      'createBindGroup'.toJS,
+      {
+        'layout': pipeline.callMethod<JSObject>(
+          'getBindGroupLayout'.toJS,
+          0.toJS,
+        ),
+        'entries': [
+          <String, Object?>{
+            'binding': 0,
+            'resource': {'buffer': src},
+          },
+          <String, Object?>{
+            'binding': 1,
+            'resource': {'buffer': _rgba8ParamBuf},
+          },
+        ],
+      }.jsify(),
+    );
+
+    final encoder = device.callMethod<JSObject>('createCommandEncoder'.toJS);
+    final dstView = _ctx!
+        .callMethod<JSObject>('getCurrentTexture'.toJS)
+        .callMethod<JSObject>('createView'.toJS);
+    final renderPass = encoder.callMethod<JSObject>(
+      'beginRenderPass'.toJS,
+      {
+        'colorAttachments': [
+          <String, Object?>{
+            'view': dstView,
+            'loadOp': 'clear',
+            'storeOp': 'store',
+            'clearValue': {'r': 0.0, 'g': 0.0, 'b': 0.0, 'a': 1.0},
+          },
+        ],
+      }.jsify(),
+    );
+    renderPass.callMethod<JSAny?>('setPipeline'.toJS, pipeline);
+    renderPass.callMethod<JSAny?>('setBindGroup'.toJS, 0.toJS, bindGroup);
+    renderPass.callMethod<JSAny?>('draw'.toJS, 3.toJS);
+    renderPass.callMethod<JSAny?>('end'.toJS);
+    queue.callMethod<JSAny?>(
+      'submit'.toJS,
+      [encoder.callMethod<JSObject>('finish'.toJS)].jsify(),
+    );
+  }
 
   /// Fast path for WebCodecs: draw a VideoFrame directly into the
   /// canvas. Browsers special-case this as a GPU blit on capable

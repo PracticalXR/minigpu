@@ -75,11 +75,32 @@ else()
     add_executable(${MAIN_LIB})
 endif()
 
-# Add Source Files and Include Directories 
+# Add Source Files and Include Directories
 file(GLOB_RECURSE MAIN_SOURCES "${MAIN_PATH}/src/*.cpp")
 target_sources(${MAIN_LIB} PRIVATE ${MAIN_SOURCES})
 target_include_directories(${MAIN_LIB} PUBLIC ${MAIN_INCLUDES})
 target_compile_definitions(${MAIN_LIB} PUBLIC DART_SHARED_LIB)
+
+# ── Optional: fold EXTRA sources into the main target. Generic hook used to
+# build single-blob wasm modules that link client codecs against minigpu
+# in-module (e.g. the livetensor crosscoder, GSPLATS420_C_GPU_DESIGN.md §9).
+# Configure with:
+#   -DMGPU_EXTRA_SOURCES="<src1>;<src2>;..."
+#   -DMGPU_EXTRA_INCLUDE_DIRS="<dir1>;..."
+#   -DMGPU_EXTRA_DEFINES="<DEF1>;..."
+# Extra sources should mark their exports EMSCRIPTEN_KEEPALIVE. ──
+set(MGPU_EXTRA_SOURCES "" CACHE STRING "Extra sources compiled into the main target")
+set(MGPU_EXTRA_INCLUDE_DIRS "" CACHE STRING "Include dirs for the extra sources")
+set(MGPU_EXTRA_DEFINES "" CACHE STRING "Compile definitions for the extra sources")
+if(MGPU_EXTRA_SOURCES)
+    target_sources(${MAIN_LIB} PRIVATE ${MGPU_EXTRA_SOURCES})
+    if(MGPU_EXTRA_INCLUDE_DIRS)
+        target_include_directories(${MAIN_LIB} PRIVATE ${MGPU_EXTRA_INCLUDE_DIRS})
+    endif()
+    if(MGPU_EXTRA_DEFINES)
+        target_compile_definitions(${MAIN_LIB} PRIVATE ${MGPU_EXTRA_DEFINES})
+    endif()
+endif()
 
 # EMSCRIPTEN-Specific Settings
 if(EMSCRIPTEN)
@@ -95,6 +116,19 @@ if(EMSCRIPTEN)
     )
 
     set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
+
+    # minigpu's own C ABI never crosses an asyncify operation through an
+    # indirect call, so IGNORE_INDIRECT is a safe size/speed win. Extra
+    # sources (single-blob clients) may use vtables on the asyncify path
+    # (e.g. the crosscoder's backend dispatch around readSync) — IGNORE
+    # would silently corrupt those frames, so drop it when they're present.
+    if(MGPU_EXTRA_SOURCES)
+        set(MGPU_ASYNCIFY_INDIRECT_FLAG "")
+        message(STATUS "MGPU_EXTRA_SOURCES set: ASYNCIFY_IGNORE_INDIRECT disabled")
+    else()
+        set(MGPU_ASYNCIFY_INDIRECT_FLAG "-sASYNCIFY_IGNORE_INDIRECT=1")
+    endif()
+
     message(STATUS "Needs Emscripten 4.0.10+, please upgrade if you face issues.")
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
     if(EMSCRIPTEN_DEBUG)
@@ -142,7 +176,7 @@ if(EMSCRIPTEN)
         -sMAXIMUM_MEMORY=2GB \
         -sASYNCIFY \
         -sASYNCIFY_STACK_SIZE=64MB \
-        -sASYNCIFY_IGNORE_INDIRECT=1 \
+        ${MGPU_ASYNCIFY_INDIRECT_FLAG} \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
         --use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py:shared_memory=true \

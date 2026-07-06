@@ -1,3 +1,9 @@
+## 1.5.5
+
+## 1.5.4
+
+- fix release version pins
+
 ## 1.5.2
 
 - Add buffer copy

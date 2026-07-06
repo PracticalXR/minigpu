@@ -1,5 +1,18 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.5.5
+
+## 1.5.4
+
+- fix release version pins
+
+## 1.5.3
+
+- Add `PlatformSharedOutputTexture.copyFromBufferAsync` and
+  `PlatformVideoTexture.bgraToRgbaSharedOutputAsync` (default implementations
+  delegate to the synchronous variants) so backends can run the shared-output
+  GPU copy + present sync off the calling isolate.
+
 ## 1.5.2
 
 - Add buffer copy

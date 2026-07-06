@@ -236,6 +236,27 @@ final class FfiVideoTexture implements PlatformVideoTexture {
   }
 
   @override
+  Future<bool> bgraToRgbaSharedOutputAsync(
+    PlatformSharedOutputTexture dst,
+  ) async {
+    if (dst is! FfiSharedOutputTexture) return false;
+    final completer = Completer<bool>();
+    final nc = NativeCallable<Void Function(Int)>.listener((int ok) {
+      if (!completer.isCompleted) completer.complete(ok != 0);
+    });
+    try {
+      ffi.mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+        _self,
+        dst._self,
+        nc.nativeFunction,
+      );
+      return await completer.future;
+    } finally {
+      nc.close();
+    }
+  }
+
+  @override
   void destroy() => ffi.mgpuDestroyVideoTexture(_self);
 }
 
@@ -271,6 +292,24 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
           _self,
         ) !=
         0;
+  }
+
+  @override
+  Future<bool> copyFromBufferAsync(PlatformBuffer src) async {
+    final completer = Completer<bool>();
+    final nc = NativeCallable<Void Function(Int)>.listener((int ok) {
+      if (!completer.isCompleted) completer.complete(ok != 0);
+    });
+    try {
+      ffi.mgpuCopyBufferToSharedOutputTextureAsync(
+        (src as FfiBuffer)._self,
+        _self,
+        nc.nativeFunction,
+      );
+      return await completer.future;
+    } finally {
+      nc.close();
+    }
   }
 
   @override
@@ -363,6 +402,52 @@ final class FfiBuffer implements PlatformBuffer {
 
   final Pointer<ffi.MGPUBuffer> _self;
 
+  // --- Pooled scratch + readback callback ---------------------------------
+  // The read/write hot path used to `malloc` a scratch buffer and allocate a
+  // `NativeCallable.listener` on *every* call. For a 30/60 fps feed that is
+  // thousands of allocations per second. We instead keep one growable scratch
+  // (per direction) and one reusable listener, freeing them in [destroy].
+  //
+  // Dart's event loop is single-threaded, so re-entrancy can only happen
+  // across an `await`. The `_readInFlight` / `_writeInFlight` guards detect
+  // that rare case (e.g. two concurrent reads on the same buffer) and fall
+  // back to a temporary local allocation so the pooled state is never aliased.
+  Pointer<NativeType>? _readScratch;
+  int _readScratchBytes = 0;
+  bool _readInFlight = false;
+  NativeCallable<Void Function()>? _readCallable;
+  Completer<void>? _readCompleter;
+
+  Pointer<NativeType>? _writeScratch;
+  int _writeScratchBytes = 0;
+  bool _writeInFlight = false;
+
+  bool _destroyed = false;
+
+  Pointer<NativeType> _ensureReadScratch(int bytes) {
+    if (_readScratch == null || _readScratchBytes < bytes) {
+      if (_readScratch != null) malloc.free(_readScratch!);
+      _readScratch = malloc.allocate<NativeType>(bytes);
+      _readScratchBytes = bytes;
+    }
+    return _readScratch!;
+  }
+
+  NativeCallable<Void Function()> _ensureReadCallable() {
+    return _readCallable ??= NativeCallable<Void Function()>.listener(() {
+      _readCompleter?.complete();
+    });
+  }
+
+  Pointer<NativeType> _ensureWriteScratch(int bytes) {
+    if (_writeScratch == null || _writeScratchBytes < bytes) {
+      if (_writeScratch != null) malloc.free(_writeScratch!);
+      _writeScratch = malloc.allocate<NativeType>(bytes);
+      _writeScratchBytes = bytes;
+    }
+    return _writeScratch!;
+  }
+
   @override
   Future<void> read(
     TypedData outputData,
@@ -449,20 +534,29 @@ final class FfiBuffer implements PlatformBuffer {
       return;
     }
 
-    final completer = Completer<void>();
-    void nativeCallback() {
-      completer.complete();
-    }
-
     // Allocate temporary native memory based on the number of elements to read
     final int bytesToAllocate = elementsToRead * elementSize;
-    final Pointer<NativeType> nativePtr = malloc.allocate<NativeType>(
-      bytesToAllocate,
-    );
 
-    final nativeCallable = NativeCallable<Void Function()>.listener(
-      nativeCallback,
-    );
+    // Use the pooled scratch + listener on the common (non-reentrant) path;
+    // fall back to a private local allocation if a read is already in flight.
+    final bool usePool = !_readInFlight && !_destroyed;
+    final Completer<void> completer = Completer<void>();
+    final Pointer<NativeType> nativePtr;
+    final NativeCallable<Void Function()> nativeCallable;
+    final bool ownsLocal;
+    if (usePool) {
+      ownsLocal = false;
+      _readInFlight = true;
+      _readCompleter = completer;
+      nativePtr = _ensureReadScratch(bytesToAllocate);
+      nativeCallable = _ensureReadCallable();
+    } else {
+      ownsLocal = true;
+      nativePtr = malloc.allocate<NativeType>(bytesToAllocate);
+      nativeCallable = NativeCallable<Void Function()>.listener(
+        completer.complete,
+      );
+    }
 
     try {
       // Switch to call the proper native function, passing ELEMENT counts/offsets
@@ -738,8 +832,13 @@ final class FfiBuffer implements PlatformBuffer {
           break;
       }
     } finally {
-      malloc.free(nativePtr);
-      nativeCallable.close();
+      if (ownsLocal) {
+        malloc.free(nativePtr);
+        nativeCallable.close();
+      } else {
+        _readInFlight = false;
+        _readCompleter = null;
+      }
     }
   }
 
@@ -807,10 +906,22 @@ final class FfiBuffer implements PlatformBuffer {
     }
 
     final int byteSize = elementCount * elementSize;
-    final Pointer<NativeType> nativePtr =
-        (inputData is Int8List || inputData is Uint8List)
-        ? malloc.allocate<NativeType>((byteSize + 3) & ~3) // Align to 4 bytes
-        : malloc.allocate<NativeType>(byteSize);
+    // Int8/Uint8 writes are padded up to a 4-byte boundary by the native side.
+    final int scratchBytes = (inputData is Int8List || inputData is Uint8List)
+        ? ((byteSize + 3) & ~3)
+        : byteSize;
+
+    final bool usePool = !_writeInFlight && !_destroyed;
+    final Pointer<NativeType> nativePtr;
+    final bool ownsLocal;
+    if (usePool) {
+      ownsLocal = false;
+      _writeInFlight = true;
+      nativePtr = _ensureWriteScratch(scratchBytes);
+    } else {
+      ownsLocal = true;
+      nativePtr = malloc.allocate<NativeType>(scratchBytes);
+    }
 
     try {
       // Copy data from inputData (up to elementCount) to nativePtr
@@ -918,12 +1029,28 @@ final class FfiBuffer implements PlatformBuffer {
           break;
       }
     } finally {
-      malloc.free(nativePtr);
+      if (ownsLocal) {
+        malloc.free(nativePtr);
+      } else {
+        _writeInFlight = false;
+      }
     }
   }
 
   @override
   void destroy() {
+    if (_destroyed) return;
+    _destroyed = true;
+    if (_readScratch != null) {
+      malloc.free(_readScratch!);
+      _readScratch = null;
+    }
+    if (_writeScratch != null) {
+      malloc.free(_writeScratch!);
+      _writeScratch = null;
+    }
+    _readCallable?.close();
+    _readCallable = null;
     ffi.mgpuDestroyBuffer(_self);
   }
 }

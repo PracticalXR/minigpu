@@ -45,6 +45,12 @@ final class SharedOutputTexture {
   bool copyFromBuffer(Buffer src) =>
       _platformTex!.copyFromBuffer(src.platformBuffer!);
 
+  /// Async variant of [copyFromBuffer]: completes when the GPU copy (including
+  /// the cross-device present sync) has finished, without blocking the calling
+  /// isolate on a busy-poll. Prefer this on a per-frame hot path.
+  Future<bool> copyFromBufferAsync(Buffer src) =>
+      _platformTex!.copyFromBufferAsync(src.platformBuffer!);
+
   /// Variant of [copyFromBuffer] for buffers that hold 4 f32 components per
   /// pixel (R,G,B,A in [0,1]) instead of packed RGBA8 u32.  Used by
   /// visualizers (e.g. the spectrogram) that produce float colors directly

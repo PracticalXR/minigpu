@@ -1,4 +1,4 @@
-/// The widget that displays a [MiniavPreviewController]'s current frame.
+/// The widget that displays a [MinigpuPreviewController]'s current frame.
 library;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -6,9 +6,9 @@ import 'package:flutter/widgets.dart';
 
 import 'preview_controller.dart';
 
-/// Renders the current GPU frame from a [MiniavPreviewController].
+/// Renders the current GPU frame from a [MinigpuPreviewController].
 ///
-/// Until the first [MiniavPreviewController.present] call completes,
+/// Until the first [MinigpuPreviewController.present] call completes,
 /// shows [placeholder] (or empty space).
 class MiniavGpuPreview extends StatelessWidget {
   const MiniavGpuPreview({
@@ -20,7 +20,7 @@ class MiniavGpuPreview extends StatelessWidget {
     this.placeholder,
   });
 
-  final MiniavPreviewController controller;
+  final MinigpuPreviewController controller;
   final BoxFit fit;
   final Alignment alignment;
   final FilterQuality filterQuality;

@@ -19,7 +19,7 @@ import 'preview_source.dart';
 ///
 /// The controller is a [ChangeNotifier] — the widget rebuilds when
 /// [textureId] becomes available or [size] changes.
-class MiniavPreviewController extends ChangeNotifier {
+class MinigpuPreviewController extends ChangeNotifier {
   static const MethodChannel _channel = MethodChannel('minigpu_view');
 
   final int _instanceId;
@@ -31,7 +31,7 @@ class MiniavPreviewController extends ChangeNotifier {
 
   final StreamController<int> _presentedAtUs = StreamController.broadcast();
 
-  MiniavPreviewController() : _instanceId = _nextInstanceId++ {
+  MinigpuPreviewController() : _instanceId = _nextInstanceId++ {
     // Lazy: the host registers a texture only on first present().
   }
 
@@ -54,7 +54,7 @@ class MiniavPreviewController extends ChangeNotifier {
   /// [PreviewPresentException] when the host rejects the handle.
   Future<void> present(PreviewSource source) async {
     if (_disposed) {
-      throw StateError('MiniavPreviewController used after dispose()');
+      throw StateError('MinigpuPreviewController used after dispose()');
     }
     final args = <String, Object?>{
       'instanceId': _instanceId,
