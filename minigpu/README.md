@@ -45,7 +45,7 @@ Add the following to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  minigpu: ^1.2.3
+  minigpu: ^1.5.2
 ```
 
 Then run:
@@ -60,7 +60,7 @@ If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` d
 
 ```yaml
 dependencies:
-  minigpu_flutter: ^1.4.0
+  minigpu_flutter: ^1.5.2
 ```
 
 Wrap your root widget with `MinigpuBinding` and register a `destroySync` callback for any long-lived `Minigpu` instance:
