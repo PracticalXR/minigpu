@@ -112,6 +112,20 @@ void MinigpuViewPlugin::HandleMethodCall(
     auto it = handlers_.find(instance_id);
     if (shared_handle != 0) {
       void* shared_h = reinterpret_cast<void*>(shared_handle);
+      // Cross-adapter guard: a handle the display adapter can't open would
+      // register fine and then fail EVERY raster-time bind ("Binding D3D
+      // surface failed.") with nothing surfaced here. Failing the present
+      // instead lets the app drop to its CPU preview path (and the producer
+      // can re-align via mgpuPreferDisplayAdapter before its GPU init).
+      std::string why;
+      if (!D3D11TextureHandler::ProbeSharedHandleBindable(shared_h, &why)) {
+        result->Error(
+            "cross_adapter",
+            "Shared texture is not bindable on Flutter's (primary display) "
+            "adapter: " + why +
+            " -- the producer created it on a different GPU.");
+        return;
+      }
       if (it == handlers_.end()) {
         auto handler = std::make_unique<D3D11TextureHandler>(textures_);
         if (!handler->InitializeFromSharedHandle(shared_h, width, height)) {

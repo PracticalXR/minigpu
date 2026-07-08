@@ -25,6 +25,22 @@ namespace mgpu {
 // Forward declarations
 class MGPU;
 
+// ── Pre-init adapter preference ─────────────────────────────────────────────
+// When enabled BEFORE MGPU::initializeContext(), Dawn binds to the adapter
+// that drives the PRIMARY display (Windows only; ignored elsewhere). This
+// aligns capture (Desktop Duplication / WGC), GPU processing and any D3D11
+// encoder created on Dawn's adapter onto the display GPU → same-adapter
+// zero-copy import even on multi-output hybrid systems where the discrete
+// GPU also drives a monitor (there the "dGPU has no outputs" heuristic can't
+// detect the capture/compute split). MGPU_ADAPTER_NAME still overrides.
+void setPreferDisplayAdapter(bool enable);
+bool preferDisplayAdapterEnabled();
+
+// Name of the adapter Dawn actually selected (the Dawn adapter-info device
+// string). Empty until initializeContext() completes; cleared on
+// destroyContext().
+std::string selectedAdapterName();
+
 // no gpu library dependency
 struct BufferData {
   WGPUBuffer buffer = nullptr;

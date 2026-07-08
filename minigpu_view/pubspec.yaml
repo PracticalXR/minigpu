@@ -1,6 +1,6 @@
 name: minigpu_view
 description: Zero-copy Flutter rendering for minigpu SharedOutputTexture and miniav GPU buffers.
-version: 1.5.5
+version: 1.5.7
 environment:
   sdk: ^3.11.4
   flutter: ">=3.24.0"
@@ -14,8 +14,8 @@ dependencies:
   meta: ^1.16.0
 
   # Core minigpu — required for SharedOutputTexture adapter.
-  minigpu: 1.5.5
-  minigpu_platform_interface: 1.5.5
+  minigpu: 1.5.7
+  minigpu_platform_interface: 1.5.7
 
   # miniav — required for MiniAVBuffer adapter.
   # Uses a path override; version constraint is informational.

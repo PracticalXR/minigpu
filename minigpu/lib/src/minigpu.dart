@@ -90,6 +90,27 @@ final class Minigpu {
     MinigpuPlatform.instance.setLogCallback(callback, level: level);
   }
 
+  /// Pre-init hint (Windows): bind Dawn to the adapter driving the PRIMARY
+  /// display so screen capture (Desktop Duplication / WGC), GPU processing
+  /// and any D3D11 encoder created on Dawn's adapter share one GPU —
+  /// same-adapter zero-copy import — even on multi-output hybrid systems
+  /// where the discrete GPU also drives a monitor (e.g. AMD/Intel iGPU
+  /// showing the desktop while an NVIDIA dGPU drives a secondary output).
+  /// The `MGPU_ADAPTER_NAME` env var still overrides.
+  ///
+  /// Must be called BEFORE any minigpu context is initialized (there is one
+  /// process-global native context, hence a static). Returns `true` when the
+  /// hint was stored before init; `false` when the context was already
+  /// initialized (kept for a future re-init, live context unchanged) or on
+  /// platforms without adapter selection (web).
+  static bool preferDisplayAdapter([bool enable = true]) =>
+      MinigpuPlatform.instance.preferDisplayAdapter(enable);
+
+  /// Name of the adapter Dawn actually selected, or `null` when the context
+  /// is not initialized / the platform does not expose it.
+  static String? get selectedAdapterName =>
+      MinigpuPlatform.instance.selectedAdapterName;
+
   /// Synchronous variant of [destroy] intended for use in Flutter hot-restart
   /// teardown hooks where `await` is not available (e.g. inside
   /// [WidgetsBindingObserver.reassemble]).

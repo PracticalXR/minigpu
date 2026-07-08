@@ -1,6 +1,6 @@
 name: minigpu
 description: A library that brings multiplatform GPU compute to Dart and Flutter by wrapping the gpu.cpp library and webgpu with a Dawn backend.
-version: 1.5.5
+version: 1.5.7
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu
 
 #####
@@ -12,9 +12,9 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  minigpu_platform_interface: 1.5.5
-  minigpu_ffi: 1.5.5
-  minigpu_web: 1.5.5
+  minigpu_platform_interface: 1.5.7
+  minigpu_ffi: 1.5.7
+  minigpu_web: 1.5.7
 
 dev_dependencies:
   test: ^1.31.0

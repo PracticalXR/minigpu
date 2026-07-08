@@ -181,6 +181,24 @@ abstract class MinigpuPlatform {
   /// Returns the ID3D11Device* address (non-zero) or 0 on failure.
   /// Windows-only; returns 0 on all other platforms.
   int createD3D11DeviceOnDawnAdapter() => 0;
+
+  /// Pre-init hint (Windows): bind Dawn to the adapter driving the PRIMARY
+  /// display so screen capture (Desktop Duplication / WGC), GPU processing
+  /// and any D3D11 encoder created on Dawn's adapter share one GPU —
+  /// same-adapter zero-copy import — even on multi-output hybrid systems
+  /// where the discrete GPU also drives a monitor. The `MGPU_ADAPTER_NAME`
+  /// env var still overrides.
+  ///
+  /// Must be called BEFORE the context is initialized (before any other
+  /// minigpu use). Returns `true` when the hint was stored before init;
+  /// `false` when the context was already initialized (the hint is kept for
+  /// a future re-init but the live context is unchanged) or on platforms
+  /// without adapter selection.
+  bool preferDisplayAdapter([bool enable = true]) => false;
+
+  /// Name of the adapter Dawn actually selected, or `null` when the context
+  /// is not initialized / the platform does not expose it.
+  String? get selectedAdapterName => null;
 }
 
 // ---------------------------------------------------------------------------

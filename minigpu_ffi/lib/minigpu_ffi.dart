@@ -100,6 +100,23 @@ class MinigpuFfi extends MinigpuPlatform {
     return ffi.mgpuCreateD3D11DeviceOnDawnAdapter().address;
   }
 
+  @override
+  bool preferDisplayAdapter([bool enable = true]) =>
+      ffi.mgpuPreferDisplayAdapter(enable ? 1 : 0) == 0;
+
+  @override
+  String? get selectedAdapterName {
+    const cap = 256;
+    final buf = malloc.allocate<Char>(cap);
+    try {
+      final len = ffi.mgpuGetSelectedAdapterName(buf, cap);
+      if (len <= 0) return null;
+      return _decodeCString(buf);
+    } finally {
+      malloc.free(buf);
+    }
+  }
+
   NativeCallable<Void Function(Int, Pointer<Char>)>? _logCallable;
 
   /// Decodes a null-terminated C string using [Utf8Decoder] with
@@ -553,8 +570,10 @@ final class FfiBuffer implements PlatformBuffer {
     } else {
       ownsLocal = true;
       nativePtr = malloc.allocate<NativeType>(bytesToAllocate);
+      // Tear-off `completer.complete` has an optional parameter, so it does
+      // not satisfy `Void Function()` — wrap in a zero-arg closure.
       nativeCallable = NativeCallable<Void Function()>.listener(
-        completer.complete,
+        () => completer.complete(),
       );
     }
 

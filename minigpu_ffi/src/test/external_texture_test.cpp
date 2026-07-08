@@ -15,9 +15,11 @@
 #include "../include/minigpu_external.h"
 
 #include <cassert>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -415,6 +417,151 @@ void testTierC_CpuBridge() {
     mgpuDestroyVideoTexture(gpuTex);
     std::cout << "testTierC_CpuBridge PASSED" << std::endl;
 }
+
+// ---------------------------------------------------------------------------
+// preferDisplayAdapter test: bind Dawn to the primary-display adapter
+//
+// mgpuPreferDisplayAdapter(1) is the pre-init hint capture/record apps use so
+// screen capture, GPU processing and HW encode share the display GPU. This
+// test resolves the expected adapter the same way the implementation does
+// (attached output containing the desktop origin), re-initialises the context
+// with the hint enabled, and asserts:
+//   1. mgpuGetSelectedAdapterName() reports the primary-display adapter, and
+//   2. a shared texture created on that adapter imports (same-adapter path).
+// On single-adapter machines this degenerates to the normal selection and
+// still passes — the assert compares against whatever drives the display.
+// ---------------------------------------------------------------------------
+void testPreferDisplayAdapter() {
+    std::cout << "\n-- testPreferDisplayAdapter (bind Dawn to primary-display adapter) --" << std::endl;
+
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
+        std::cout << "  Skipped (CreateDXGIFactory1 failed)." << std::endl;
+        return;
+    }
+
+    // Resolve the expected primary-display adapter: the attached output whose
+    // desktop coordinates contain the origin; fallback first attached output.
+    ComPtr<IDXGIAdapter1> displayAdapter;
+    std::string expectedName;
+    {
+        ComPtr<IDXGIAdapter1> firstOutputAdapter;
+        std::string firstOutputName;
+        ComPtr<IDXGIAdapter1> a;
+        for (UINT i = 0; !displayAdapter && SUCCEEDED(factory->EnumAdapters1(i, &a)); ++i, a.Reset()) {
+            DXGI_ADAPTER_DESC1 d{};
+            a->GetDesc1(&d);
+            if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            ComPtr<IDXGIOutput> o;
+            for (UINT j = 0; SUCCEEDED(a->EnumOutputs(j, &o)); ++j, o.Reset()) {
+                DXGI_OUTPUT_DESC od{};
+                if (FAILED(o->GetDesc(&od)) || !od.AttachedToDesktop) continue;
+                char nameBuf[128]{};
+                WideCharToMultiByte(CP_UTF8, 0, d.Description, -1,
+                                     nameBuf, sizeof(nameBuf), nullptr, nullptr);
+                if (!firstOutputAdapter) { firstOutputAdapter = a; firstOutputName = nameBuf; }
+                if (od.DesktopCoordinates.left == 0 && od.DesktopCoordinates.top == 0) {
+                    displayAdapter = a;
+                    expectedName   = nameBuf;
+                    break;
+                }
+            }
+        }
+        if (!displayAdapter) { displayAdapter = firstOutputAdapter; expectedName = firstOutputName; }
+    }
+    if (!displayAdapter) {
+        std::cout << "  Skipped (no attached display output found)." << std::endl;
+        return;
+    }
+    std::cout << "  Primary-display adapter: " << expectedName << std::endl;
+
+    // Re-initialise the context with the preference enabled.
+    mgpuDestroyContext();
+    expectTrue(mgpuPreferDisplayAdapter(1) == 0,
+        "preferDisplayAdapter: hint stored before init");
+    mgpuInitializeContext();
+
+    char selBuf[256]{};
+    int selLen = mgpuGetSelectedAdapterName(selBuf, sizeof(selBuf));
+    expectTrue(selLen > 0, "preferDisplayAdapter: selected adapter name available");
+    std::cout << "  Dawn selected: " << selBuf << std::endl;
+
+    // Case-insensitive compare — Dawn's device string comes from the same
+    // driver description as the DXGI adapter description.
+    auto toLower = [](std::string s) {
+        for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+        return s;
+    };
+    expectTrue(toLower(selBuf) == toLower(expectedName),
+        "preferDisplayAdapter: Dawn bound to the primary-display adapter");
+
+    // Hint reported as too-late once the context is live.
+    expectTrue(mgpuPreferDisplayAdapter(1) == 1,
+        "preferDisplayAdapter: reports too-late after init");
+
+    // Same-adapter zero-copy import: create a shared texture on the display
+    // adapter and import it — must succeed via the same-adapter (Tier A) path.
+    {
+        ComPtr<ID3D11Device>        prodDevice;
+        ComPtr<ID3D11DeviceContext> prodCtx;
+        D3D_FEATURE_LEVEL fl{};
+        HRESULT hr = D3D11CreateDevice(
+            displayAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+            D3D11_SDK_VERSION, &prodDevice, &fl, &prodCtx);
+        expectTrue(SUCCEEDED(hr), "preferDisplayAdapter: D3D11CreateDevice on display adapter");
+
+        const UINT W = 64, H = 64;
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width            = W;  desc.Height       = H;
+        desc.MipLevels        = 1;  desc.ArraySize    = 1;
+        desc.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage            = D3D11_USAGE_DEFAULT;
+        desc.BindFlags        = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        desc.MiscFlags        = D3D11_RESOURCE_MISC_SHARED_NTHANDLE
+                              | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+
+        ComPtr<ID3D11Texture2D> srcTex;
+        hr = prodDevice->CreateTexture2D(&desc, nullptr, &srcTex);
+        expectTrue(SUCCEEDED(hr), "preferDisplayAdapter: CreateTexture2D on display adapter");
+
+        ComPtr<IDXGIResource1> dxgiRes;
+        hr = srcTex.As(&dxgiRes);
+        expectTrue(SUCCEEDED(hr), "preferDisplayAdapter: srcTex.As<IDXGIResource1>");
+
+        HANDLE sharedHandle = nullptr;
+        hr = dxgiRes->CreateSharedHandle(
+            nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
+            nullptr, &sharedHandle);
+        expectTrue(SUCCEEDED(hr), "preferDisplayAdapter: CreateSharedHandle");
+
+        MGPUExternalVideoBuffer buf{};
+        buf.content_type          = MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE;
+        buf.pixel_format          = MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32;
+        buf.width                 = W;
+        buf.height                = H;
+        buf.num_planes            = 1;
+        buf.planes[0].data_ptr    = sharedHandle;
+        buf.planes[0].width       = W;
+        buf.planes[0].height      = H;
+        buf.planes[0].stride_bytes = W * 4;
+        buf.planes[0].dmabuf_fd   = -1;
+
+        MGPUVideoTexture* gpuTex = mgpuImportVideoFrame(&buf);
+        CloseHandle(sharedHandle);
+        expectTrue(gpuTex != nullptr,
+            "preferDisplayAdapter: same-adapter import returns non-null texture");
+        mgpuDestroyVideoTexture(gpuTex);
+    }
+
+    // Restore defaults for subsequent tests.
+    mgpuDestroyContext();
+    mgpuPreferDisplayAdapter(0);
+    mgpuInitializeContext();
+
+    std::cout << "testPreferDisplayAdapter PASSED" << std::endl;
+}
 #endif // _WIN32
 
 // ---------------------------------------------------------------------------
@@ -579,6 +726,7 @@ void runExternalTextureTests() {
     testD3D11SharedHandleImport();
     testTierC_CpuBridge();
     testTierB_D3D12Bridge();
+    testPreferDisplayAdapter();
 #endif
     std::cout << "===== All External Texture Tests Passed =====" << std::endl;
 }

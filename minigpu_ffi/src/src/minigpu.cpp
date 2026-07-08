@@ -26,6 +26,22 @@ void mgpuFreeLogMessage(const char* msg) {
   free(const_cast<char*>(msg));
 }
 
+int mgpuPreferDisplayAdapter(int enable) {
+  mgpu::setPreferDisplayAdapter(enable != 0);
+  // tryGetInstance() probes without triggering lazy re-initialization.
+  return minigpu.tryGetInstance() ? 1 : 0;
+}
+
+int mgpuGetSelectedAdapterName(char* out, int cap) {
+  const std::string name = mgpu::selectedAdapterName();
+  if (out && cap > 0) {
+    const int n = (int)name.size() < cap - 1 ? (int)name.size() : cap - 1;
+    memcpy(out, name.c_str(), (size_t)n);
+    out[n] = '\0';
+  }
+  return (int)name.size();
+}
+
 void mgpuInitializeContext() {
   minigpu.initializeContext();
 }

@@ -1,3 +1,16 @@
+## 1.5.7
+
+- Windows: `present()` now probes that a shared handle can actually be opened
+  on the default (primary display) adapter before registering it, and fails
+  with `cross_adapter` when the producer texture lives on a different GPU.
+  Previously such handles registered fine and then failed every raster-time
+  bind ("Binding D3D surface failed.") as a silently black texture with no
+  error surfaced to Dart. Apps can catch the error and fall back to a CPU
+  preview; producers should call `mgpuPreferDisplayAdapter` before GPU init
+  to avoid the mismatch entirely.
+
+## 1.5.6
+
 ## 1.5.5
 
 ## 1.5.4

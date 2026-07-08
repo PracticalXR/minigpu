@@ -2,7 +2,59 @@
 
 #include <flutter/texture_registrar.h>
 
+#include <cstdio>
+
 namespace minigpu_view {
+
+// static
+bool D3D11TextureHandler::ProbeSharedHandleBindable(void* shared_handle,
+                                                    std::string* why) {
+  // One probe device + a last-handle cache: the handle is stable per
+  // producer texture, so steady-state presents cost one pointer compare.
+  static std::mutex probe_mutex;
+  static Microsoft::WRL::ComPtr<ID3D11Device> probe_device;
+  static bool device_attempted = false;
+  static void* last_handle = nullptr;
+  static bool last_ok = false;
+  static std::string last_why;
+
+  if (!shared_handle) return true;  // nothing to probe
+
+  std::lock_guard<std::mutex> lock(probe_mutex);
+  if (shared_handle == last_handle) {
+    if (!last_ok && why) *why = last_why;
+    return last_ok;
+  }
+
+  if (!device_attempted) {
+    device_attempted = true;
+    // Adapter nullptr = the default adapter = the one driving the primary
+    // display = the adapter ANGLE's device is created on. This device only
+    // opens handles (no rendering), so no feature levels / flags needed.
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE,
+                                   nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
+                                   probe_device.GetAddressOf(), nullptr,
+                                   nullptr);
+    if (FAILED(hr)) probe_device.Reset();
+  }
+  if (!probe_device) return true;  // can't probe -> don't block the present
+
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> opened;
+  HRESULT hr = probe_device->OpenSharedResource(
+      static_cast<HANDLE>(shared_handle), IID_PPV_ARGS(&opened));
+  last_handle = shared_handle;
+  last_ok = SUCCEEDED(hr);
+  if (!last_ok) {
+    char buf[160];
+    std::snprintf(buf, sizeof(buf),
+                  "OpenSharedResource on the default (primary display) "
+                  "adapter failed with 0x%08lX",
+                  static_cast<unsigned long>(hr));
+    last_why = buf;
+    if (why) *why = last_why;
+  }
+  return last_ok;
+}
 
 D3D11TextureHandler::D3D11TextureHandler(flutter::TextureRegistrar* registrar)
     : registrar_(registrar) {}

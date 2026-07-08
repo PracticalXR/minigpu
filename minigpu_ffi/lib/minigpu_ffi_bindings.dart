@@ -148,6 +148,19 @@ external ffi.Pointer<ffi.Void> mgpuSharedOutputTextureGetD3D11Texture(
 @ffi.Native<ffi.Pointer<ffi.Void> Function()>()
 external ffi.Pointer<ffi.Void> mgpuCreateD3D11DeviceOnDawnAdapter();
 
+/// Pre-init hint (Windows): make context init bind Dawn to the adapter
+/// driving the PRIMARY display (same-adapter zero-copy for screen capture).
+/// Call BEFORE mgpuInitializeContext(). Returns 0 when stored before init;
+/// 1 when the context was already initialized.
+@ffi.Native<ffi.Int Function(ffi.Int)>()
+external int mgpuPreferDisplayAdapter(int enable);
+
+/// Copies the selected adapter's name into [out] (NUL-terminated UTF-8,
+/// truncated to [cap]). Returns the untruncated length in bytes, or 0 when
+/// the context is not initialized.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Int)>()
+external int mgpuGetSelectedAdapterName(ffi.Pointer<ffi.Char> out, int cap);
+
 @ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
 external int mgpuSharedOutputTextureGetWidth(
   ffi.Pointer<MGPUSharedOutputTexture> tex,

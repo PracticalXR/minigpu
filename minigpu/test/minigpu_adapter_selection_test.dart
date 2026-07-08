@@ -138,4 +138,44 @@ void main() {
       },
     );
   });
+
+  // ---------------------------------------------------------------------------
+  // preferDisplayAdapter: pre-init hint that binds Dawn to the adapter driving
+  // the PRIMARY display (used by capture/record apps so screen capture, GPU
+  // processing and HW encode share one adapter — same-adapter zero-copy).
+  // The strong assertion (selected adapter == the DXGI primary-display
+  // adapter, verified via an independent DXGI enumeration) lives in the C++
+  // suite (external_texture_test.cpp: testPreferDisplayAdapter); this test
+  // covers the Dart plumb: hint lands before init, a name is queryable after,
+  // too-late is reported once live, and the D3D11 interop device still works.
+  // ---------------------------------------------------------------------------
+  group('preferDisplayAdapter — bind Dawn to the primary display adapter', () {
+    test('hint lands before init; queryable name; too-late after', () async {
+      if (!Platform.isWindows) {
+        markTestSkipped('adapter preference is Windows-only');
+        return;
+      }
+      // Prior tests destroy() their contexts, so no context is live here and
+      // the hint must be accepted.
+      final applied = Minigpu.preferDisplayAdapter();
+      expect(applied, isTrue, reason: 'hint must land before context init');
+      final gpu = Minigpu();
+      await gpu.init();
+      try {
+        final name = Minigpu.selectedAdapterName;
+        expect(name, isNotNull);
+        expect(name, isNotEmpty);
+        // ignore: avoid_print — records which adapter the hint bound.
+        print('preferDisplayAdapter selected: $name');
+        // Once the context is live the hint reports too-late.
+        expect(Minigpu.preferDisplayAdapter(), isFalse);
+        // Zero-copy prerequisite still holds on the display adapter.
+        expect(gpu.createD3D11DeviceOnDawnAdapter(), isNot(0));
+      } finally {
+        // Restore defaults for any later native use in this process.
+        Minigpu.preferDisplayAdapter(false);
+        await gpu.destroy();
+      }
+    });
+  });
 }

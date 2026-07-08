@@ -35,6 +35,26 @@ EXPORT void mgpuSetLogLevel(int level);
 /// Dart MUST call this after consuming the string.
 EXPORT void mgpuFreeLogMessage(const char* msg);
 
+/// Pre-init hint (Windows): make mgpuInitializeContext() bind Dawn to the
+/// adapter driving the PRIMARY display, so screen capture (Desktop
+/// Duplication / WGC), GPU processing and any D3D11 encoder created on
+/// Dawn's adapter share one GPU — same-adapter zero-copy import — even on
+/// multi-output hybrid systems where the discrete GPU also drives a monitor
+/// (there the automatic topology detection cannot see the capture/compute
+/// split). The MGPU_ADAPTER_NAME env var still overrides. No-op on
+/// non-Windows platforms.
+///
+/// Call BEFORE mgpuInitializeContext(). Returns 0 when stored before init;
+/// 1 when the context was already initialized (the hint is kept for a future
+/// re-init but the live context is unchanged).
+EXPORT int mgpuPreferDisplayAdapter(int enable);
+
+/// Copies the name of the adapter Dawn selected into [out] as a
+/// NUL-terminated UTF-8 string (truncated to [cap] bytes including the NUL).
+/// Returns the full (untruncated) name length in bytes, or 0 when the
+/// context is not initialized.
+EXPORT int mgpuGetSelectedAdapterName(char* out, int cap);
+
 EXPORT void mgpuInitializeContext();
 EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);
 EXPORT void mgpuDestroyContext();

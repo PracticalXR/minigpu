@@ -1,5 +1,13 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.5.7
+
+## 1.5.6
+
+- New `MinigpuPlatform.preferDisplayAdapter([enable])` and
+  `MinigpuPlatform.selectedAdapterName` with safe concrete defaults
+  (`false` / `null`) so existing platform implementations keep compiling.
+
 ## 1.5.5
 
 ## 1.5.4

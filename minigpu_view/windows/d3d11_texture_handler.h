@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <string>
 
 namespace minigpu_view {
 
@@ -47,6 +48,19 @@ class D3D11TextureHandler {
   // as long as the producer texture stays the same; this just bumps the
   // frame-available marker so Flutter rasterizes the next frame.
   void UpdateFromSharedHandle(void* shared_handle, int width, int height);
+
+  // Probes whether [shared_handle] (a LEGACY DXGI share handle) opens on
+  // the DEFAULT adapter — the adapter Flutter's ANGLE device lives on
+  // (EnumAdapters(0), the one driving the primary display). Legacy shared
+  // handles cannot cross adapters, so a producer texture created on
+  // another GPU (e.g. Dawn picked the discrete GPU while the iGPU drives
+  // the display) registers fine but fails every raster-time bind
+  // ("Binding D3D surface failed." from the engine) with nothing
+  // surfaced to Dart. Returning the failure from present() instead lets
+  // the app fall back to a CPU preview. Caches the last probed handle;
+  // fails OPEN (returns true) when no probe device can be created.
+  static bool ProbeSharedHandleBindable(void* shared_handle,
+                                        std::string* why);
 
   int64_t texture_id() const { return texture_id_; }
 

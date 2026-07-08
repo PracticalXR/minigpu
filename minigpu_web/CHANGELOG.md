@@ -1,5 +1,13 @@
 # minigpu_web CHANGELOG
 
+## 1.5.7
+
+## 1.5.6
+
+- Version lockstep with minigpu 1.5.6 (new `preferDisplayAdapter` /
+  `selectedAdapterName` platform members inherit the interface's no-op
+  defaults on web — no behavior change).
+
 ## 1.5.5
 
 ## 1.5.4

@@ -1,5 +1,16 @@
 # minigpu
 
+## 1.5.7
+
+## 1.5.6
+
+- New statics `Minigpu.preferDisplayAdapter([enable])` and
+  `Minigpu.selectedAdapterName`: pre-init hint that binds Dawn to the adapter
+  driving the PRIMARY display (Windows) so screen capture, GPU processing and
+  HW encode share one GPU (same-adapter zero-copy) on hybrid systems, and a
+  query for which adapter Dawn actually selected. Call the hint before any
+  minigpu use; `MGPU_ADAPTER_NAME` still overrides.
+
 ## 1.5.5
 
 ## 1.5.4

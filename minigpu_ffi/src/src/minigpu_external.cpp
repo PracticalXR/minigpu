@@ -469,6 +469,14 @@ struct ProducerAdapterInfo {
     std::atomic<int>                            consecutiveFailures{0};
     std::atomic<int>                            successesSinceFailure{0};
     std::atomic<bool>                           loggedMismatch{false};
+
+    // Sticky negative result for Tier B: once init_tier_b determines this
+    // adapter cannot do the D3D12 cross-adapter bridge (no
+    // CrossAdapterRowMajorTextureSupported, device/queue creation failure),
+    // don't re-probe — the old behavior re-ran D3D12CreateDevice AND
+    // re-logged the "Falling back to Tier C" warning on every call (log spam
+    // at frame rate).
+    bool                                        tierBUnavailable = false;
 };
 
 static std::mutex                                                       g_producerInfoMutex;
@@ -589,7 +597,9 @@ static bool dawn_is_d3d12() {
 // Initialise the D3D12 + D3D11on12 state on `info`.
 // Returns false (and logs) if the adapter doesn't support cross-adapter
 // row-major textures or if any device creation step fails.
-static bool init_tier_b(ProducerAdapterInfo* info) {
+// Call through init_tier_b(), which caches a sticky negative result — this
+// impl re-probes (D3D12CreateDevice etc.) and re-logs on every invocation.
+static bool init_tier_b_impl(ProducerAdapterInfo* info) {
     if (info->b12Dev) return true; // already initialised
 
     // ── 1. Create D3D12 device on producer adapter ──
@@ -687,6 +697,18 @@ static bool init_tier_b(ProducerAdapterInfo* info) {
 
     LOG_INFO("[minigpu_external] Tier B: initialised D3D12 cross-adapter bridge on producer adapter.");
     return true;
+}
+
+// Cached Tier B init. On failure the negative result sticks to the (per-LUID,
+// process-lifetime) ProducerAdapterInfo, so an adapter that can't do Tier B is
+// probed and logged ONCE instead of re-running D3D12CreateDevice and
+// re-warning "Falling back to Tier C" on every frame.
+static bool init_tier_b(ProducerAdapterInfo* info) {
+    if (info->b12Dev) return true;            // already initialised
+    if (info->tierBUnavailable) return false; // sticky negative — skip re-probe
+    if (init_tier_b_impl(info)) return true;
+    info->tierBUnavailable = true;
+    return false;
 }
 
 // Ensure the cached cross-adapter D3D12 texture matches `w × h × fmt`.

@@ -1,11 +1,46 @@
 # minigpu_ffi CHANGELOG
 
+## 1.5.7
+
+## 1.5.6
+
+- New pre-init hint `mgpuPreferDisplayAdapter(int enable)` (+ Dart
+  `preferDisplayAdapter`): bind Dawn to the adapter driving the PRIMARY
+  display so screen capture (Desktop Duplication / WGC), GPU processing and
+  any D3D11 encoder created on Dawn's adapter share one GPU — same-adapter
+  zero-copy — even on multi-output hybrid systems where the discrete GPU
+  also drives a monitor (there the automatic "dGPU has no outputs" topology
+  detection cannot see the capture/compute split, so capture used to fall to
+  the Tier C CPU bridge). Returns whether the hint landed before context
+  init; `MGPU_ADAPTER_NAME` still overrides. Also new:
+  `mgpuGetSelectedAdapterName` to query which adapter Dawn actually bound.
+- Fix hybrid-laptop backend auto-select probing the wrong adapter's
+  cross-adapter capability. Tier B's cross-adapter texture is allocated on the
+  *producer* (display / iGPU) device, so its viability is gated by the
+  producer's `CrossAdapterRowMajorTextureSupported` — but startup detection
+  tested the *compute* (dGPU) adapter instead. On machines where the dGPU
+  advertises the capability but the iGPU does not, minigpu committed to the
+  D3D12 / Tier-B backend and then degraded to the Tier C CPU bridge on every
+  frame ("Tier B: adapter does not support CrossAdapterRowMajorTextureSupported.
+  Falling back to Tier C."). Now the display (capture-producer) adapter's
+  capability is what selects Tier B vs Tier A*; when it lacks the capability we
+  take Tier A* (run Dawn on the iGPU) for zero-copy capture import and keep the
+  FFmpeg HW encoder on the iGPU. Also made the Tier A* adapter binding robust:
+  if the exact display-name match misses, auto-select now prefers the
+  integrated GPU rather than falling back to the discrete one.
+
 ## 1.5.5
 
 - Raise per-device GPU submission priority (`IDXGIDevice::SetGPUThreadPriority(+7)`)
   on the cached D3D11 device (both the Dawn-native-D3D11 fast path and the
   created-on-Dawn-adapter path), so minigpu's compute/copy submissions are less
   starved when another process saturates the GPU. Best-effort; failure is logged.
+- Tier B (D3D12 cross-adapter bridge) probing now caches a sticky negative
+  result per adapter: when the adapter lacks
+  `CrossAdapterRowMajorTextureSupported` (or any Tier B init step fails), the
+  probe used to re-run `D3D12CreateDevice` and re-log "Falling back to
+  Tier C" on every call — frame-rate log spam plus wasted per-frame device
+  creation. It now probes and warns once per adapter per process.
 
 ## 1.5.4
 

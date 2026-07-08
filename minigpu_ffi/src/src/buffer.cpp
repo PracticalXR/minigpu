@@ -24,6 +24,26 @@
 
 namespace mgpu {
 
+// ── Pre-init adapter preference (see buffer.h) ──────────────────────────────
+static std::atomic<bool> g_preferDisplayAdapter{false};
+static mgpu::mutex       g_selectedAdapterNameMutex;
+static std::string       g_selectedAdapterName;
+
+void setPreferDisplayAdapter(bool enable) {
+  g_preferDisplayAdapter.store(enable, std::memory_order_relaxed);
+}
+bool preferDisplayAdapterEnabled() {
+  return g_preferDisplayAdapter.load(std::memory_order_relaxed);
+}
+std::string selectedAdapterName() {
+  mgpu::lock_guard<mgpu::mutex> lock(g_selectedAdapterNameMutex);
+  return g_selectedAdapterName;
+}
+static void set_selected_adapter_name(const std::string& name) {
+  mgpu::lock_guard<mgpu::mutex> lock(g_selectedAdapterNameMutex);
+  g_selectedAdapterName = name;
+}
+
 WebGPUThread::WebGPUThread() {
 #ifndef __EMSCRIPTEN__
   // Only create actual thread on native platforms
@@ -151,6 +171,44 @@ void MGPU::initializeContext() {
     bool needsCrossAdapterBridge = false;
     Microsoft::WRL::ComPtr<IDXGIFactory1> fac;
     if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&fac)))) {
+      // Explicit pre-init preference (mgpuPreferDisplayAdapter): bind Dawn to
+      // the adapter driving the PRIMARY display (the attached output whose
+      // desktop coordinates contain the origin; fallback: first adapter with
+      // any attached output). Used by capture/record apps so screen capture,
+      // GPU processing and the HW encoder share one adapter (zero-copy) even
+      // on multi-output hybrid systems where the discrete GPU also drives a
+      // monitor — there the "dGPU has no outputs" heuristic below can't see
+      // the capture/compute split. When the resolve succeeds the topology
+      // auto-detect below is skipped (its guard checks autoDisplayAdapterName).
+      if (preferDisplayAdapterEnabled()) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> a;
+        std::string firstOutputName;
+        for (UINT i = 0; autoDisplayAdapterName.empty() &&
+                         SUCCEEDED(fac->EnumAdapters1(i, &a)); ++i, a.Reset()) {
+          DXGI_ADAPTER_DESC1 d{};
+          a->GetDesc1(&d);
+          if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+          Microsoft::WRL::ComPtr<IDXGIOutput> o;
+          for (UINT j = 0; SUCCEEDED(a->EnumOutputs(j, &o)); ++j, o.Reset()) {
+            DXGI_OUTPUT_DESC od{};
+            if (FAILED(o->GetDesc(&od)) || !od.AttachedToDesktop) continue;
+            char name[128]{};
+            WideCharToMultiByte(CP_UTF8, 0, d.Description, -1,
+                                 name, sizeof(name), nullptr, nullptr);
+            if (firstOutputName.empty()) firstOutputName = name;
+            if (od.DesktopCoordinates.left == 0 && od.DesktopCoordinates.top == 0) {
+              autoDisplayAdapterName = name; // primary display
+              break;
+            }
+          }
+        }
+        if (autoDisplayAdapterName.empty()) autoDisplayAdapterName = firstOutputName;
+        if (autoDisplayAdapterName.empty()) {
+          MGPU_LOG(mgpu::LOG_WARN,
+              "[mgpu] preferDisplayAdapter: no attached display output found - "
+              "using normal auto-select.");
+        }
+      }
       // Pick the highest-perf real adapter (= the one we'd normally use for
       // compute): largest dedicated VRAM, discrete preferred.
       Microsoft::WRL::ComPtr<IDXGIAdapter1> bestAdapter;
@@ -173,17 +231,51 @@ void MGPU::initializeContext() {
         if (better) { bestAdapter = a; bestVram = d.DedicatedVideoMemory; bestIsDiscrete = isDiscrete; }
       }
       // Cross-adapter case: hybrid system AND best adapter has no outputs.
-      if (realCount > 1 && bestAdapter) {
+      // (Skipped when preferDisplayAdapter already resolved a display adapter.)
+      if (autoDisplayAdapterName.empty() && realCount > 1 && bestAdapter) {
         Microsoft::WRL::ComPtr<IDXGIOutput> firstOut;
         HRESULT outHr = bestAdapter->EnumOutputs(0, &firstOut);
         if (outHr == DXGI_ERROR_NOT_FOUND) {
-          // Determine which cross-adapter strategy is available.
-          // Tier B requires D3D12 CrossAdapterRowMajorTextureSupported on
-          // the compute (dGPU) adapter.
-          bool tierBAvailable = false;
+          // The compute (dGPU) adapter has no outputs, so the display — and
+          // therefore the capture producer (Desktop Duplication / WGC) — lives
+          // on a DIFFERENT adapter (the iGPU).  Find that display adapter first;
+          // it is the producer whose capability actually gates Tier B.
+          Microsoft::WRL::ComPtr<IDXGIAdapter1> displayAdapter;
+          std::string displayName;
           {
+            Microsoft::WRL::ComPtr<IDXGIAdapter1> dispA;
+            for (UINT i = 0; SUCCEEDED(fac->EnumAdapters1(i, &dispA)); ++i, dispA.Reset()) {
+              DXGI_ADAPTER_DESC1 d{};
+              dispA->GetDesc1(&d);
+              if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+              Microsoft::WRL::ComPtr<IDXGIOutput> o;
+              if (SUCCEEDED(dispA->EnumOutputs(0, &o))) {
+                char name[128]{};
+                WideCharToMultiByte(CP_UTF8, 0, d.Description, -1,
+                                     name, sizeof(name), nullptr, nullptr);
+                displayName    = name;
+                displayAdapter = dispA;
+                break;
+              }
+            }
+          }
+
+          // Determine which cross-adapter strategy is available.
+          //
+          // Tier B allocates the cross-adapter committed texture on the
+          // PRODUCER's D3D12 device (see ensure_cross_adapter_texture() in
+          // minigpu_external.cpp — CreateCommittedResource with
+          // ALLOW_CROSS_ADAPTER runs on info->b12Dev, the producer adapter).
+          // So the capability that gates Tier B is the PRODUCER's (display /
+          // iGPU) CrossAdapterRowMajorTextureSupported, NOT the dGPU's — the
+          // dGPU only OPENS the shared handle, which needs no such capability.
+          // Checking bestAdapter (dGPU) here made us commit to the D3D12 /
+          // Tier-B backend on machines where the iGPU cannot allocate the
+          // shared texture, then fall to the Tier C CPU bridge on every frame.
+          bool tierBAvailable = false;
+          if (displayAdapter) {
             Microsoft::WRL::ComPtr<ID3D12Device> d12;
-            if (SUCCEEDED(D3D12CreateDevice(bestAdapter.Get(),
+            if (SUCCEEDED(D3D12CreateDevice(displayAdapter.Get(),
                     D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&d12))) && d12) {
               D3D12_FEATURE_DATA_D3D12_OPTIONS opts{};
               d12->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS,
@@ -195,23 +287,11 @@ void MGPU::initializeContext() {
           if (tierBAvailable) {
             // Tier B: D3D12 backend, dGPU selected, GPU-only cross-adapter copy.
             needsCrossAdapterBridge = true;
-          } else {
-            // Tier A*: find the display adapter (has outputs) and prefer it
-            // for Dawn so capture and compute share the same device.
-            Microsoft::WRL::ComPtr<IDXGIAdapter1> dispA;
-            for (UINT i = 0; SUCCEEDED(fac->EnumAdapters1(i, &dispA)); ++i, dispA.Reset()) {
-              DXGI_ADAPTER_DESC1 d{};
-              dispA->GetDesc1(&d);
-              if (d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
-              Microsoft::WRL::ComPtr<IDXGIOutput> o;
-              if (SUCCEEDED(dispA->EnumOutputs(0, &o))) {
-                char name[128]{};
-                WideCharToMultiByte(CP_UTF8, 0, d.Description, -1,
-                                     name, sizeof(name), nullptr, nullptr);
-                autoDisplayAdapterName = name;
-                break;
-              }
-            }
+          } else if (!displayName.empty()) {
+            // Tier A*: prefer the display adapter (iGPU) for Dawn so capture and
+            // compute share the same device → zero-copy, and the FFmpeg HW
+            // encoder (aligned to Dawn's adapter) stays on the iGPU too.
+            autoDisplayAdapterName = displayName;
           }
         }
       }
@@ -221,6 +301,11 @@ void MGPU::initializeContext() {
         : WGPUBackendType_D3D11;  // Tier A / Tier A*: D3D11 zero-copy
     if (needsCrossAdapterBridge) {
       MGPU_LOG(mgpu::LOG_INFO, "[mgpu] backend auto-select: D3D12 (Tier B cross-adapter GPU bridge)");
+    } else if (!autoDisplayAdapterName.empty() && preferDisplayAdapterEnabled()) {
+      MGPU_LOG(mgpu::LOG_INFO,
+          "[mgpu] backend auto-select: D3D11 (preferDisplayAdapter — binding to "
+          "primary-display adapter '%s' for same-adapter capture zero-copy)",
+          autoDisplayAdapterName.c_str());
     } else if (!autoDisplayAdapterName.empty()) {
       MGPU_LOG(mgpu::LOG_INFO,
           "[mgpu] backend auto-select: D3D11 (Tier A* iGPU zero-copy — dGPU lacks "
@@ -318,13 +403,16 @@ void MGPU::initializeContext() {
             "[mgpu] MGPU_ADAPTER_NAME='%s': no match - using auto-select", nameFilter);
     }
 
-    // 1.5. Tier A* auto-iGPU: cross-adapter topology detected but Tier B is
-    //      unavailable (dGPU lacks CrossAdapterRowMajorTextureSupported, e.g.
-    //      AMD iGPU + dGPU).  Prefer the display adapter (iGPU) so capture
-    //      (WGC, Desktop Duplication) and Dawn compute share the same device
-    //      → Tier A zero-copy, same as a single-GPU system.
-    //      Compute runs on the iGPU rather than the dGPU, but avoids a CPU
-    //      staging round-trip per frame.
+    // 1.5. Display-adapter binding. autoDisplayAdapterName is set either by
+    //      the explicit preferDisplayAdapter pre-init hint (primary-display
+    //      adapter) or by Tier A* auto-detect (cross-adapter topology where
+    //      Tier B is unavailable — dGPU lacks
+    //      CrossAdapterRowMajorTextureSupported, e.g. AMD iGPU + dGPU).
+    //      Either way, prefer that display adapter so capture (WGC, Desktop
+    //      Duplication) and Dawn compute share the same device → Tier A
+    //      zero-copy, same as a single-GPU system. Compute runs on the
+    //      display GPU rather than the dGPU, but avoids a CPU staging
+    //      round-trip per frame.
     //
     //      The user can force dGPU compute (accepting Tier C CPU bridge) by
     //      setting MGPU_ADAPTER_NAME to a substring of the dGPU name.
@@ -341,23 +429,44 @@ void MGPU::initializeContext() {
         if (lower == target) {
           ctx->adapter = e.handle;
           wgpuAdapterAddRef(ctx->adapter);
-          MGPU_LOG(mgpu::LOG_INFO,
-              "[mgpu] Tier A*: selected display adapter '%s' for zero-copy capture import. "
-              "(dGPU lacks CrossAdapterRowMajorTextureSupported — iGPU compute used. "
-              "Set MGPU_ADAPTER_NAME=<dGPU> for dGPU compute with Tier C CPU bridge.)",
-              e.name.c_str());
+          if (preferDisplayAdapterEnabled()) {
+            MGPU_LOG(mgpu::LOG_INFO,
+                "[mgpu] preferDisplayAdapter: selected primary-display adapter "
+                "'%s' for zero-copy capture import. "
+                "(Set MGPU_ADAPTER_NAME=<name> to override.)",
+                e.name.c_str());
+          } else {
+            MGPU_LOG(mgpu::LOG_INFO,
+                "[mgpu] Tier A*: selected display adapter '%s' for zero-copy capture import. "
+                "(dGPU lacks CrossAdapterRowMajorTextureSupported — iGPU compute used. "
+                "Set MGPU_ADAPTER_NAME=<dGPU> for dGPU compute with Tier C CPU bridge.)",
+                e.name.c_str());
+          }
           break;
         }
       }
     }
 
     // 2. Automatic: discrete GPU first, then integrated, then any non-CPU.
+    //    Exception: when Tier A* was intended (autoDisplayAdapterName set) but
+    //    the exact display-name match above didn't bind, we still want the
+    //    iGPU — matching by name can miss if Dawn's device string differs from
+    //    the DXGI description.  Preferring Integrated first keeps capture and
+    //    compute on the same (display) adapter → zero-copy instead of Tier C.
     if (!ctx->adapter) {
-      const WGPUAdapterType kPasses[] = {
+      const bool preferIntegrated = !autoDisplayAdapterName.empty();
+      const WGPUAdapterType kDiscreteFirst[] = {
         WGPUAdapterType_DiscreteGPU,   // dedicated adapter (NVIDIA/AMD)
         WGPUAdapterType_IntegratedGPU, // built-in (Intel/Apple)
         WGPUAdapterType_Unknown,       // catch-all (matches any non-CPU)
-      };      for (auto want : kPasses) {
+      };
+      const WGPUAdapterType kIntegratedFirst[] = {
+        WGPUAdapterType_IntegratedGPU, // Tier A*: the display adapter is the iGPU
+        WGPUAdapterType_DiscreteGPU,
+        WGPUAdapterType_Unknown,
+      };
+      const WGPUAdapterType* kPasses = preferIntegrated ? kIntegratedFirst : kDiscreteFirst;
+      for (auto want : {kPasses[0], kPasses[1], kPasses[2]}) {
         if (ctx->adapter) break;
         for (auto& e : entries) {
           if (e.type == WGPUAdapterType_CPU) continue;
@@ -452,6 +561,7 @@ void MGPU::initializeContext() {
         devStr.c_str(), vendorStr.c_str(),
         (int)info.backendType, (int)info.adapterType,
         (unsigned)info.vendorID, (unsigned)info.deviceID);
+      set_selected_adapter_name(devStr);  // queryable via mgpuGetSelectedAdapterName
       wgpuAdapterInfoFreeMembers(info);
     }
   }
@@ -696,6 +806,7 @@ void MGPU::destroyContext() {
 
   ctx->initialized = false;
   ctx.reset();
+  set_selected_adapter_name("");  // no adapter selected until next init
 }
 
 WGPUDevice MGPU::getDevice() const {
