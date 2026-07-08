@@ -1,5 +1,7 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.5.8
+
 ## 1.5.7
 
 ## 1.5.6

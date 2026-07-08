@@ -1,3 +1,5 @@
+## 1.5.8
+
 ## 1.5.7
 
 - Windows: `present()` now probes that a shared handle can actually be opened
