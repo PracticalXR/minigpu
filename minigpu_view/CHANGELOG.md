@@ -1,3 +1,13 @@
+## 1.5.9 (unreleased)
+
+- Web: the `webVideoFrame` present path now works. A raw JS `VideoFrame` cannot
+  cross the method-channel `StandardMessageCodec`, so the plugin resolves a
+  codec-safe int `videoFrameHandle` from a shared global registry
+  (`globalThis.miniavVideoFrameRegistry`) — mirroring the existing WebGPU
+  `bufferHandle` path. (The prior branch expected the JSObject directly under
+  `frame` and was never actually reachable.) This is what makes
+  `miniav_player` web video playback present.
+
 ## 1.5.8
 
 ## 1.5.7

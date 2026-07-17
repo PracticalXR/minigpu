@@ -332,6 +332,49 @@ static MGPUVideoTexture* import_cpu(const MGPUExternalVideoBuffer* buf) {
  * ====================================================================== */
 
 #ifndef __EMSCRIPTEN__
+// Populate tex->num_planes + tex->views[] from a single imported Dawn
+// `texture`. NV12 is multi-planar: a shader can't bind an all-aspect view of
+// it, so we create one view per plane (Y = R8 via Plane0, UV = RG8 via Plane1)
+// — matching what mgpuVideoTextureToRGBA / setOnShader expect (views[0]=Y,
+// views[1]=UV). Every other format is a single all-aspect view of
+// [fallbackFormat]. Shared across all import tiers (shared-handle, Tier A
+// same-adapter, Tier B cross-adapter) so they agree on plane layout.
+static void build_video_texture_views(MGPUVideoTexture* tex,
+                                      WGPUTexture texture,
+                                      MGPUExternalPixelFormat fmt,
+                                      WGPUTextureFormat fallbackFormat) {
+    const bool isNv12 =
+        (fmt == MGPU_EXTERNAL_PIXEL_FORMAT_NV12 ||
+         fmt == MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES);
+    if (isNv12) {
+        tex->num_planes = 2;
+        WGPUTextureViewDescriptor yv{};
+        yv.format          = WGPUTextureFormat_R8Unorm;
+        yv.dimension       = WGPUTextureViewDimension_2D;
+        yv.baseMipLevel    = 0; yv.mipLevelCount   = 1;
+        yv.baseArrayLayer  = 0; yv.arrayLayerCount = 1;
+        yv.aspect          = WGPUTextureAspect_Plane0Only;
+        tex->views[0] = wgpuTextureCreateView(texture, &yv);
+
+        WGPUTextureViewDescriptor uvv{};
+        uvv.format          = WGPUTextureFormat_RG8Unorm;
+        uvv.dimension       = WGPUTextureViewDimension_2D;
+        uvv.baseMipLevel    = 0; uvv.mipLevelCount   = 1;
+        uvv.baseArrayLayer  = 0; uvv.arrayLayerCount = 1;
+        uvv.aspect          = WGPUTextureAspect_Plane1Only;
+        tex->views[1] = wgpuTextureCreateView(texture, &uvv);
+    } else {
+        tex->num_planes = 1;
+        WGPUTextureViewDescriptor vd{};
+        vd.format          = fallbackFormat;
+        vd.dimension       = WGPUTextureViewDimension_2D;
+        vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
+        vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
+        vd.aspect          = WGPUTextureAspect_All;
+        tex->views[0] = wgpuTextureCreateView(texture, &vd);
+    }
+}
+
 static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
                                        const MGPUExternalVideoBuffer* buf) {
     if (!mem) return nullptr;
@@ -364,19 +407,11 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1; // SharedTextureMemory wraps a single opaque texture
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->shared_mem   = mem;
     tex->planes[0]    = texture;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = props.format;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(texture, &vd);
+    build_video_texture_views(tex, texture, buf->pixel_format, props.format);
     return tex;
 }
 #endif // !__EMSCRIPTEN__
@@ -929,19 +964,11 @@ static MGPUVideoTexture* import_d3d11_d3d12_bridge(const MGPUExternalVideoBuffer
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1;
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->shared_mem   = info->dawnCrossMem; // caller (via mgpuDestroyVideoTexture) will EndAccess + Release
     tex->planes[0]    = wTex;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = props.format;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(wTex, &vd);
+    build_video_texture_views(tex, wTex, buf->pixel_format, props.format);
     return tex;
 }
 
@@ -1201,18 +1228,10 @@ static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1;
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->planes[0]    = wTex;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = wfmt;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(wTex, &vd);
+    build_video_texture_views(tex, wTex, buf->pixel_format, wfmt);
     return tex;
 }
 

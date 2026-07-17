@@ -48,6 +48,25 @@ JSObject? _webGpuGetJsObject(int handle) {
   }
 }
 
+@JS('globalThis')
+external JSObject get _globalThis;
+
+/// Shared global registry of pending WebCodecs `VideoFrame`s, keyed by a
+/// producer-assigned int handle. A raw JS `VideoFrame` cannot cross the
+/// method-channel `StandardMessageCodec`, so producers (e.g. `miniav_player`)
+/// stash the frame here and pass only the codec-safe handle — mirroring the
+/// Emscripten `bufferHandle` path. Pops (reads + removes) the frame.
+JSObject? _takeVideoFrame(int handle) {
+  final reg = _globalThis.getProperty<JSAny?>('miniavVideoFrameRegistry'.toJS);
+  if (reg == null || reg.isUndefined) return null;
+  final regObj = reg as JSObject;
+  final key = handle.toString().toJS;
+  final frame = regObj.getProperty<JSAny?>(key);
+  if (frame == null || frame.isUndefined) return null;
+  regObj.delete(key);
+  return frame as JSObject;
+}
+
 // ---------------------------------------------------------------------------
 
 /// Plugin entry point. Registered automatically by Flutter via the
@@ -114,14 +133,19 @@ class MinigpuViewWebPlugin {
       }
       // else: handle is 0/null → first frame, skip blit silently.
     } else if (kind == 'webVideoFrame') {
-      final frame = args['frame'];
-      if (frame is! JSObject) {
-        throw PlatformException(
-          code: 'invalid_handle',
-          message: 'Expected JSObject VideoFrame under "frame" key',
-        );
+      // Codec-safe path: an int handle into the shared global VideoFrame
+      // registry (a raw JS VideoFrame can't cross StandardMessageCodec). The
+      // legacy same-isolate 'frame' JSObject is still honored if present.
+      final handle = args['videoFrameHandle'];
+      JSObject? frame;
+      if (handle is int) {
+        frame = _takeVideoFrame(handle);
+      } else if (args['frame'] is JSObject) {
+        frame = args['frame'] as JSObject;
       }
-      sink.copyFromVideoFrame(frame, width, height);
+      // Registry miss (handle already consumed / frame not ready) → skip
+      // silently, like the WebGPU-not-ready path above.
+      if (frame != null) sink.copyFromVideoFrame(frame, width, height);
     } else {
       throw PlatformException(
         code: 'unsupported',

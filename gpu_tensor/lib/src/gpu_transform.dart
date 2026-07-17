@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:gpu_tensor/src/gpu_helpers.dart';
@@ -11,9 +12,10 @@ extension GpuFft on Tensor {
   Future<Tensor> upgradeRealToComplex() async {
     int total = shape.reduce((a, b) => a * b);
 
-    // For FFT, we need same number of complex points as real input
-    // 1024 real samples → 1024 complex samples (2048 floats)
-    List<int> newShape = [total * 2]; // Always double the size for complex
+    // 1D: flat [N*2].  Higher ranks: append a complex dimension so the
+    // result is directly consumable by fft2d ([rows, cols, 2]) / fft3d
+    // ([D, R, C, 2]) — the old always-flat shape made those paths throw.
+    List<int> newShape = shape.length == 1 ? [total * 2] : [...shape, 2];
 
     Tensor out = await Tensor.create(newShape, gpu: gpu);
 
@@ -32,16 +34,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[i * 2u + 1u] = 0.0;
 }
 ''';
-    if (activeShader?.shaderCode != shaderTemplate) {
-      activeShader?.destroy();
-      activeShader = gpu.createComputeShader();
-      activeShader!.loadKernelString(shaderTemplate);
-    }
-    activeShader!.setBuffer('input', buffer);
-    activeShader!.setBuffer('output', out.buffer);
+    final shader = gpu.cachedShader(shaderTemplate);
+    shader.setBuffer('input', buffer);
+    shader.setBuffer('output', out.buffer);
 
     int workgroups = (total + 255) ~/ 256;
-    await activeShader!.dispatch(workgroups, 1, 1);
+    await shader.dispatch(workgroups, 1, 1);
     return out;
   }
 
@@ -66,15 +64,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[i * 2u + 1u] = 0.0;
 }
 ''';
-    if (activeShader?.shaderCode != shaderTemplate) {
-      activeShader?.destroy();
-      activeShader = gpu.createComputeShader();
-      activeShader!.loadKernelString(shaderTemplate);
-    }
-    activeShader!.setBuffer('input', buffer);
-    activeShader!.setBuffer('output', output.buffer);
+    final shader = gpu.cachedShader(shaderTemplate);
+    shader.setBuffer('input', buffer);
+    shader.setBuffer('output', output.buffer);
     final int workgroups = (total + 255) ~/ 256;
-    await activeShader!.dispatch(workgroups, 1, 1);
+    await shader.dispatch(workgroups, 1, 1);
   }
 
   /// A unified FFT that upgrades a real tensor if necessary and then calls the
@@ -105,6 +99,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         return fft1d();
       }
     }
+    if (isRealInput) {
+      // Real ND input: fft2d/fft3d upgrade real tensors internally.
+      if (shape.length == 2) return fft2d();
+      if (shape.length == 3) return fft3d();
+      throw Exception("FFT not implemented for real rank-${shape.length}");
+    }
     int dims = shape.length - 1;
     if (dims == 1) {
       return fft1d();
@@ -115,6 +115,60 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     } else {
       throw Exception("FFT not implemented for dimensions $dims");
     }
+  }
+
+  /// Bit-reverse reorders complex data along one axis of an interleaved
+  /// complex tensor, writing into [output] (same shape).  The tensor is
+  /// treated as [outer, len, inner] complex points; the `len` axis index is
+  /// bit-reversed.  Required before each axis's DIT butterfly stages —
+  /// fft2d/fft3d used to skip this entirely, producing wrong values for any
+  /// input that isn't invariant under the bit-reversal permutation.
+  Future<void> _bitReverseAxis({
+    required Tensor input,
+    required Tensor output,
+    required int outer,
+    required int len,
+    required int inner,
+  }) async {
+    final int total = outer * len * inner;
+    final int numBits = (math.log(len) / math.ln2).round();
+    final shaderCode =
+        '''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+const TOTAL: u32 = ${total}u;
+const LEN_INNER: u32 = ${len * inner}u;
+const INNER: u32 = ${inner}u;
+const BITS: u32 = ${numBits}u;
+
+fn bitReverse(x: u32, bits: u32) -> u32 {
+  var result: u32 = 0u;
+  var temp: u32 = x;
+  for (var i: u32 = 0u; i < bits; i = i + 1u) {
+    result = (result << 1u) | (temp & 1u);
+    temp = temp >> 1u;
+  }
+  return result;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
+  if (i >= TOTAL) { return; }
+  let o: u32 = i / LEN_INNER;
+  let rem: u32 = i % LEN_INNER;
+  let k: u32 = rem / INNER;
+  let r: u32 = rem % INNER;
+  let src: u32 = o * LEN_INNER + bitReverse(k, BITS) * INNER + r;
+  output[i * 2u] = input[src * 2u];
+  output[i * 2u + 1u] = input[src * 2u + 1u];
+}
+''';
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', output.buffer);
+    await shader.dispatchLinear(total);
   }
 
   /// Computes a 1D FFT on a tensor representing complex numbers in interleaved format.
@@ -161,14 +215,12 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ''';
 
-    final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderTemplate);
+    final shader = gpu.cachedShader(shaderTemplate);
     shader.setBuffer('input', input.buffer);
     shader.setBuffer('output', output.buffer);
 
     int workgroups = (n + 255) ~/ 256;
     await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
     return output;
   }
 
@@ -210,13 +262,11 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[dstIdx + 1u] = input[srcIdx + 1u];
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderTemplate);
+    final shader = gpu.cachedShader(shaderTemplate);
     shader.setBuffer('input', input.buffer);
     shader.setBuffer('output', outputTensor.buffer);
     final int workgroups = (n + 255) ~/ 256;
     await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
   }
 
   /// Runs a 1D FFT using caller-supplied, pre-allocated workspace tensors and
@@ -278,11 +328,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''';
     // Reuse cached shader on this tensor (the caller's persistent complex tensor).
-    if (activeShader?.shaderCode != shaderTemplate) {
-      activeShader?.destroy();
-      activeShader = gpu.createComputeShader();
-      activeShader!.loadKernelString(shaderTemplate);
-    }
+    final shader = gpu.cachedShader(shaderTemplate);
 
     for (int s = 0; s < stages; s++) {
       final int m = 1 << (s + 1);
@@ -298,14 +344,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         dataType: BufferDataType.uint32,
       );
 
-      activeShader!.setBuffer('input', ping.buffer);
-      activeShader!.setBuffer('output', pongRef.buffer);
-      activeShader!.setBuffer('params', paramBuffer);
-      activeShader!.setBuffer('twiddles', twiddleBuffer);
+      shader.setBuffer('input', ping.buffer);
+      shader.setBuffer('output', pongRef.buffer);
+      shader.setBuffer('params', paramBuffer);
+      shader.setBuffer('twiddles', twiddleBuffer);
 
       final int numOperations = n >> 1;
       final int workgroups = (numOperations + 255) ~/ 256;
-      await activeShader!.dispatch(workgroups, 1, 1);
+      await shader.dispatch(workgroups, 1, 1);
 
       final Tensor tmp = ping;
       ping = pongRef;
@@ -400,11 +446,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[idx1 + 1u] = result2.y;
 }
 ''';
-    if (activeShader?.shaderCode != shaderTemplate) {
-      activeShader?.destroy();
-      activeShader = gpu.createComputeShader();
-      activeShader!.loadKernelString(shaderTemplate);
-    }
+    final shader = gpu.cachedShader(shaderTemplate);
 
     final Buffer paramBuffer = gpu.createBuffer(16, BufferDataType.uint32);
 
@@ -424,14 +466,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
           dataType: BufferDataType.uint32,
         );
 
-        activeShader!.setBuffer('input', ping.buffer);
-        activeShader!.setBuffer('output', pong.buffer);
-        activeShader!.setBuffer('params', paramBuffer);
-        activeShader!.setBuffer('twiddles', twiddleBuffer);
+        shader.setBuffer('input', ping.buffer);
+        shader.setBuffer('output', pong.buffer);
+        shader.setBuffer('params', paramBuffer);
+        shader.setBuffer('twiddles', twiddleBuffer);
 
         int numOperations = n >> 1;
         int workgroups = (numOperations + 255) ~/ 256;
-        await activeShader!.dispatch(workgroups, 1, 1);
+        await shader.dispatch(workgroups, 1, 1);
 
         Tensor temp = ping;
         ping = pong;
@@ -454,6 +496,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /// Computes a 2D FFT. If a real tensor is supplied, it is upgraded.
+  ///
+  /// The input tensor is never mutated; the result is a fresh tensor owned
+  /// by the caller.
   Future<Tensor> fft2d() async {
     // Upgrade real tensor case.
     if (shape.length == 2) {
@@ -464,7 +509,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
       // Use GPU to upgrade instead of CPU iteration.
       final Tensor upgraded = await upgradeRealToComplex();
-      return upgraded.fft2d();
+      final result = await upgraded.fft2d();
+      upgraded.destroy();
+      return result;
     }
     if (shape.length != 3 || shape[2] != 2) {
       throw Exception("fft2d requires a tensor of shape [rows, cols, 2].");
@@ -475,10 +522,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       throw Exception("Both rows and cols must be powers of 2.");
     }
 
-    // FFT on rows.
-    int stagesRow = (math.log(cols) / math.ln2).toInt();
-    Tensor ping = this;
+    // Two scratch tensors ping-pong through every pass; `this` is only ever
+    // READ (by the first bit-reverse).  The old code ping-ponged through
+    // `this` (mutating the caller's input on odd swap counts) and leaked the
+    // first scratch when allocating a second one for the column pass.
+    Tensor ping = await Tensor.create(shape, gpu: gpu);
     Tensor pong = await Tensor.create(shape, gpu: gpu);
+
+    // FFT on rows (transform along the column index).
+    // DIT butterflies require bit-reversed input order along the axis.
+    await _bitReverseAxis(
+      input: this,
+      output: ping,
+      outer: rows,
+      len: cols,
+      inner: 1,
+    );
+    int stagesRow = (math.log(cols) / math.ln2).toInt();
     for (int s = 0; s < stagesRow; s++) {
       int m = 1 << (s + 1);
       int half = m >> 1;
@@ -519,25 +579,28 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[idx1+1u] = temp2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'half': half,
-        'm': m,
-        'numOperations': numOperations,
-      });
-      shader.loadKernelString(shaderCode);
+      final shader = gpu.cachedShader(shaderTemplate);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
-      int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await shader.dispatchLinear(numOperations);
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
-    // FFT on columns.
+    // FFT on columns (transform along the row index) — bit-reverse first.
+    await _bitReverseAxis(
+      input: ping,
+      output: pong,
+      outer: 1,
+      len: rows,
+      inner: cols,
+    );
+    {
+      Tensor temp = ping;
+      ping = pong;
+      pong = temp;
+    }
     int stagesCol = (math.log(rows) / math.ln2).toInt();
-    pong = await Tensor.create(shape);
     for (int s = 0; s < stagesCol; s++) {
       int m = 1 << (s + 1);
       int half = m >> 1;
@@ -578,27 +641,23 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[base1+1u] = temp2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'half': half,
-        'm': m,
-        'numOperations': numOperations,
-      });
-      shader.loadKernelString(shaderCode);
+      final shader = gpu.cachedShader(shaderTemplate);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
-      int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await shader.dispatchLinear(numOperations);
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
+    pong.destroy();
     return ping;
   }
 
   /// Computes a 3D FFT on a tensor representing complex numbers in interleaved format.
   /// If a real tensor with shape [D, R, C] is supplied, it is upgraded.
+  ///
+  /// The input tensor is never mutated; the result is a fresh tensor owned
+  /// by the caller.
   Future<Tensor> fft3d() async {
     // Upgrade case: if a real tensor is supplied.
     if (shape.length == 3) {
@@ -609,7 +668,9 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
       // Upgrade on GPU.
       final Tensor upgraded = await upgradeRealToComplex();
-      return upgraded.fft3d();
+      final result = await upgraded.fft3d();
+      upgraded.destroy();
+      return result;
     }
 
     // If already complex, expect shape [D, R, C, 2].
@@ -624,8 +685,17 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       throw Exception("D, R, and C must be powers of 2.");
     }
 
-    Tensor ping = this;
+    // Same non-mutating ping/pong discipline as fft2d, with a bit-reversal
+    // reorder before each axis's DIT butterfly stages.
+    Tensor ping = await Tensor.create(shape, gpu: gpu);
     Tensor pong = await Tensor.create(shape, gpu: gpu);
+    await _bitReverseAxis(
+      input: this,
+      output: ping,
+      outer: 1,
+      len: D,
+      inner: R * C,
+    );
 
     // FFT along depth dimension.
     int stagesD = (math.log(D) / math.ln2).toInt();
@@ -678,27 +748,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[idx1+1u] = temp2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'D': D,
-        'R': R,
-        'C': C,
-        'm': m,
-        'half': half,
-        'numOperations': numOperations,
-      });
-      shader.loadKernelString(shaderCode);
+      final shader = gpu.cachedShader(shaderTemplate);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
-      int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await shader.dispatchLinear(numOperations);
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
 
-    // FFT along row dimension.
+    // FFT along row dimension — bit-reverse the row axis first.
+    await _bitReverseAxis(
+      input: ping,
+      output: pong,
+      outer: D,
+      len: R,
+      inner: C,
+    );
+    {
+      Tensor temp = ping;
+      ping = pong;
+      pong = temp;
+    }
     int stagesR = (math.log(R) / math.ln2).toInt();
     for (int s = 0; s < stagesR; s++) {
       int m = 1 << (s + 1);
@@ -749,28 +820,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   output[idx1+1u] = temp2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'D': D,
-        'R': R,
-        'C': C,
-        'm': m,
-        'half': half,
-        'numOperations': numOperations,
-      });
-
-      shader.loadKernelString(shaderCode);
+      final shader = gpu.cachedShader(shaderTemplate);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
-      int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await shader.dispatchLinear(numOperations);
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
 
-    // FFT along column dimension.
+    // FFT along column dimension — bit-reverse the column axis first.
+    await _bitReverseAxis(
+      input: ping,
+      output: pong,
+      outer: D * R,
+      len: C,
+      inner: 1,
+    );
+    {
+      Tensor temp = ping;
+      ping = pong;
+      pong = temp;
+    }
     int stagesC = (math.log(C) / math.ln2).toInt();
     for (int s = 0; s < stagesC; s++) {
       int m = 1 << (s + 1);
@@ -821,25 +892,286 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   output[idx1+1u] = temp2.y;
 }
 ''';
-      final ComputeShader shader = gpu.createComputeShader();
-      final shaderCode = prepareShader(shaderTemplate, dataType, {
-        'D': D,
-        'R': R,
-        'C': C,
-        'm': m,
-        'half': half,
-        'numOperations': numOperations,
-      });
-      shader.loadKernelString(shaderCode);
+      final shader = gpu.cachedShader(shaderTemplate);
       shader.setBuffer('input', ping.buffer);
       shader.setBuffer('output', pong.buffer);
-      int workgroups = (numOperations + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-      shader.destroy();
+      await shader.dispatchLinear(numOperations);
       Tensor temp = ping;
       ping = pong;
       pong = temp;
     }
+    pong.destroy();
     return ping;
+  }
+}
+
+/// A reusable execution plan for repeated same-size 1D real-input FFTs
+/// (the audio-frame hot path).
+///
+/// [GpuFft.fft1d] pays a heavy per-call tax that a per-frame caller cannot
+/// afford: twiddle factors recomputed on the CPU (2N trig calls), four GPU
+/// buffers created and destroyed, and — worst — every butterfly stage
+/// individually awaited with a param-buffer write in between, serialising
+/// ~2·log2(N)+4 Dart↔GPU round trips per frame.
+///
+/// The plan compiles everything once per (gpu, n):
+///  • per-stage butterfly shaders with n/m/half baked in as WGSL constants
+///    (no param buffer, no per-stage writes),
+///  • real→complex promotion and bit-reversal shaders,
+///  • the twiddle buffer and all workspace tensors.
+///
+/// [executeReal] then enqueues the whole chain — promotion, bit-reversal and
+/// all log2(N) butterfly stages — back-to-back on minigpu's FIFO WebGPU
+/// thread and awaits only the FINAL dispatch: one Dart↔GPU round trip per
+/// FFT instead of ~34 at N = 32768.
+///
+/// The shaders are PLAN-OWNED, deliberately NOT acquired through the global
+/// [CachedShaderAcquire] cache: a fire-and-forget dispatch reads its buffer
+/// bindings when the GPU task RUNS, so a shader object shared with any other
+/// caller could be rebound while this plan's tasks are still queued.  A
+/// private object dispatched at most once per [executeReal] cannot race.
+///
+/// Not reentrant: callers must not start a second [executeReal] before the
+/// previous one completes (the final await guarantees every queued task has
+/// executed, so sequential callers are always safe).
+class Fft1dPlan {
+  Fft1dPlan._(
+    this.gpu,
+    this.n,
+    this._stages,
+    this._upgradeShader,
+    this._bitrevShader,
+    this._butterflyShaders,
+    this._twiddleBuffer,
+    this._complex,
+    this._bitRev,
+    this._pong,
+  );
+
+  final Minigpu gpu;
+
+  /// FFT size: number of real input samples = number of complex points.
+  final int n;
+
+  final int _stages;
+  final ComputeShader _upgradeShader;
+  final ComputeShader _bitrevShader;
+  final List<ComputeShader> _butterflyShaders;
+  final Buffer _twiddleBuffer;
+  final Tensor _complex; // real→complex promotion target [n*2]
+  final Tensor _bitRev; // bit-reversed input / butterfly ping [n*2]
+  final Tensor _pong; // butterfly pong [n*2]
+  bool _destroyed = false;
+
+  /// The tensor [executeReal] returns.  Fixed for a given plan (the butterfly
+  /// ping/pong parity depends only on the stage count), so downstream code
+  /// can bind it once.
+  Tensor get output => _stages.isEven ? _bitRev : _pong;
+
+  /// Builds a plan for [n]-point real-input FFTs ([n] must be a power of two
+  /// ≥ 2).  [scale] is baked into the final butterfly stage — pass `1 / n`
+  /// to fold the conventional 1/N normalisation into the FFT itself and save
+  /// a separate normalisation pass.
+  static Future<Fft1dPlan> create(
+    Minigpu gpu,
+    int n, {
+    double scale = 1.0,
+  }) async {
+    if (n < 2 || (n & (n - 1)) != 0) {
+      throw ArgumentError.value(n, 'n', 'must be a power of 2 and >= 2');
+    }
+    final int stages = (math.log(n) / math.ln2).round();
+
+    final complex = await Tensor.create([n * 2], gpu: gpu);
+    final bitRev = await Tensor.create([n * 2], gpu: gpu);
+    final pong = await Tensor.create([n * 2], gpu: gpu);
+
+    final twiddleFactors = Float32List(n * 2);
+    for (int i = 0; i < n; i++) {
+      final double angle = -2.0 * math.pi * i / n;
+      twiddleFactors[i * 2] = math.cos(angle);
+      twiddleFactors[i * 2 + 1] = math.sin(angle);
+    }
+    final twiddleBuffer = gpu.createBuffer(n * 2 * 4, BufferDataType.float32);
+    await twiddleBuffer.write(twiddleFactors, twiddleFactors.length);
+
+    final upgradeShader = gpu.createComputeShader()
+      ..loadKernelString('''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+const N: u32 = ${n}u;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i: u32 = gid.x;
+  if (i >= N) { return; }
+  output[i * 2u] = input[i];
+  output[i * 2u + 1u] = 0.0;
+}
+''');
+
+    final int numBits = stages;
+    final bitrevShader = gpu.createComputeShader()
+      ..loadKernelString('''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+
+const N: u32 = ${n}u;
+const BITS: u32 = ${numBits}u;
+
+fn bitReverse(x: u32, bits: u32) -> u32 {
+  var result: u32 = 0u;
+  var temp: u32 = x;
+  for (var i: u32 = 0u; i < bits; i = i + 1u) {
+    result = (result << 1u) | (temp & 1u);
+    temp = temp >> 1u;
+  }
+  return result;
+}
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+  let i: u32 = gid.x;
+  if (i >= N) { return; }
+  let j: u32 = bitReverse(i, BITS);
+  output[i * 2u] = input[j * 2u];
+  output[i * 2u + 1u] = input[j * 2u + 1u];
+}
+''');
+
+    final butterflies = <ComputeShader>[];
+    for (int s = 0; s < stages; s++) {
+      final int m = 1 << (s + 1);
+      final int half = m >> 1;
+      final bool last = s == stages - 1;
+      // Scale only on the last stage so intermediate stages stay exact.
+      final String store = last && scale != 1.0
+          ? '''
+  output[idx0] = result1.x * SCALE;
+  output[idx0 + 1u] = result1.y * SCALE;
+  output[idx1] = result2.x * SCALE;
+  output[idx1 + 1u] = result2.y * SCALE;'''
+          : '''
+  output[idx0] = result1.x;
+  output[idx0 + 1u] = result1.y;
+  output[idx1] = result2.x;
+  output[idx1 + 1u] = result2.y;''';
+      butterflies.add(
+        gpu.createComputeShader()
+          ..loadKernelString('''
+@group(0) @binding(0) var<storage, read_write> input: array<f32>;
+@group(0) @binding(1) var<storage, read_write> output: array<f32>;
+@group(0) @binding(2) var<storage, read_write> twiddles: array<f32>;
+
+const N: u32 = ${n}u;
+const M: u32 = ${m}u;
+const HALF: u32 = ${half}u;
+${last && scale != 1.0 ? 'const SCALE: f32 = $scale;' : ''}
+
+@compute @workgroup_size(256, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let numOperations: u32 = N >> 1u;
+  let t: u32 = gid.x;
+  if (t >= numOperations) { return; }
+  let group: u32 = t / HALF;
+  let pos: u32 = t % HALF;
+  let i0: u32 = group * M + pos;
+  let i1: u32 = i0 + HALF;
+  if (i1 >= N) { return; }
+  let idx0: u32 = i0 * 2u;
+  let idx1: u32 = i1 * 2u;
+  let a: vec2<f32> = vec2<f32>(input[idx0], input[idx0 + 1u]);
+  let b: vec2<f32> = vec2<f32>(input[idx1], input[idx1 + 1u]);
+  let twiddle_idx: u32 = pos * (N / M) * 2u;
+  let w: vec2<f32> = vec2<f32>(twiddles[twiddle_idx], twiddles[twiddle_idx + 1u]);
+  let b_w: vec2<f32> = vec2<f32>(b.x * w.x - b.y * w.y, b.x * w.y + b.y * w.x);
+  let result1: vec2<f32> = a + b_w;
+  let result2: vec2<f32> = a - b_w;
+$store
+}
+'''),
+      );
+    }
+
+    return Fft1dPlan._(
+      gpu,
+      n,
+      stages,
+      upgradeShader,
+      bitrevShader,
+      butterflies,
+      twiddleBuffer,
+      complex,
+      bitRev,
+      pong,
+    );
+  }
+
+  /// Runs the full real-input FFT chain on [realInput] (shape `[n]`, real
+  /// samples) and returns the interleaved complex result (shape `[n*2]`,
+  /// identical to [output]).
+  ///
+  /// The returned tensor is plan-owned and valid until the next
+  /// [executeReal] call or [destroy].
+  Future<Tensor> executeReal(Tensor realInput) async {
+    if (_destroyed) throw StateError('Fft1dPlan used after destroy()');
+    if (realInput.size != n) {
+      throw ArgumentError(
+        'realInput has ${realInput.size} samples, plan expects $n',
+      );
+    }
+
+    // All dispatches below are enqueued to minigpu's single WebGPU thread in
+    // call order; only the final one is awaited.  Bindings are re-set every
+    // frame (cheap pointer-compare no-ops when unchanged) and each shader is
+    // private to this plan and dispatched exactly once per call, so nothing
+    // can rebind a shader between its enqueue and its execution.
+    final int wgN = (n + 255) ~/ 256;
+
+    _upgradeShader.setBuffer('input', realInput.buffer);
+    _upgradeShader.setBuffer('output', _complex.buffer);
+    unawaited(_upgradeShader.dispatch(wgN, 1, 1));
+
+    _bitrevShader.setBuffer('input', _complex.buffer);
+    _bitrevShader.setBuffer('output', _bitRev.buffer);
+    unawaited(_bitrevShader.dispatch(wgN, 1, 1));
+
+    Tensor ping = _bitRev;
+    Tensor pong = _pong;
+    final int wgOps = ((n >> 1) + 255) ~/ 256;
+    for (int s = 0; s < _stages; s++) {
+      final shader = _butterflyShaders[s];
+      shader.setBuffer('input', ping.buffer);
+      shader.setBuffer('output', pong.buffer);
+      shader.setBuffer('twiddles', _twiddleBuffer);
+      final done = shader.dispatch(wgOps, 1, 1);
+      if (s == _stages - 1) {
+        await done;
+      } else {
+        unawaited(done);
+      }
+      final Tensor tmp = ping;
+      ping = pong;
+      pong = tmp;
+    }
+    return ping;
+  }
+
+  /// Releases all plan-owned GPU resources.  Safe to call once; the plan is
+  /// unusable afterwards.  Must not be called while an [executeReal] is in
+  /// flight.
+  void destroy() {
+    if (_destroyed) return;
+    _destroyed = true;
+    _upgradeShader.destroy();
+    _bitrevShader.destroy();
+    for (final s in _butterflyShaders) {
+      s.destroy();
+    }
+    _twiddleBuffer.destroy();
+    _complex.destroy();
+    _bitRev.destroy();
+    _pong.destroy();
   }
 }

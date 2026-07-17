@@ -605,6 +605,15 @@ void MGPU::initializeContext() {
   if (adapterHas(WGPUFeatureName_BGRA8UnormStorage))
     wantedFeatures.push_back(WGPUFeatureName_BGRA8UnormStorage);
 #endif
+  // Multi-planar YUV formats (NV12 / P010) — required to create per-plane
+  // views on and sample imported hardware YUV textures (camera frames +
+  // hardware video decoders like the Media Foundation D3D11 decoder). Without
+  // it the imported R8BG8Biplanar420Unorm texture is invalid at bind time and
+  // samples as black. Cross-platform (D3D11 NV12 on Windows, IOSurface NV12 on
+  // Apple, dmabuf NV12 on Linux); adapter-gated so the device request never
+  // fails where it's unsupported.
+  if (adapterHas(WGPUFeatureName_DawnMultiPlanarFormats))
+    wantedFeatures.push_back(WGPUFeatureName_DawnMultiPlanarFormats);
 #ifdef __APPLE__
   if (adapterHas(WGPUFeatureName_SharedTextureMemoryIOSurface))
     wantedFeatures.push_back(WGPUFeatureName_SharedTextureMemoryIOSurface);
@@ -624,6 +633,32 @@ void MGPU::initializeContext() {
   if (!wantedFeatures.empty()) {
     deviceDesc.requiredFeatures = wantedFeatures.data();
     deviceDesc.requiredFeatureCount = wantedFeatures.size();
+  }
+
+  // ── Request the adapter's FULL limits instead of the spec defaults.
+  //    Defaults cap maxStorageBufferBindingSize at 128 MiB and maxBufferSize
+  //    at 256 MiB; ML workloads (gpu_ml expert stacks, large weight
+  //    matrices) bind multi-hundred-MB storage buffers, which previously
+  //    failed CreateBindGroup with an uncaptured validation error and
+  //    silently produced zero outputs.  Requesting exactly what the adapter
+  //    reported cannot fail the device request.
+  WGPULimits adapterLimits = {};
+  bool haveAdapterLimits =
+      wgpuAdapterGetLimits(ctx->adapter, &adapterLimits) ==
+      WGPUStatus_Success;
+  if (haveAdapterLimits) {
+    adapterLimits.nextInChain = nullptr; // request base limits only
+    deviceDesc.requiredLimits = &adapterLimits;
+    MGPU_LOG(mgpu::LOG_INFO,
+        "[mgpu limits] requesting adapter limits: maxBufferSize=%llu "
+        "maxStorageBufferBindingSize=%llu maxComputeWorkgroupStorageSize=%u",
+        (unsigned long long)adapterLimits.maxBufferSize,
+        (unsigned long long)adapterLimits.maxStorageBufferBindingSize,
+        (unsigned)adapterLimits.maxComputeWorkgroupStorageSize);
+  } else {
+    MGPU_LOG(mgpu::LOG_WARN,
+        "[mgpu limits] wgpuAdapterGetLimits failed; using default limits "
+        "(128MiB storage bindings)");
   }
 
   // Set up device lost callback info
@@ -1564,7 +1599,7 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   WGPUFutureWaitInfo waitInfo = {};
   waitInfo.future = future;
   wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
-  if (waitInfo.completed != true) {
+  if (!waitInfo.completed) {
     // Hot-poll: Sleep(1) on Windows actually sleeps ~15ms under the default
     // timer resolution which makes per-frame read-back dominate encoder
     // throughput. Use ms=0 so platformSleep just calls

@@ -32,6 +32,87 @@ T getTypedDataSublist<T extends TypedData>(T data, int start, int end) {
   throw Exception("Unsupported TypedData type: ${data.runtimeType}");
 }
 
+/// Process-wide cache of compiled compute shaders, keyed per-Minigpu
+/// instance by the FULL WGSL source.
+///
+/// Every tensor op used to create + compile + destroy its shader PER CALL —
+/// per-frame Tint compilation in disguise for anything invoking ops at frame
+/// rate (e.g. gpu_pipeline's StreamMergeStage merging audio streams).  Op
+/// sources embed sizes/dtypes, so steady-state workloads (the same shapes
+/// every frame) hit the cache from the second call on.
+///
+/// Eviction is two-phase: on overflow the oldest half is RETIRED (dropped
+/// from the cache) and destroyed only on the NEXT overflow — a shader that
+/// was mid-dispatch when evicted must never be destroyed under it.
+class TensorShaderCache {
+  TensorShaderCache._();
+
+  static const int _maxPerGpu = 512;
+  static final Map<Minigpu, Map<String, ComputeShader>> _byGpu = Map.identity();
+  static final Map<Minigpu, List<ComputeShader>> _retired = Map.identity();
+
+  static ComputeShader acquire(Minigpu gpu, String source) {
+    final cache = _byGpu.putIfAbsent(gpu, () => <String, ComputeShader>{});
+    final existing = cache[source];
+    if (existing != null) return existing;
+
+    if (cache.length >= _maxPerGpu) {
+      // Destroy the batch retired at the PREVIOUS overflow (their dispatches
+      // finished long ago), then retire the oldest half of the current set.
+      final retired = _retired.putIfAbsent(gpu, () => <ComputeShader>[]);
+      for (final s in retired) {
+        try {
+          s.destroy();
+        } catch (_) {}
+      }
+      retired.clear();
+      for (final k in cache.keys.take(_maxPerGpu ~/ 2).toList()) {
+        retired.add(cache.remove(k)!);
+      }
+    }
+
+    final shader = gpu.createComputeShader()..loadKernelString(source);
+    cache[source] = shader;
+    return shader;
+  }
+
+  /// Number of cached shaders for [gpu] (tests/introspection).
+  static int sizeFor(Minigpu gpu) => _byGpu[gpu]?.length ?? 0;
+
+  /// Destroys all cached shaders (for [gpu], or every instance).  Only call
+  /// when no tensor ops are in flight.
+  static void clear([Minigpu? gpu]) {
+    final targets = gpu != null ? [gpu] : _byGpu.keys.toList();
+    for (final g in targets) {
+      final cache = _byGpu.remove(g);
+      if (cache != null) {
+        for (final s in cache.values) {
+          try {
+            s.destroy();
+          } catch (_) {}
+        }
+      }
+      final retired = _retired.remove(g);
+      if (retired != null) {
+        for (final s in retired) {
+          try {
+            s.destroy();
+          } catch (_) {}
+        }
+      }
+    }
+  }
+}
+
+extension CachedShaderAcquire on Minigpu {
+  /// A compiled shader for [source], compiled at most once per source per
+  /// Minigpu instance.  Callers MUST NOT destroy the returned shader, and
+  /// must complete their setBuffer(...) calls + dispatch(...) without
+  /// awaiting in between — the next caller re-binds the same shader object.
+  ComputeShader cachedShader(String source) =>
+      TensorShaderCache.acquire(this, source);
+}
+
 String prepareShader(
   String template,
   BufferDataType dataType,
@@ -51,15 +132,42 @@ String prepareShader(
     } else {
       valueString = value.toString(); // Default string conversion
     }
-    final wgslType = getWGSLType(dataType);
     // Replace placeholder like ${key}
     result = result.replaceAll('\${$key}', valueString);
-    result = result.replaceAll('array<f32>', 'array<$wgslType>');
-    result = result.replaceAll('array<i32>', 'array<$wgslType>');
-    result = result.replaceAll('array<u32>', 'array<$wgslType>');
   });
+  // Templates are written against a canonical `array<f32>` element type,
+  // rewritten here to the tensor's dtype.  `array<u32>`/`array<i32>` in a
+  // template are intentional non-data bindings (params, packed byte views)
+  // and must NOT be rewritten.
+  final wgslType = getWGSLType(dataType);
+  result = result.replaceAll('array<f32>', 'array<$wgslType>');
   return result;
 }
+
+/// Dispatches a 1D logical workload of [threads] invocations, folding into
+/// (x, y) workgroup counts when the workgroup count exceeds WebGPU's 65535
+/// per-dimension limit (tensors > ~16.7M elements at workgroup_size 256).
+///
+/// Kernels dispatched through this MUST compute their linear index as
+/// `let i: u32 = gid.x + gid.y * (nwg.x * 256u);`
+/// with `@builtin(num_workgroups) nwg` — see [linearIndexWGSL] — and bounds
+/// check against the logical size (the fold overshoots by design).
+extension LinearDispatch on ComputeShader {
+  Future<void> dispatchLinear(int threads, {int workgroupSize = 256}) {
+    final wg = (threads + workgroupSize - 1) ~/ workgroupSize;
+    final x = wg <= 65535 ? wg : 65535;
+    final y = (wg + x - 1) ~/ x;
+    return dispatch(x == 0 ? 1 : x, y == 0 ? 1 : y, 1);
+  }
+}
+
+/// Canonical main-signature + linear-index preamble for 1D kernels that are
+/// dispatched via [LinearDispatch.dispatchLinear].  Uses num_workgroups so
+/// the source stays independent of the dispatch size (cache friendly).
+const String linearMainSignature =
+    'fn main(@builtin(global_invocation_id) gid: vec3<u32>, '
+    '@builtin(num_workgroups) nwg: vec3<u32>)';
+const String linearIndexWGSL = 'let i: u32 = gid.x + gid.y * (nwg.x * 256u);';
 
 // Helper functions for type-conscious shader generation
 String getZeroValue(BufferDataType dataType) {

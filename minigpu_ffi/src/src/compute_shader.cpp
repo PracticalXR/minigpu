@@ -1,5 +1,6 @@
 #include "../include/compute_shader.h"
 #include "../include/buffer.h"
+#include "../include/log.h"
 #include "../include/mutex.h"
 #include <fstream>
 #include <sstream>
@@ -361,14 +362,21 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
     mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+      LOG_ERROR("dispatch skipped: no kernel loaded or bad workgroup counts "
+                "(%d,%d,%d)",
+                groupsX, groupsY, groupsZ);
       return;
     }
 
     if (!updatePipelineIfNeeded()) {
+      LOG_ERROR("dispatch skipped: pipeline/bind group creation failed "
+                "(output buffers were NOT written)");
       return;
     }
 
     if (!computePipeline || !bindGroup) {
+      LOG_ERROR("dispatch skipped: pipeline or bind group missing "
+                "(output buffers were NOT written)");
       return;
     }
 
@@ -420,8 +428,13 @@ void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
       mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
       if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+        LOG_ERROR("dispatchAsync skipped: no kernel loaded or bad workgroup "
+                  "counts (%d,%d,%d)",
+                  groupsX, groupsY, groupsZ);
         // ok stays false
       } else if (!updatePipelineIfNeeded()) {
+        LOG_ERROR("dispatchAsync skipped: pipeline/bind group creation failed "
+                  "(output buffers were NOT written)");
         // ok stays false
       } else {
         WGPUCommandEncoder commandEncoder =
