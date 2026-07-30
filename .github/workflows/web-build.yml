@@ -30,12 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
+      # No submodule init: nothing here is a submodule. Dawn is fetched by
+      # dawn.cmake at configure time, into a gitignored external/ directory.
       - uses: actions/checkout@v4
-
-      # gpu.cpp — shallow insurance; Dawn itself is fetched by dawn.cmake, not
-      # via the submodule, so we do NOT --recursive (avoids the huge submodule).
-      - name: Init gpu.cpp submodule (shallow)
-        run: git submodule update --init --depth 1 minigpu_ffi/src/external/gpu || true
 
       - name: Free disk space (Dawn-web build is large)
         run: |

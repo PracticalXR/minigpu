@@ -35,15 +35,9 @@ jobs:
     # First cold Dawn build can be long; cached runs are quick.
     timeout-minutes: 150
     steps:
+      # No submodule init: nothing here is a submodule. Dawn comes from the
+      # central root below, fetched by dawn.cmake into a gitignored external/.
       - uses: actions/checkout@v4
-
-      # gpu.cpp is small; the native CMake path does not reference it today, but
-      # init it shallowly as cheap insurance (NOT --recursive: that would pull
-      # the huge Dawn submodule, which native builds don't use — Dawn comes from
-      # the central root below).
-      - name: Init gpu.cpp submodule (shallow)
-        shell: bash
-        run: git submodule update --init --depth 1 minigpu_ffi/src/external/gpu || true
 
       - name: Free disk space (Linux — Dawn build is large)
         if: runner.os == 'Linux'

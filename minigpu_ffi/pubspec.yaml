@@ -1,5 +1,5 @@
 name: minigpu_ffi
-description: FFI implementation of minigpu. A library to brings multiplatform GPU compute to Dart and Flutter using GPU.cpp and Google Dawn.
+description: FFI implementation of minigpu. A library that brings multiplatform GPU compute to Dart and Flutter using WebGPU and Google Dawn.
 version: 1.5.8
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu_ffi
 
