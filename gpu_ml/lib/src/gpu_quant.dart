@@ -114,13 +114,92 @@ class QuantizedTensor {
       }
     }
 
-    // Pad to a whole number of u32 words for upload.
+    // Upload as raw bytes in bounded chunks (writeRawBytes) — no Dart-side
+    // padding copy and no host allocation proportional to the tensor (weight
+    // stacks run to ~1 GB each; a 40 GB model must not spike host RAM).
+    // Non-word-multiple tensors (rare; small) take the legacy padded copy,
+    // which also keeps the web fallback path working.
     final wordCount = (packedBytes.length + 3) ~/ 4;
-    final words = Uint32List(wordCount);
-    words.buffer.asUint8List().setRange(0, packedBytes.length, packedBytes);
-
     final buffer = gpu.createBuffer(wordCount * 4, BufferDataType.uint32);
-    await buffer.write(words, wordCount, dataType: BufferDataType.uint32);
+    if (packedBytes.length % 4 == 0) {
+      await buffer.writeRawBytes(packedBytes);
+    } else {
+      final words = Uint32List(wordCount);
+      words.buffer.asUint8List().setRange(0, packedBytes.length, packedBytes);
+      await buffer.write(words, wordCount, dataType: BufferDataType.uint32);
+    }
+
+    return QuantizedTensor._(
+      shape: List.unmodifiable(shape),
+      type: type,
+      gpu: gpu,
+      buffer: buffer,
+    );
+  }
+
+  /// Streams a LARGE tensor disk→VRAM in bounded chunks: [readRange] returns
+  /// the packed bytes for a range, uploaded at the same offset.  Peak host
+  /// memory is one chunk (+ a small amount of driver staging) instead of the
+  /// whole tensor — mandatory for multi-GB expert stacks: queued device
+  /// writes accumulate in host RAM until the device is ticked, so this also
+  /// flushes (a tiny readback) every few chunks.
+  static Future<QuantizedTensor> createStreamed(
+    List<int> shape,
+    int type,
+    Future<Uint8List> Function(int byteOffset, int byteLength) readRange, {
+    Minigpu? gpu,
+    int chunkBytes = 32 << 20,
+    int flushEveryBytes = 256 << 20,
+  }) async {
+    gpu = gpu ?? DefaultMinigpu.instance;
+    if (!gpu.isInitialized) {
+      await gpu.init();
+    }
+    if (shape.length != 2 && shape.length != 3) {
+      throw Exception(
+        "QuantizedTensor supports [rows, cols] or [experts, rows, cols], got $shape",
+      );
+    }
+    if (!_supported.contains(type)) {
+      throw Exception("Unsupported ggml type $type");
+    }
+    final traits = ggmlTypeTraits[type]!;
+    if (shape.last % traits.blockSize != 0) {
+      throw Exception(
+        "cols (${shape.last}) must be a multiple of block size ${traits.blockSize}",
+      );
+    }
+    final totalElements = shape.reduce((a, b) => a * b);
+    final totalBytes = (totalElements ~/ traits.blockSize) * traits.typeSize;
+    assert(chunkBytes % 4 == 0);
+
+    final wordCount = (totalBytes + 3) ~/ 4;
+    final buffer = gpu.createBuffer(wordCount * 4, BufferDataType.uint32);
+    final probe = Uint32List(1);
+    var off = 0;
+    var sinceFlush = 0;
+    while (off < totalBytes) {
+      var n = (totalBytes - off) < chunkBytes ? (totalBytes - off) : chunkBytes;
+      final bytes = await readRange(off, n);
+      final whole = n & ~3;
+      if (whole > 0) {
+        await buffer.writeRawBytes(Uint8List.sublistView(bytes, 0, whole),
+            dstByteOffset: off);
+      }
+      if (whole < n) {
+        // Non-word tail (last chunk only): pad those few bytes.
+        final tail = Uint8List(4);
+        tail.setRange(0, n - whole, Uint8List.sublistView(bytes, whole));
+        await buffer.writeRawBytes(tail, dstByteOffset: off + whole);
+      }
+      off += n;
+      sinceFlush += n;
+      if (sinceFlush >= flushEveryBytes || off >= totalBytes) {
+        // Tick the device so staged writes leave host RAM.
+        await buffer.read(probe, 1, dataType: BufferDataType.uint32);
+        sinceFlush = 0;
+      }
+    }
 
     return QuantizedTensor._(
       shape: List.unmodifiable(shape),
@@ -137,6 +216,8 @@ class QuantizedTensor {
   }
 
   /// Shared WGSL byte/half accessors over the packed u32 buffer `wq`.
+  /// wAt() is a funnel-shift u32 load at an arbitrary EVEN byte offset (the
+  /// vectorized kernels use it where block strides break word alignment).
   static const String _accessors = '''
 fn byteAt(idx: u32) -> u32 {
   return (wq[idx >> 2u] >> ((idx & 3u) * 8u)) & 0xFFu;
@@ -146,6 +227,12 @@ fn sbyteAt(idx: u32) -> i32 {
 }
 fn f16At(byteIdx: u32) -> f32 {
   return unpack2x16float(byteAt(byteIdx) | (byteAt(byteIdx + 1u) << 8u)).x;
+}
+fn wAt(byteIdx: u32) -> u32 {
+  let w: u32 = byteIdx >> 2u;
+  let s: u32 = (byteIdx & 3u) * 8u;
+  if (s == 0u) { return wq[w]; }
+  return (wq[w] >> s) | (wq[w + 1u] << (32u - s));
 }
 ''';
 
@@ -166,12 +253,22 @@ fn scaleMinK4(sb: u32, j: u32) -> vec2<f32> {
 }
 ''';
 
-  bool get _needsScaleMinK4 => type == GgmlType.q5K;
+  bool get _needsScaleMinK4 => typeNeedsScaleMinK4(type);
+
+  /// Public WGSL building blocks so fused external kernels (the decode plan)
+  /// can embed the same dequant logic without duplicating it.
+  static String get accessorsWGSL => _accessors;
+  static String get scaleMinK4WGSL => _scaleMinK4;
+  static bool typeNeedsScaleMinK4(int type) => type == GgmlType.q5K;
 
   /// Per-type WGSL expression assigning the dequantized value of flat
   /// element `e` (row-major over the WHOLE tensor, experts included —
   /// expert blocks are contiguous) to `v`.
-  String get _dequantElementWGSL {
+  String get _dequantElementWGSL => dequantElementBodyWGSL(type);
+
+  /// The per-element dequant body for [type]; expects `wq` and a flat
+  /// element index `e` in scope, defines `v`.
+  static String dequantElementBodyWGSL(int type) {
     switch (type) {
       case GgmlType.f16:
         return '''
@@ -273,7 +370,62 @@ $_dequantElementWGSL
   /// Per-type WGSL loop body accumulating this thread's partial dot product
   /// of row `row` with `x` into `acc` (256-thread strided).  `eb` is the
   /// expert byte offset (0 for 2D tensors) from the params buffer.
-  String get _matVecAccumulateWGSL {
+  String get _matVecAccumulateWGSL => matVecBodyWGSL(type);
+
+  /// The matVec accumulate body for [type]; expects `wq`, `x`, `acc`, `row`,
+  /// `lid`, `eb` and a `COLS` constant in scope.
+  ///
+  /// [threadVar]/[stride] parameterize the reduction width: the default
+  /// (`lid.x`/`256u`) strides the whole 256-thread workgroup over one row.
+  /// A narrow group (e.g. `t`/`64u`) lets several rows share a workgroup for
+  /// full lane occupancy on single-token decode GEMVs, where COLS/blockSize
+  /// is often < 256 and most lanes would otherwise idle.  Safe transform:
+  /// the loop stride is always `+ 256u` (distinct from `/ 256u` superblock
+  /// sizes and `<< Nu` shifts), and `lid.x` appears only in the loop init.
+  static String matVecBodyWGSL(int type,
+      {String threadVar = 'lid.x', String stride = '256u'}) {
+    final body = _matVecBodyRaw(type);
+    if (threadVar == 'lid.x' && stride == '256u') return body;
+    return body.replaceAll('lid.x', threadVar).replaceAll('+ 256u', '+ $stride');
+  }
+
+  /// Shared-memory x staging for decode GEMVs.  On D3D11/FXC, storage-buffer
+  /// reads of the activation vector inside the dot-product loop stall it
+  /// ~4x (kernel-tax probe: real q8_0 body 21.8 us vs 5.2 us with x reads
+  /// removed, at identical geometry/weight traffic; vec4-izing or dropping
+  /// the multiplies changed nothing — the UAV x READS are the tax).  Staging
+  /// x once per workgroup into a PADDED var<workgroup> array and reading via
+  /// xsAt() ran 2.8x faster (7.7 us).  The +i/32 padding matters: a flat
+  /// layout gives a lane-independent bank index for the q8_0 access pattern
+  /// (32-way conflict — the trap that invalidated the wave-11 shared-x
+  /// ablation).  Bit-exact: only the load source changes.
+  ///
+  /// Contract: 256-thread workgroup, `x` bound as array<vec4<f32>> (cols
+  /// must be a multiple of 4), staging emitted in UNIFORM control flow
+  /// before any row guard, body wrapped with [sharedXBody].
+  static String xsDeclWGSL(int cols) =>
+      'var<workgroup> xs: array<f32, ${cols + (cols >> 5)}>;\n'
+      'fn xsAt(i: u32) -> f32 { return xs[i + (i >> 5u)]; }';
+
+  /// The staging loop; [xBase4] offsets into x in vec4 units (per-slot
+  /// windows, e.g. expert-down reading slot z's activations).
+  static String stageXsWGSL(int cols, {String xBase4 = '0u'}) => '''
+  for (var i4x: u32 = lid.x; i4x < ${cols ~/ 4}u; i4x = i4x + 256u) {
+    let v4x: vec4<f32> = x[$xBase4 + i4x];
+    let p4x: u32 = i4x * 4u + ((i4x * 4u) >> 5u);
+    xs[p4x] = v4x.x; xs[p4x + 1u] = v4x.y;
+    xs[p4x + 2u] = v4x.z; xs[p4x + 3u] = v4x.w;
+  }
+  workgroupBarrier();
+''';
+
+  /// Rewrites a matVec body's x reads to the padded shared array.  Bodies
+  /// index x with window-RELATIVE expressions (no nested brackets), so the
+  /// textual rewrite is safe; \b keeps idx[/xq[/xsq[ untouched.
+  static String sharedXBody(String body) => body.replaceAllMapped(
+      RegExp(r'\bx\[([^\]]+)\]'), (m) => 'xsAt(${m[1]})');
+
+  static String _matVecBodyRaw(int type) {
     switch (type) {
       case GgmlType.f16:
         // Strided over u32 words = f16 pairs.  cols even + expert stacks
@@ -287,14 +439,36 @@ $_dequantElementWGSL
   }
 ''';
       case GgmlType.q8_0:
+        // Word-vectorized: one u32 load per FOUR quants instead of one per
+        // byte.  Blocks are 34 bytes so `base` is always even; the quant
+        // window is realigned with a funnel shift (qs is 0 or 16).  The
+        // trailing `nxt` load can run one word past the tensor on the last
+        // block only when qs==0, where its value is unused (robust access
+        // clamps, no trap).  `unpack4xI8` sign-extends all four int8 lanes
+        // in one instruction (Dawn-supported) — ~10x fewer ALU ops than the
+        // four manual `bitcast<i32>(raw << Nu) >> 24u` extracts, which was
+        // the decode GEMV's ALU ceiling (~330 GB/s -> memory-bound).
         return '''
   let nb: u32 = COLS / 32u;
   for (var j: u32 = lid.x; j < nb; j = j + 256u) {
     let base: u32 = eb + (row * nb + j) * 34u;
     let d: f32 = f16At(base);
+    let qb: u32 = base + 2u;
+    let qw: u32 = qb >> 2u;
+    let qs: u32 = (qb & 3u) * 8u;
+    var carry: u32 = wq[qw];
     var bsum: f32 = 0.0;
-    for (var l: u32 = 0u; l < 32u; l = l + 1u) {
-      bsum = bsum + f32(sbyteAt(base + 2u + l)) * x[j * 32u + l];
+    let xb: u32 = j * 32u;
+    for (var k: u32 = 0u; k < 8u; k = k + 1u) {
+      let nxt: u32 = wq[qw + k + 1u];
+      var raw: u32;
+      if (qs == 0u) { raw = carry; } else { raw = (carry >> qs) | (nxt << (32u - qs)); }
+      carry = nxt;
+      let xi: u32 = xb + k * 4u;
+      bsum = bsum + f32(bitcast<i32>(raw << 24u) >> 24u) * x[xi]
+                  + f32(bitcast<i32>(raw << 16u) >> 24u) * x[xi + 1u]
+                  + f32(bitcast<i32>(raw << 8u) >> 24u) * x[xi + 2u]
+                  + f32(bitcast<i32>(raw) >> 24u) * x[xi + 3u];
     }
     acc = acc + d * bsum;
   }
@@ -315,32 +489,55 @@ $_dequantElementWGSL
   }
 ''';
       case GgmlType.q5K:
+        // Word-vectorized: 176-byte superblocks are word-aligned (eb and the
+        // stride are multiples of 4), so ql/qh load as whole u32s — one load
+        // per four quants.  Per-group partial sums live in vec4 lanes.
         return '''
   let nb: u32 = COLS / 256u;
   for (var j: u32 = lid.x; j < nb; j = j + 256u) {
     let base: u32 = eb + (row * nb + j) * 176u;
     let d: f32 = f16At(base);
     let dmin: f32 = f16At(base + 2u);
+    let qhw0: u32 = (base + 16u) >> 2u;
+    let qlw0: u32 = (base + 48u) >> 2u;
     let xb: u32 = j * 256u;
-    for (var sub: u32 = 0u; sub < 8u; sub = sub + 1u) {
-      let sm: vec2<f32> = scaleMinK4(base + 4u, sub);
-      let grp: u32 = sub >> 1u;
-      let hsel: u32 = sub & 1u;
-      var qsum: f32 = 0.0;
-      var xsum: f32 = 0.0;
-      for (var l: u32 = 0u; l < 32u; l = l + 1u) {
-        let qlByte: u32 = byteAt(base + 48u + grp * 32u + l);
-        let nib: u32 = select(qlByte & 0xFu, qlByte >> 4u, hsel == 1u);
-        let hi: u32 = (byteAt(base + 16u + l) >> sub) & 1u;
-        let xv: f32 = x[xb + sub * 32u + l];
-        qsum = qsum + f32(nib + hi * 16u) * xv;
-        xsum = xsum + xv;
+    var qLo: vec4<f32> = vec4<f32>(0.0);
+    var xLo: vec4<f32> = vec4<f32>(0.0);
+    var qHi: vec4<f32> = vec4<f32>(0.0);
+    var xHi: vec4<f32> = vec4<f32>(0.0);
+    for (var w: u32 = 0u; w < 8u; w = w + 1u) {
+      let hw: u32 = wq[qhw0 + w];
+      for (var g: u32 = 0u; g < 4u; g = g + 1u) {
+        let lw: u32 = wq[qlw0 + g * 8u + w];
+        for (var b: u32 = 0u; b < 4u; b = b + 1u) {
+          let l: u32 = w * 4u + b;
+          let qlB: u32 = (lw >> (b * 8u)) & 0xFFu;
+          let qhB: u32 = (hw >> (b * 8u)) & 0xFFu;
+          let xlo: f32 = x[xb + g * 64u + l];
+          let xhi: f32 = x[xb + g * 64u + 32u + l];
+          qLo[g] = qLo[g] +
+              f32((qlB & 0xFu) | (((qhB >> (2u * g)) & 1u) << 4u)) * xlo;
+          xLo[g] = xLo[g] + xlo;
+          qHi[g] = qHi[g] +
+              f32((qlB >> 4u) | (((qhB >> (2u * g + 1u)) & 1u) << 4u)) * xhi;
+          xHi[g] = xHi[g] + xhi;
+        }
       }
-      acc = acc + d * sm.x * qsum - dmin * sm.y * xsum;
+    }
+    for (var g: u32 = 0u; g < 4u; g = g + 1u) {
+      let smLo: vec2<f32> = scaleMinK4(base + 4u, 2u * g);
+      let smHi: vec2<f32> = scaleMinK4(base + 4u, 2u * g + 1u);
+      acc = acc + d * (smLo.x * qLo[g] + smHi.x * qHi[g])
+                - dmin * (smLo.y * xLo[g] + smHi.y * xHi[g]);
     }
   }
 ''';
       case GgmlType.q6K:
+        // Word-vectorized with funnel-shift loads (210-byte blocks alternate
+        // between the two even alignments, so wAt() realigns each u32; the
+        // one-past `nxt` load on the last block is unused or clamped).
+        // Per-(quarter, scale-half) partials accumulate in vec4 lanes and
+        // meet their int8 scales once per half.
         return '''
   let nb: u32 = COLS / 256u;
   for (var j: u32 = lid.x; j < nb; j = j + 256u) {
@@ -353,19 +550,28 @@ $_dequantElementWGSL
       let qhb: u32 = base + 128u + h * 32u;
       let scb: u32 = base + 192u + h * 8u;
       let xh: u32 = xb + h * 128u;
-      for (var l: u32 = 0u; l < 32u; l = l + 1u) {
-        let qhByte: u32 = byteAt(qhb + l);
-        let ql0: u32 = byteAt(qlb + l);
-        let ql32: u32 = byteAt(qlb + l + 32u);
-        let si: u32 = l >> 4u;
-        let q1: f32 = f32(i32((ql0 & 0xFu) | (((qhByte >> 0u) & 3u) << 4u)) - 32);
-        let q2: f32 = f32(i32((ql32 & 0xFu) | (((qhByte >> 2u) & 3u) << 4u)) - 32);
-        let q3: f32 = f32(i32((ql0 >> 4u) | (((qhByte >> 4u) & 3u) << 4u)) - 32);
-        let q4: f32 = f32(i32((ql32 >> 4u) | (((qhByte >> 6u) & 3u) << 4u)) - 32);
-        bsum = bsum + f32(sbyteAt(scb + si)) * q1 * x[xh + l]
-                    + f32(sbyteAt(scb + si + 2u)) * q2 * x[xh + l + 32u]
-                    + f32(sbyteAt(scb + si + 4u)) * q3 * x[xh + l + 64u]
-                    + f32(sbyteAt(scb + si + 6u)) * q4 * x[xh + l + 96u];
+      var qs0: vec4<f32> = vec4<f32>(0.0);
+      var qs1: vec4<f32> = vec4<f32>(0.0);
+      for (var w: u32 = 0u; w < 8u; w = w + 1u) {
+        let lw0: u32 = wAt(qlb + w * 4u);
+        let lw32: u32 = wAt(qlb + 32u + w * 4u);
+        let hw: u32 = wAt(qhb + w * 4u);
+        for (var b: u32 = 0u; b < 4u; b = b + 1u) {
+          let l: u32 = w * 4u + b;
+          let ql0: u32 = (lw0 >> (b * 8u)) & 0xFFu;
+          let ql32: u32 = (lw32 >> (b * 8u)) & 0xFFu;
+          let qh: u32 = (hw >> (b * 8u)) & 0xFFu;
+          let v: vec4<f32> = vec4<f32>(
+            f32(i32((ql0 & 0xFu) | (((qh >> 0u) & 3u) << 4u)) - 32) * x[xh + l],
+            f32(i32((ql32 & 0xFu) | (((qh >> 2u) & 3u) << 4u)) - 32) * x[xh + l + 32u],
+            f32(i32((ql0 >> 4u) | (((qh >> 4u) & 3u) << 4u)) - 32) * x[xh + l + 64u],
+            f32(i32((ql32 >> 4u) | (((qh >> 6u) & 3u) << 4u)) - 32) * x[xh + l + 96u]);
+          if (w < 4u) { qs0 = qs0 + v; } else { qs1 = qs1 + v; }
+        }
+      }
+      for (var q: u32 = 0u; q < 4u; q = q + 1u) {
+        bsum = bsum + f32(sbyteAt(scb + q * 2u)) * qs0[q]
+                    + f32(sbyteAt(scb + q * 2u + 1u)) * qs1[q];
       }
     }
     acc = acc + d * bsum;
@@ -375,6 +581,78 @@ $_dequantElementWGSL
         throw Exception("Unsupported type $type");
     }
   }
+
+  /// dot4I8Packed matVec body for q8_0 weights against INT8-QUANTIZED
+  /// activations (per-32-block symmetric quant, matching q8_0's block size).
+  /// Expects in scope: `wq` (weights), `xq: array<u32>` (packed int8
+  /// activations), `xsc: array<f32>` (per-block activation scales), `acc`,
+  /// `row`, `eb`, and a `COLS` const.  The int8 dot runs in ONE hardware
+  /// instruction per 4 lanes (dot4I8Packed) — vs the f32 body's per-element
+  /// multiply that made the GEMV arithmetic-bound (~200 vs ~600 GB/s in the
+  /// bw microbench).  [xBaseWords]/[xscBaseBlocks] offset into xq/xsc for
+  /// per-slot inputs (e.g. expert-down reads slot z's activations).
+  static String matVecDp4aBodyWGSL(
+      {String threadVar = 'lid.x',
+      String stride = '256u',
+      String xBaseWords = '0u',
+      String xscBaseBlocks = '0u'}) {
+    return '''
+  let nb: u32 = COLS / 32u;
+  let xwb: u32 = $xBaseWords;
+  let xsb: u32 = $xscBaseBlocks;
+  for (var j: u32 = $threadVar; j < nb; j = j + $stride) {
+    let base: u32 = eb + (row * nb + j) * 34u;
+    let dw: f32 = f16At(base);
+    let qb: u32 = base + 2u;
+    let qw: u32 = qb >> 2u;
+    let qs: u32 = (qb & 3u) * 8u;
+    var carry: u32 = wq[qw];
+    var isum: i32 = 0;
+    let xw: u32 = xwb + j * 8u;
+    for (var k: u32 = 0u; k < 8u; k = k + 1u) {
+      let nxt: u32 = wq[qw + k + 1u];
+      var raw: u32;
+      if (qs == 0u) { raw = carry; } else { raw = (carry >> qs) | (nxt << (32u - qs)); }
+      carry = nxt;
+      isum = isum + dot4I8Packed(raw, xq[xw + k]);
+    }
+    acc = acc + dw * xsc[xsb + j] * f32(isum);
+  }
+''';
+  }
+
+  /// WGSL for a per-32-block int8 activation quantizer.  One workgroup per
+  /// block (32 threads); expects `xin: array<f32>` (source), `xq: array<u32>`
+  /// (packed int8 out), `xsc: array<f32>` (per-block scale out), and the
+  /// block index from `wid`.  Symmetric (no zero point) to match q8_0.
+  static const String quantizeInt8BlockWGSL = '''
+var<workgroup> amax: array<f32, 32>;
+var<workgroup> qsh: array<i32, 32>;
+
+fn quantizeBlock(blk: u32, srcBase: u32, lid: u32) {
+  let v: f32 = xin[srcBase + blk * 32u + lid];
+  amax[lid] = abs(v);
+  workgroupBarrier();
+  for (var s: u32 = 16u; s > 0u; s = s >> 1u) {
+    if (lid < s) { amax[lid] = max(amax[lid], amax[lid + s]); }
+    workgroupBarrier();
+  }
+  let mx: f32 = amax[0];
+  let scale: f32 = mx / 127.0;
+  let inv: f32 = select(0.0, 1.0 / scale, mx > 0.0);
+  qsh[lid] = clamp(i32(round(v * inv)), -127, 127);
+  workgroupBarrier();
+  // Lanes 0..7 each pack 4 disjoint int8 quants into one u32.
+  if (lid < 8u) {
+    let b0: u32 = u32(qsh[lid * 4u + 0u]) & 0xFFu;
+    let b1: u32 = u32(qsh[lid * 4u + 1u]) & 0xFFu;
+    let b2: u32 = u32(qsh[lid * 4u + 2u]) & 0xFFu;
+    let b3: u32 = u32(qsh[lid * 4u + 3u]) & 0xFFu;
+    xq[blk * 8u + lid] = b0 | (b1 << 8u) | (b2 << 16u) | (b3 << 24u);
+  }
+  if (lid == 0u) { xsc[blk] = scale; }
+}
+''';
 
   /// Fused dequant matrix-vector product: y = W[expert] @ x, where W is this
   /// quantized matrix (or expert stack) and [x] is a float32 vector of

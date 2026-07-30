@@ -184,9 +184,80 @@ void mgpuDestroyBuffer(MGPUBuffer *buffer) {
   }
 }
 
+// ── Multi-GPU context handles ───────────────────────────────────────────────
+// An MGPUContextHandle is simply a heap-allocated mgpu::MGPU instance.  All
+// per-object entry points (setBuffer/dispatch/read/write/destroy/...) already
+// route through the MGPU& the object captured at creation, so only creation
+// needs these handle-aware variants.
+
+MGPUContextHandle *mgpuCreateContextHandle(const char *adapterFilter) {
+  auto *m = new mgpu::MGPU();
+  if (adapterFilter && adapterFilter[0] != '\0') {
+    m->setAdapterFilter(adapterFilter);
+  }
+  return reinterpret_cast<MGPUContextHandle *>(m);
+}
+
+void mgpuContextInitializeAsync(MGPUContextHandle *handle,
+                                MGPUCallback callback) {
+  if (handle) {
+    reinterpret_cast<mgpu::MGPU *>(handle)->initializeContextAsync(callback);
+  }
+}
+
+void mgpuDestroyContextHandle(MGPUContextHandle *handle) {
+  if (handle) {
+    auto *m = reinterpret_cast<mgpu::MGPU *>(handle);
+    m->destroyContext();
+    delete m;
+  }
+}
+
+int mgpuContextGetAdapterName(MGPUContextHandle *handle, char *out, int cap) {
+  if (!handle) return 0;
+  const std::string name =
+      reinterpret_cast<mgpu::MGPU *>(handle)->adapterName();
+  if (out && cap > 0) {
+    const int n = (int)name.size() < cap - 1 ? (int)name.size() : cap - 1;
+    memcpy(out, name.c_str(), (size_t)n);
+    out[n] = '\0';
+  }
+  return (int)name.size();
+}
+
+MGPUBuffer *mgpuContextCreateBuffer(MGPUContextHandle *handle, int byteSize,
+                                    int dataType) {
+  if (!handle) return nullptr;
+  auto &m = *reinterpret_cast<mgpu::MGPU *>(handle);
+  BufferDataType mappedType = mapIntToBufferDataType(dataType);
+  auto *buf = new mgpu::Buffer(m);
+  try {
+    buf->createBuffer(static_cast<size_t>(byteSize), mappedType);
+  } catch (...) {
+    LOG_ERROR("Exception in mgpuContextCreateBuffer");
+    delete buf;
+    return nullptr;
+  }
+  return reinterpret_cast<MGPUBuffer *>(buf);
+}
+
+MGPUComputeShader *mgpuContextCreateComputeShader(MGPUContextHandle *handle) {
+  if (!handle) return nullptr;
+  auto &m = *reinterpret_cast<mgpu::MGPU *>(handle);
+  return reinterpret_cast<MGPUComputeShader *>(new mgpu::ComputeShader(m));
+}
+
 void mgpuSetBuffer(MGPUComputeShader *shader, int tag, MGPUBuffer *buffer) {
   if (shader && tag >= 0 && buffer) {
     reinterpret_cast<mgpu::ComputeShader *>(shader)->setBuffer(
+        tag, *reinterpret_cast<mgpu::Buffer *>(buffer));
+  }
+}
+
+void mgpuSetBufferFire(MGPUComputeShader *shader, int tag,
+                       MGPUBuffer *buffer) {
+  if (shader && tag >= 0 && buffer) {
+    reinterpret_cast<mgpu::ComputeShader *>(shader)->setBufferQueued(
         tag, *reinterpret_cast<mgpu::Buffer *>(buffer));
   }
 }
@@ -540,6 +611,109 @@ void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
   }
 }
 
+// ── Batched staging uploads (see minigpu.h for the contract) ───────────────
+int mgpuUploadsSupported(void) { return 1; }
+
+int mgpuUploadStats(long long *out, int n) {
+  if (!out || n < 10) return 0;
+  const mgpu::MGPU::UploadStats &s = minigpu.uploadStats;
+  out[0] = s.usStage;
+  out[1] = s.usLock;
+  out[2] = s.usWrite;
+  out[3] = s.usCopy;
+  out[4] = s.usFlush;
+  out[5] = s.ranges;
+  out[6] = s.copies;
+  out[7] = s.scopes;
+  out[8] = s.flushes;
+  out[9] = s.bytes;
+  return 1;
+}
+
+int mgpuBeginUploads(void) { return minigpu.beginUploads(); }
+
+void mgpuStageReserve(size_t byteSize) { minigpu.reserveUploads(byteSize); }
+
+int mgpuEndUploads(void) { return minigpu.endUploads(); }
+
+int mgpuContextBeginUploads(MGPUContextHandle *handle) {
+  if (!handle) return 0;
+  return reinterpret_cast<mgpu::MGPU *>(handle)->beginUploads();
+}
+
+int mgpuContextEndUploads(MGPUContextHandle *handle) {
+  if (!handle) return 0;
+  return reinterpret_cast<mgpu::MGPU *>(handle)->endUploads();
+}
+
+int mgpuStageWrite(MGPUBuffer *buffer, size_t dstByteOffset,
+                   const void *inputData, size_t byteSize) {
+  if (!buffer || !inputData || byteSize == 0) return -1;
+  auto *buf = reinterpret_cast<mgpu::Buffer *>(buffer);
+  const int r = buf->getMGPU().stageWrite(buf->getWGPUBuffer(), dstByteOffset,
+                                          buf->getSize(), inputData, byteSize);
+  if (r == 0) {
+    // No scope open on this buffer's context, or the range is not 4-byte
+    // aligned: behave exactly like the historical inline write.
+    buf->writeBytesAt(inputData, byteSize, dstByteOffset);
+  }
+  return r;
+}
+
+// ── Batched readbacks (see minigpu.h for the contract) ─────────────────────
+int mgpuReadbacksSupported(void) { return 1; }
+
+int mgpuReadbackStats(long long *out, int n) {
+  if (!out || n < 12) return 0;
+  const mgpu::MGPU::ReadbackStats &s = minigpu.readbackStats;
+  out[0] = s.usStage;
+  out[1] = s.usLock;
+  out[2] = s.usCopy;
+  out[3] = s.usSubmit;
+  out[4] = s.usMap;
+  out[5] = s.usOut;
+  out[6] = s.reads;
+  out[7] = s.copies;
+  out[8] = s.scopes;
+  out[9] = s.bytes;
+  out[10] = s.grows;
+  out[11] = s.fallbacks;
+  return 1;
+}
+
+int mgpuBeginReadbacks(void) { return minigpu.beginReadbacks(); }
+
+void mgpuReadbackReserve(size_t byteSize) {
+  minigpu.reserveReadbacks(byteSize);
+}
+
+int mgpuEndReadbacks(void) { return minigpu.endReadbacks(); }
+
+int mgpuContextBeginReadbacks(MGPUContextHandle *handle) {
+  if (!handle) return 0;
+  return reinterpret_cast<mgpu::MGPU *>(handle)->beginReadbacks();
+}
+
+int mgpuContextEndReadbacks(MGPUContextHandle *handle) {
+  if (!handle) return 0;
+  return reinterpret_cast<mgpu::MGPU *>(handle)->endReadbacks();
+}
+
+int mgpuStageRead(MGPUBuffer *buffer, size_t srcByteOffset, void *dst,
+                  size_t byteSize) {
+  if (!buffer || !dst || byteSize == 0) return -1;
+  auto *buf = reinterpret_cast<mgpu::Buffer *>(buffer);
+  const int r = buf->getMGPU().stageRead(buf->getWGPUBuffer(), srcByteOffset,
+                                         buf->getSize(), dst, byteSize);
+  if (r == 0) {
+    // No scope open on this buffer's context, or the range is not 4-byte
+    // aligned: behave exactly like the historical inline read, and fill the
+    // destination NOW (the caller cannot tell which path it got).
+    buf->readBytesAt(dst, byteSize, srcByteOffset);
+  }
+  return r;
+}
+
 void mgpuWriteUint64(MGPUBuffer *buffer, const uint64_t *inputData,
                              size_t byteSize) {
   if (buffer && inputData) {
@@ -566,6 +740,68 @@ void mgpuWriteAsyncFloat(MGPUBuffer *buffer, const float *data,
       // Handle error silently
     }
   }
+}
+
+// Enumerates hardware (non-software) adapters: writes up to [cap] entries —
+// namesOut is cap*128 bytes of UTF-8 NUL-terminated names, totalOut/usedOut
+// are dedicated-VRAM totals and current usage per adapter.  Returns the
+// number of hardware adapters found (0 on non-Windows).
+int mgpuEnumAdapters(char *namesOut, int64_t *totalOut, int64_t *usedOut,
+                     int cap) {
+#ifdef _WIN32
+  IDXGIFactory1 *pFactory = nullptr;
+  HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void **)&pFactory);
+  if (FAILED(hr) || !pFactory) return 0;
+
+  int count = 0;
+  for (UINT adapterIdx = 0;; adapterIdx++) {
+    IDXGIAdapter1 *pAdapter1 = nullptr;
+    if (pFactory->EnumAdapters1(adapterIdx, &pAdapter1) ==
+        DXGI_ERROR_NOT_FOUND)
+      break;
+
+    DXGI_ADAPTER_DESC1 desc;
+    pAdapter1->GetDesc1(&desc);
+    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) {
+      pAdapter1->Release();
+      continue;
+    }
+
+    if (count < cap) {
+      if (namesOut) {
+        char *slot = namesOut + count * 128;
+        int n = WideCharToMultiByte(CP_UTF8, 0, desc.Description, -1, slot,
+                                    127, nullptr, nullptr);
+        slot[n > 0 ? n : 0] = '\0';
+      }
+      if (totalOut) {
+        totalOut[count] = static_cast<int64_t>(desc.DedicatedVideoMemory);
+      }
+      if (usedOut) {
+        usedOut[count] = -1;
+        IDXGIAdapter3 *pAdapter3 = nullptr;
+        if (SUCCEEDED(pAdapter1->QueryInterface(__uuidof(IDXGIAdapter3),
+                                                (void **)&pAdapter3)) &&
+            pAdapter3) {
+          DXGI_QUERY_VIDEO_MEMORY_INFO info = {};
+          if (SUCCEEDED(pAdapter3->QueryVideoMemoryInfo(
+                  0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &info))) {
+            usedOut[count] = static_cast<int64_t>(info.CurrentUsage);
+          }
+          pAdapter3->Release();
+        }
+      }
+    }
+    count++;
+    pAdapter1->Release();
+  }
+
+  pFactory->Release();
+  return count;
+#else
+  (void)namesOut; (void)totalOut; (void)usedOut; (void)cap;
+  return 0;
+#endif
 }
 
 // Returns the current dedicated VRAM usage in bytes for the first non-software

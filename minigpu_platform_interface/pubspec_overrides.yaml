@@ -1,0 +1,5 @@
+dependency_overrides:
+  minigpu_ffi:
+    path: ../minigpu_ffi
+  minigpu_web:
+    path: ../minigpu_web

@@ -109,8 +109,22 @@ class WebComputeShader implements PlatformComputeShader {
   }
 
   @override
+  void setBufferFire(int tag, PlatformBuffer buffer) {
+    // Single-threaded wasm executes GPU tasks in call order, so the plain
+    // bind already has FIFO semantics.
+    setBuffer(tag, buffer);
+  }
+
+  @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
     await wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
+  }
+
+  @override
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    // queue.submit is synchronous in JS WebGPU; the returned promise only
+    // covers call plumbing, so dropping it preserves submission order.
+    wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
   }
 
   @override
@@ -135,6 +149,16 @@ class WebBuffer implements PlatformBuffer {
   final wasm.MGPUBuffer _buffer;
 
   WebBuffer(this._buffer);
+
+  @override
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) {
+    if (dstByteOffset != 0) {
+      throw UnsupportedError('offset writeRawBytes not supported on web');
+    }
+    final words = Uint32List(bytes.length ~/ 4);
+    words.buffer.asUint8List().setRange(0, bytes.length, bytes);
+    return write(words, words.length, dataType: BufferDataType.uint32);
+  }
 
   @override
   Future<void> read(

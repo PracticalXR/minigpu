@@ -1,0 +1,86 @@
+# Dart/Flutter static analysis gate for the whole minigpu package set.
+#
+# Deliberately Dawn-free and GPU-free so it is fast (~minutes) and never flaky.
+# `dart analyze --no-fatal-warnings` across all 9 packages, scoped to each
+# package's lib/ + its own test/ (the example/ demo apps are excluded — they
+# carry `flutter create` boilerplate). Errors fail the job; pre-existing
+# warnings/infos are reported but do NOT (--no-fatal-warnings).
+#
+# Resolution: the in-repo packages depend on each other at unpublished 1.5.x
+# versions and resolve locally via the committed pubspec_overrides.yaml (path
+# deps; no melos / workspace). `dart pub get --no-example` skips the nested
+# example demo packages during resolution — the analyze job only needs each
+# library's own graph.
+#
+# The web C++ (emdawnwebgpu) and native builds live in web-build.yml /
+# native-build.yml; GPU unit tests need a Dawn adapter headless runners can't
+# reliably init, so they run locally / on a self-hosted GPU runner.
+#
+# Toolchain: Flutter MASTER — the packages pin a bleeding-edge Dart SDK
+# (^3.11.4) for native-assets build hooks, matching the dev environment.
+name: dart-ci
+
+on:
+  push:
+    paths:
+      - "minigpu/**"
+      - "minigpu_platform_interface/**"
+      - "minigpu_ffi/**"
+      - "minigpu_web/**"
+      - "minigpu_flutter/**"
+      - "minigpu_view/**"
+      - "gpu_tensor/**"
+      - "gpu_pipeline/**"
+      - "gpu_ml/**"
+      - ".github/workflows/dart-ci.yml"
+  pull_request:
+    paths:
+      - "minigpu/**"
+      - "minigpu_platform_interface/**"
+      - "minigpu_ffi/**"
+      - "minigpu_web/**"
+      - "minigpu_flutter/**"
+      - "minigpu_view/**"
+      - "gpu_tensor/**"
+      - "gpu_pipeline/**"
+      - "gpu_ml/**"
+      - ".github/workflows/dart-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: master
+      - name: Pub get + analyze (all packages)
+        shell: bash
+        run: |
+          set -e
+          # Dependency order (leaf-first); path overrides make order optional,
+          # but this keeps the log readable.
+          for pkg in \
+            minigpu_platform_interface \
+            minigpu_ffi \
+            minigpu_web \
+            minigpu \
+            minigpu_flutter \
+            minigpu_view \
+            gpu_tensor \
+            gpu_pipeline \
+            gpu_ml; do
+            echo "::group::analyze $pkg"
+            (
+              cd "$pkg"
+              # --no-example: skip nested example packages during resolution.
+              dart pub get --no-example
+              # lib/ + the package's own test/ (if any); exclude example/ demos.
+              targets="lib"
+              [ -d test ] && targets="$targets test"
+              dart analyze --no-fatal-warnings $targets
+            )
+            echo "::endgroup::"
+          done

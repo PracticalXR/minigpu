@@ -95,6 +95,25 @@ await gpu.destroy();
  flutter run -d chrome/windows/linux/android/ios
 ```
 
+### Dawn
+
+minigpu builds on [Dawn](https://dawn.googlesource.com/dawn), cloned and compiled
+automatically on first build into `%SYSTEMDRIVE%\dawn` (Windows) or `~/dawn`
+(macOS/Linux). Point it elsewhere with the `MINIGPU_DAWN_DIR` environment
+variable, set **before** you build:
+
+```powershell
+$env:MINIGPU_DAWN_DIR = 'D:\my_dawn'   # must contain build_{os}_{arch}/
+```
+
+Setting `DAWN_DIR` in your app's `windows/CMakeLists.txt` does nothing — the
+native asset is built as its own cmake project, not a subdirectory of your app.
+
+If the Dawn step fails — `Invalid character escape '\d'`, a `MINIGPU_DAWN_DIR`
+that looks ignored, an em++ `not a valid port path` on the web build (all three
+fixed in 1.5.8), or `webgpu_dawn shared library not found` — see
+[minigpu_ffi/README.md](minigpu_ffi/README.md#troubleshooting).
+
 ## Example
 
  ```dart

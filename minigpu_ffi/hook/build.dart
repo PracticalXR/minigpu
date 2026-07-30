@@ -153,11 +153,16 @@ Future<void> runBuild(
         'ENABLE_ARC': 'OFF',
       if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
         'CMAKE_OSX_ARCHITECTURES': cmakeArch,
-      // Always pass the system Dawn root so dawn.cmake never falls back to
+      // Always pass the resolved Dawn root so dawn.cmake never falls back to
       // the pub-cache-nested path.  cmake receives this as -DDAWN_DIR=…
       // before any in-file set() calls, guaranteeing the correct directory
       // even when the cmake subprocess inherits a minimal environment.
-      if (_systemDawnRoot() case final dawnRoot?) 'DAWN_DIR': dawnRoot,
+      //
+      // Because this define is unconditional, it also OUTRANKS dawn.cmake's own
+      // MINIGPU_DAWN_DIR branch (that branch only runs when DAWN_DIR is
+      // undefined). So the env var has to be honoured HERE or it has no effect
+      // at all on a Flutter/dart build — see [_dawnRootForCmake].
+      if (_dawnRootForCmake() case final dawnRoot?) 'DAWN_DIR': dawnRoot,
     },
   );
   await builder.run(
@@ -209,6 +214,27 @@ List<Uri> _dawnSearchDirs(BuildInput input, Uri srcDir) {
   dirs.add(srcDir.resolve('external/dawn/$buildSubdir'));
 
   return dirs;
+}
+
+/// The Dawn root handed to cmake as `-DDAWN_DIR=…`.
+///
+/// `MINIGPU_DAWN_DIR` wins over the platform central path, matching
+/// [_dawnSearchDirs] and the priority documented in `src/cmake/dawn.cmake`.
+/// Without this, setting the env var changed only where the hook LOOKED for a
+/// prebuilt `webgpu_dawn` DLL, while cmake was still told `%SYSTEMDRIVE%\dawn`
+/// and would clone/build Dawn there — the env var looked ignored.
+///
+/// Returned with forward slashes: cmake accepts them on Windows, and a native
+/// backslash path breaks FetchContent's generated sub-build (see the
+/// `TO_CMAKE_PATH` note in `src/cmake/dawn.cmake`). Belt and braces — the cmake
+/// side normalizes too, so an older/newer pairing of hook and cmake is safe
+/// either way.
+String? _dawnRootForCmake() {
+  final envOverride = Platform.environment['MINIGPU_DAWN_DIR'];
+  final root = (envOverride != null && envOverride.isNotEmpty)
+      ? envOverride
+      : _systemDawnRoot();
+  return root?.replaceAll(r'\', '/');
 }
 
 /// Returns the platform-specific root directory for the shared Dawn builds,

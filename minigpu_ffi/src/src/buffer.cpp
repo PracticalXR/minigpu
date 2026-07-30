@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 #include <vector>
@@ -93,6 +94,570 @@ void WebGPUThread::enqueueAsync(std::function<void()> task) {
   }
   condition.notify_one();
 #endif
+}
+
+void MGPU::flushBatchLocked() {
+  if (batchPass) {
+    wgpuComputePassEncoderEnd(batchPass);
+    wgpuComputePassEncoderRelease(batchPass);
+    batchPass = nullptr;
+  }
+  if (batchEncoder) {
+    WGPUCommandBuffer commands =
+        wgpuCommandEncoderFinish(batchEncoder, nullptr);
+    wgpuCommandEncoderRelease(batchEncoder);
+    batchEncoder = nullptr;
+    if (commands) {
+      wgpuQueueSubmit(getQueue(), 1, &commands);
+      wgpuCommandBufferRelease(commands);
+    }
+  }
+  batchCount = 0;
+  // Everything recorded against the staging arena has now been SUBMITTED, so
+  // its bytes are free to be overwritten: queue operations execute in
+  // submission order, and the next staging write is issued after this submit.
+  stagingCursor = 0;
+}
+
+// ── Batched staging uploads ────────────────────────────────────────────────
+// Design notes live in buffer.h next to the declarations.
+
+// Minimum persistent staging allocation.  Sized so a typical frame's worth of
+// scattered pushes fits many times over: the arena is a bump allocator that
+// only rewinds on a submit, so a bigger buffer means fewer forced submits.
+static constexpr size_t kMinStagingBytes = 8u << 20; // 8 MB
+
+bool MGPU::uploadProfEnabled() {
+  static int on = -1;
+  if (on < 0) {
+    const char *s = std::getenv("MGPU_UPLOAD_PROF");
+    on = (s && s[0] && s[0] != '0') ? 1 : 0;
+  }
+  return on != 0;
+}
+
+static inline long long mgpu_now_us() {
+  return (long long)std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+MGPU::UploadScope *MGPU::acquireScope() {
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(uploadPoolMutex);
+    if (!uploadPool.empty()) {
+      UploadScope *s = uploadPool.back().release();
+      uploadPool.pop_back();
+      s->host.clear();   // keeps capacity
+      s->copies.clear(); // keeps capacity
+      return s;
+    }
+  }
+  return new UploadScope();
+}
+
+void MGPU::recycleScope(UploadScope *scope) {
+  if (!scope) return;
+  for (const StagedCopy &c : scope->copies) {
+    if (c.dst) wgpuBufferRelease(c.dst);
+  }
+  scope->host.clear();
+  scope->copies.clear();
+  mgpu::lock_guard<mgpu::mutex> lock(uploadPoolMutex);
+  if (uploadPool.size() < 4) {
+    uploadPool.emplace_back(scope);
+  } else {
+    delete scope;
+  }
+}
+
+int MGPU::beginUploads() {
+  if (uploadDepth == 0) {
+    if (!uploadOpen) uploadOpen.reset(acquireScope());
+  }
+  return ++uploadDepth;
+}
+
+void MGPU::reserveUploads(size_t byteSize) {
+  if (uploadOpen && byteSize) uploadOpen->host.reserve(byteSize);
+}
+
+int MGPU::stageWrite(WGPUBuffer dst, size_t dstByteOffset,
+                     size_t dstBufferSize, const void *src, size_t byteSize) {
+  if (!dst || !src || byteSize == 0) return -1;
+  // A staged range becomes a copyBufferToBuffer, which (like queue writes)
+  // requires 4-byte aligned offsets and size.  Anything else must take the
+  // inline path so behaviour is bit-identical to before.
+  if ((byteSize & 3u) || (dstByteOffset & 3u)) return 0;
+  if (dstByteOffset + byteSize > dstBufferSize) return -1;
+  if (uploadDepth <= 0 || !uploadOpen) return 0;
+
+  UploadScope &s = *uploadOpen;
+  const bool prof = uploadProfEnabled();
+  const long long t0 = prof ? mgpu_now_us() : 0;
+  const uint64_t srcOffset = (uint64_t)s.host.size();
+  const uint8_t *p = static_cast<const uint8_t *>(src);
+  s.host.insert(s.host.end(), p, p + byteSize);
+  if (prof) {
+    uploadStats.usStage += mgpu_now_us() - t0;
+    uploadStats.ranges++;
+    uploadStats.bytes += (long long)byteSize;
+  }
+  // Coalesce with the previous range when it is contiguous in BOTH the arena
+  // and the destination (dirty runs bridged by the producer land this way).
+  if (!s.copies.empty()) {
+    StagedCopy &last = s.copies.back();
+    if (last.dst == dst && last.dstOffset + last.size == dstByteOffset &&
+        last.srcOffset + last.size == srcOffset) {
+      last.size += byteSize;
+      return 1;
+    }
+  }
+  StagedCopy c;
+  c.dst = dst;
+  c.dstOffset = dstByteOffset;
+  c.srcOffset = srcOffset;
+  c.size = byteSize;
+  // The emission is asynchronous: hold a reference so a destination destroyed
+  // between End and the WebGPU thread picking the scope up stays alive.
+  wgpuBufferAddRef(dst);
+  s.copies.push_back(c);
+  return 1;
+}
+
+int MGPU::endUploads() {
+  if (uploadDepth <= 0) return 0;
+  if (--uploadDepth > 0) return 0;
+  if (!uploadOpen) return 0;
+  UploadScope *raw = uploadOpen.release();
+  const int n = (int)raw->copies.size();
+  if (n == 0) {
+    recycleScope(raw);
+    return 0;
+  }
+  // Emitted INLINE on the caller's thread — deliberately, so the ordering
+  // contract is bit-for-bit the one the inline write path already has:
+  // commands already RECORDED into the batch execute before these copies,
+  // and a dispatch that has not been enqueued yet cannot overtake them.
+  // (Emitting on the WebGPU thread instead would put the upload behind the
+  // dispatch FIFO, which the inline read/write entry points do not join —
+  // that would be a new race for every caller that mixes the two.)
+  // What is saved is the per-range mutex round trip and the per-range
+  // wgpuQueueSubmit, not the ordering.
+  const bool prof = uploadProfEnabled();
+  const long long tLock0 = prof ? mgpu_now_us() : 0;
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(gpuOperationMutex);
+    if (prof) uploadStats.usLock += mgpu_now_us() - tLock0;
+    applyUploadScopeLocked(*raw);
+  }
+  if (prof) {
+    uploadStats.scopes++;
+    uploadStats.copies += n;
+  }
+  recycleScope(raw);
+  return n;
+}
+
+void MGPU::uploadFallbackLocked(UploadScope &scope) {
+  // Correct but unbatched: used only when the staging allocation could not be
+  // created.  Queue writes are ordered by SUBMISSION time, so pending batched
+  // dispatches must go first (this is what the inline path always does).
+  WGPUQueue queue = tryGetQueue();
+  if (!queue) return;
+  flushBatchLocked();
+  for (const StagedCopy &c : scope.copies) {
+    wgpuQueueWriteBuffer(queue, c.dst, c.dstOffset,
+                         scope.host.data() + c.srcOffset, (size_t)c.size);
+  }
+}
+
+void MGPU::applyUploadScopeLocked(UploadScope &scope) {
+  if (scope.copies.empty() || scope.host.empty()) return;
+  if (!ctx || !ctx->initialized) return;
+  WGPUDevice device = ctx->device;
+  WGPUQueue queue = ctx->queue;
+  if (!device || !queue) return;
+
+  const size_t total = scope.host.size();
+  if (stagingCapacity < total) {
+    // Growing orphans copies already recorded against the OLD buffer, so the
+    // pending batch must be submitted before the swap.
+    flushBatchLocked();
+    if (stagingBuffer) {
+      wgpuBufferRelease(stagingBuffer);
+      stagingBuffer = nullptr;
+      stagingCapacity = 0;
+    }
+    size_t cap = kMinStagingBytes;
+    while (cap < total * 2 && cap < (size_t)1 << 31) cap <<= 1;
+    if (cap < total) cap = total;
+    WGPUBufferDescriptor desc = {};
+    desc.size = (uint64_t)cap;
+    desc.usage = WGPUBufferUsage_CopySrc | WGPUBufferUsage_CopyDst;
+    desc.mappedAtCreation = false;
+    stagingBuffer = wgpuDeviceCreateBuffer(device, &desc);
+    if (!stagingBuffer) {
+      LOG_ERROR("staging upload: failed to allocate %zu byte staging buffer",
+                cap);
+      stagingCapacity = 0;
+      stagingCursor = 0;
+      uploadFallbackLocked(scope);
+      return;
+    }
+    stagingCapacity = cap;
+    stagingCursor = 0;
+  }
+  const bool prof = uploadProfEnabled();
+  if (stagingCursor + total > stagingCapacity) {
+    // The arena would wrap onto bytes that recorded-but-unsubmitted copies
+    // still read.  Submitting rewinds the cursor (see flushBatchLocked).
+    const long long t = prof ? mgpu_now_us() : 0;
+    flushBatchLocked();
+    if (prof) {
+      uploadStats.usFlush += mgpu_now_us() - t;
+      uploadStats.flushes++;
+    }
+  }
+
+  const long long tW = prof ? mgpu_now_us() : 0;
+  const uint64_t base = (uint64_t)stagingCursor;
+  wgpuQueueWriteBuffer(queue, stagingBuffer, base, scope.host.data(), total);
+  stagingCursor = (size_t)base + total;
+  if (prof) uploadStats.usWrite += mgpu_now_us() - tW;
+
+  const long long tC = prof ? mgpu_now_us() : 0;
+  if (!batchEncoder) {
+    batchEncoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+    if (!batchEncoder) {
+      LOG_ERROR("staging upload: could not create command encoder");
+      return;
+    }
+  }
+  // copyBufferToBuffer is an encoder-level command: the open compute pass has
+  // to close.  The next dispatch reopens one on the SAME encoder, so this
+  // costs a pass boundary, not a submit.
+  if (batchPass) {
+    wgpuComputePassEncoderEnd(batchPass);
+    wgpuComputePassEncoderRelease(batchPass);
+    batchPass = nullptr;
+  }
+  for (const StagedCopy &c : scope.copies) {
+    wgpuCommandEncoderCopyBufferToBuffer(batchEncoder, stagingBuffer,
+                                         base + c.srcOffset, c.dst, c.dstOffset,
+                                         c.size);
+  }
+  if (prof) uploadStats.usCopy += mgpu_now_us() - tC;
+}
+
+void MGPU::releaseStagingLocked() {
+  if (stagingBuffer) {
+    wgpuBufferRelease(stagingBuffer);
+    stagingBuffer = nullptr;
+  }
+  stagingCapacity = 0;
+  stagingCursor = 0;
+}
+
+// ── Batched readbacks ──────────────────────────────────────────────────────
+// Design notes live in buffer.h next to the declarations.  The short version:
+// the upload twin removes a SUBMIT STORM but is byte-bound at the margin; this
+// removes a SUBMIT-AND-WAIT storm and is call-bound, so the win is per CALL.
+
+static constexpr size_t kMinReadbackBytes = 4u << 20; // 4 MB
+
+bool MGPU::readbackProfEnabled() {
+  static int on = -1;
+  if (on < 0) {
+    const char *s = std::getenv("MGPU_READBACK_PROF");
+    on = (s && s[0] && s[0] != '0') ? 1 : 0;
+  }
+  return on != 0;
+}
+
+int MGPU::beginReadbacks() {
+  if (readbackDepth == 0 && !readbackOpen) {
+    readbackOpen.reset(new ReadbackScope());
+  }
+  return ++readbackDepth;
+}
+
+void MGPU::reserveReadbacks(size_t byteSize) {
+  if (!byteSize) return;
+  mgpu::lock_guard<mgpu::mutex> lock(gpuOperationMutex);
+  if (readbackCapacity >= byteSize) return;
+  if (!ctx || !ctx->initialized || !ctx->device) return;
+  if (readbackBuffer) {
+    wgpuBufferRelease(readbackBuffer);
+    readbackBuffer = nullptr;
+    readbackCapacity = 0;
+  }
+  size_t cap = kMinReadbackBytes;
+  while (cap < byteSize && cap < ((size_t)1 << 31)) cap <<= 1;
+  if (cap < byteSize) cap = byteSize;
+  WGPUBufferDescriptor desc = {};
+  desc.size = (uint64_t)cap;
+  desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+  desc.mappedAtCreation = false;
+  readbackBuffer = wgpuDeviceCreateBuffer(ctx->device, &desc);
+  readbackCapacity = readbackBuffer ? cap : 0;
+  if (readbackProfEnabled() && readbackBuffer) readbackStats.grows++;
+}
+
+int MGPU::stageRead(WGPUBuffer src, size_t srcByteOffset, size_t srcBufferSize,
+                    void *dst, size_t byteSize) {
+  if (!src || !dst || byteSize == 0) return -1;
+  // A staged range becomes a copyBufferToBuffer: 4-byte aligned offset AND
+  // size.  Anything else takes the inline path so the answer is unchanged.
+  if ((byteSize & 3u) || (srcByteOffset & 3u)) return 0;
+  if (srcByteOffset + byteSize > srcBufferSize) return -1;
+  if (readbackDepth <= 0 || !readbackOpen) return 0;
+
+  ReadbackScope &s = *readbackOpen;
+  const bool prof = readbackProfEnabled();
+  const long long t0 = prof ? mgpu_now_us() : 0;
+  const uint64_t slot = s.total;
+  s.total += byteSize;
+
+  StagedRead r;
+  r.dst = dst;
+  r.slotOffset = slot;
+  r.size = byteSize;
+  s.reads.push_back(r);
+
+  // Coalesce with the previous copy when it is contiguous in BOTH the source
+  // buffer and the readback slot.  The memcpy-out stays per staged read, so a
+  // caller may split one contiguous device range across several destinations
+  // and still pay a single copy command.
+  if (!s.copies.empty()) {
+    ReadCopy &last = s.copies.back();
+    if (last.src == src && last.srcOffset + last.size == srcByteOffset &&
+        last.slotOffset + last.size == slot) {
+      last.size += byteSize;
+      if (prof) {
+        readbackStats.usStage += mgpu_now_us() - t0;
+        readbackStats.reads++;
+        readbackStats.bytes += (long long)byteSize;
+      }
+      return 1;
+    }
+  }
+  ReadCopy c;
+  c.src = src;
+  c.srcOffset = srcByteOffset;
+  c.slotOffset = slot;
+  c.size = byteSize;
+  // The source must survive until End even if the caller destroys the buffer
+  // in between (same contract the upload twin has for destinations).
+  wgpuBufferAddRef(src);
+  s.copies.push_back(c);
+  if (prof) {
+    readbackStats.usStage += mgpu_now_us() - t0;
+    readbackStats.reads++;
+    readbackStats.bytes += (long long)byteSize;
+  }
+  return 1;
+}
+
+int MGPU::endReadbacks() {
+  if (readbackDepth <= 0) return 0;
+  if (--readbackDepth > 0) return 0;
+  if (!readbackOpen) return 0;
+  std::unique_ptr<ReadbackScope> scope(readbackOpen.release());
+  const int n = (int)scope->reads.size();
+  if (n == 0) return 0;
+
+  const bool prof = readbackProfEnabled();
+  const long long tLock0 = prof ? mgpu_now_us() : 0;
+  {
+    // INLINE on the caller's thread, under the same mutex Buffer::read takes —
+    // so the ordering versus dispatches and inline reads/writes is exactly the
+    // one the per-buffer path already had.
+    mgpu::unique_lock<mgpu::mutex> lock(gpuOperationMutex);
+    if (prof) readbackStats.usLock += mgpu_now_us() - tLock0;
+    applyReadbackScopeLocked(*scope);
+  }
+  for (const ReadCopy &c : scope->copies) {
+    if (c.src) wgpuBufferRelease(c.src);
+  }
+  if (prof) {
+    readbackStats.scopes++;
+    readbackStats.copies += (long long)scope->copies.size();
+  }
+  return n;
+}
+
+bool MGPU::waitMapReadLocked(WGPUBuffer buf, size_t size) {
+  struct ReadState {
+    bool completed = false;
+    WGPUMapAsyncStatus status = WGPUMapAsyncStatus_Success;
+    mgpu::mutex mutex;
+  };
+  ReadState state;
+  WGPUBufferMapCallbackInfo cb = {};
+  cb.mode = WGPUCallbackMode_AllowSpontaneous;
+  cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *u1,
+                   void *) {
+    ReadState *st = static_cast<ReadState *>(u1);
+    mgpu::lock_guard<mgpu::mutex> lk(st->mutex);
+    st->status = status;
+    st->completed = true;
+  };
+  cb.userdata1 = &state;
+
+  WGPUFuture future = wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, cb);
+  WGPUInstance instance = tryGetInstance();
+  WGPUFutureWaitInfo waitInfo = {};
+  waitInfo.future = future;
+  if (instance) wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+  if (!waitInfo.completed) {
+    // Same hot-poll as Buffer::readDirect: Sleep(1) actually sleeps ~15 ms
+    // under the default Windows timer resolution, which would dominate.
+    while (!state.completed) platformSleep(0, instance);
+  }
+  return state.status == WGPUMapAsyncStatus_Success;
+}
+
+bool MGPU::readOneLocked(WGPUBuffer src, uint64_t srcOffset, void *dst,
+                         uint64_t size) {
+  if (!ctx || !ctx->initialized) return false;
+  WGPUDevice device = ctx->device;
+  WGPUQueue queue = ctx->queue;
+  if (!device || !queue) return false;
+  WGPUBufferDescriptor desc = {};
+  desc.size = size;
+  desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+  WGPUBuffer tmp = wgpuDeviceCreateBuffer(device, &desc);
+  if (!tmp) return false;
+  flushBatchLocked();
+  WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+  if (!enc) {
+    wgpuBufferRelease(tmp);
+    return false;
+  }
+  wgpuCommandEncoderCopyBufferToBuffer(enc, src, srcOffset, tmp, 0, size);
+  WGPUCommandBuffer cmds = wgpuCommandEncoderFinish(enc, nullptr);
+  if (cmds) {
+    wgpuQueueSubmit(queue, 1, &cmds);
+    wgpuCommandBufferRelease(cmds);
+  }
+  wgpuCommandEncoderRelease(enc);
+  bool ok = false;
+  if (waitMapReadLocked(tmp, (size_t)size)) {
+    const void *p = wgpuBufferGetConstMappedRange(tmp, 0, (size_t)size);
+    if (p) {
+      std::memcpy(dst, p, (size_t)size);
+      ok = true;
+    }
+    wgpuBufferUnmap(tmp);
+  }
+  wgpuBufferDestroy(tmp);
+  wgpuBufferRelease(tmp);
+  return ok;
+}
+
+void MGPU::applyReadbackScopeLocked(ReadbackScope &scope) {
+  if (scope.reads.empty()) return;
+  if (!ctx || !ctx->initialized) return;
+  WGPUDevice device = ctx->device;
+  WGPUQueue queue = ctx->queue;
+  if (!device || !queue) return;
+
+  const bool prof = readbackProfEnabled();
+  const size_t total = (size_t)scope.total;
+
+  if (readbackCapacity < total) {
+    // Growing orphans nothing (the buffer is only ever read within one scope),
+    // but the old allocation must be gone before the new one is recorded into.
+    if (readbackBuffer) {
+      wgpuBufferRelease(readbackBuffer);
+      readbackBuffer = nullptr;
+      readbackCapacity = 0;
+    }
+    size_t cap = kMinReadbackBytes;
+    while (cap < total && cap < ((size_t)1 << 31)) cap <<= 1;
+    if (cap < total) cap = total;
+    WGPUBufferDescriptor desc = {};
+    desc.size = (uint64_t)cap;
+    desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+    desc.mappedAtCreation = false;
+    readbackBuffer = wgpuDeviceCreateBuffer(device, &desc);
+    if (!readbackBuffer) {
+      LOG_ERROR("batched readback: failed to allocate %zu byte buffer", cap);
+      readbackCapacity = 0;
+      if (prof) readbackStats.fallbacks++;
+      // Correct but unbatched: exactly what the per-buffer path would have done.
+      for (const ReadCopy &c : scope.copies) {
+        // Resolve straight into the destinations that map onto this copy.
+        for (const StagedRead &r : scope.reads) {
+          if (r.slotOffset < c.slotOffset ||
+              r.slotOffset + r.size > c.slotOffset + c.size)
+            continue;
+          readOneLocked(c.src, c.srcOffset + (r.slotOffset - c.slotOffset),
+                        r.dst, r.size);
+        }
+      }
+      return;
+    }
+    readbackCapacity = cap;
+    if (prof) readbackStats.grows++;
+  }
+
+  // ── ONE submit ───────────────────────────────────────────────────────────
+  // The copies go into the encoder the compute batch is ALREADY building, so
+  // the single flush below carries the pending dispatches AND every copy: the
+  // per-read `flushBatchLocked() + own encoder + own submit` disappears.
+  const long long tC = prof ? mgpu_now_us() : 0;
+  if (!batchEncoder) {
+    batchEncoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+    if (!batchEncoder) {
+      LOG_ERROR("batched readback: could not create command encoder");
+      return;
+    }
+  }
+  if (batchPass) {
+    wgpuComputePassEncoderEnd(batchPass);
+    wgpuComputePassEncoderRelease(batchPass);
+    batchPass = nullptr;
+  }
+  for (const ReadCopy &c : scope.copies) {
+    wgpuCommandEncoderCopyBufferToBuffer(batchEncoder, c.src, c.srcOffset,
+                                         readbackBuffer, c.slotOffset, c.size);
+  }
+  if (prof) readbackStats.usCopy += mgpu_now_us() - tC;
+
+  const long long tS = prof ? mgpu_now_us() : 0;
+  flushBatchLocked();
+  if (prof) readbackStats.usSubmit += mgpu_now_us() - tS;
+
+  // ── ONE fence + ONE map ──────────────────────────────────────────────────
+  const long long tM = prof ? mgpu_now_us() : 0;
+  const bool mapped = waitMapReadLocked(readbackBuffer, total);
+  if (prof) readbackStats.usMap += mgpu_now_us() - tM;
+  if (!mapped) {
+    LOG_ERROR("batched readback: map failed");
+    return;
+  }
+  const long long tO = prof ? mgpu_now_us() : 0;
+  const uint8_t *base = static_cast<const uint8_t *>(
+      wgpuBufferGetConstMappedRange(readbackBuffer, 0, total));
+  if (base) {
+    for (const StagedRead &r : scope.reads) {
+      std::memcpy(r.dst, base + r.slotOffset, (size_t)r.size);
+    }
+  } else {
+    LOG_ERROR("batched readback: could not get mapped range");
+  }
+  wgpuBufferUnmap(readbackBuffer);
+  if (prof) readbackStats.usOut += mgpu_now_us() - tO;
+}
+
+void MGPU::releaseReadbackLocked() {
+  if (readbackBuffer) {
+    wgpuBufferRelease(readbackBuffer);
+    readbackBuffer = nullptr;
+  }
+  readbackCapacity = 0;
 }
 
 void MGPU::initializeContext() {
@@ -382,9 +947,15 @@ void MGPU::initializeContext() {
       entries.push_back(std::move(e));
     }
 
-    // 1. MGPU_ADAPTER_NAME env-var override (substring, case-insensitive).
-    if (const char* nameFilter = std::getenv("MGPU_ADAPTER_NAME")) {
-      std::string filter(nameFilter);
+    // 1. Adapter-name override (substring, case-insensitive): the
+    //    per-instance filter (multi-GPU contexts) wins over the
+    //    MGPU_ADAPTER_NAME env var.
+    const char* envFilter = std::getenv("MGPU_ADAPTER_NAME");
+    const std::string activeFilter =
+        !adapterFilter.empty() ? adapterFilter
+                               : (envFilter ? std::string(envFilter) : "");
+    if (!activeFilter.empty()) {
+      std::string filter(activeFilter);
       for (auto& c : filter) c = (char)std::tolower((unsigned char)c);
       for (auto& e : entries) {
         if (e.type == WGPUAdapterType_CPU) continue;
@@ -393,14 +964,15 @@ void MGPU::initializeContext() {
         if (lower.find(filter) != std::string::npos) {
           ctx->adapter = e.handle;
           wgpuAdapterAddRef(ctx->adapter);
-          MGPU_LOG(mgpu::LOG_INFO, "[mgpu] MGPU_ADAPTER_NAME='%s': selected '%s'",
-              nameFilter, e.name.c_str());
+          MGPU_LOG(mgpu::LOG_INFO, "[mgpu] adapter filter '%s': selected '%s'",
+              activeFilter.c_str(), e.name.c_str());
           break;
         }
       }
       if (!ctx->adapter)
         MGPU_LOG(mgpu::LOG_WARN,
-            "[mgpu] MGPU_ADAPTER_NAME='%s': no match - using auto-select", nameFilter);
+            "[mgpu] adapter filter '%s': no match - using auto-select",
+            activeFilter.c_str());
     }
 
     // 1.5. Display-adapter binding. autoDisplayAdapterName is set either by
@@ -562,6 +1134,7 @@ void MGPU::initializeContext() {
         (int)info.backendType, (int)info.adapterType,
         (unsigned)info.vendorID, (unsigned)info.deviceID);
       set_selected_adapter_name(devStr);  // queryable via mgpuGetSelectedAdapterName
+      selectedName = devStr;              // per-instance (multi-GPU contexts)
       wgpuAdapterInfoFreeMembers(info);
     }
   }
@@ -807,8 +1380,30 @@ void MGPU::destroyContext() {
   }
 
   // Drain all pending WebGPU-thread tasks (buffer cleanups, dispatch completions)
-  // before releasing the handles they reference.
-  webgpuThread.enqueueSync<void>([]{});
+  // before releasing the handles they reference, and discard any batched
+  // work still recording.
+  // Drop any upload scope the producer left open; its staged bytes describe a
+  // device that is going away.
+  if (uploadOpen) {
+    UploadScope *open = uploadOpen.release();
+    recycleScope(open); // releases the destination refs it holds
+  }
+  uploadDepth = 0;
+  // Same for a readback scope: its destinations describe a device going away,
+  // and its copies hold source refs that must be dropped.
+  if (readbackOpen) {
+    std::unique_ptr<ReadbackScope> open(readbackOpen.release());
+    for (const ReadCopy &c : open->copies) {
+      if (c.src) wgpuBufferRelease(c.src);
+    }
+  }
+  readbackDepth = 0;
+  webgpuThread.enqueueSync<void>([this]{
+    mgpu::lock_guard<mgpu::mutex> lock(gpuOperationMutex);
+    flushBatchLocked();
+    releaseStagingLocked();
+    releaseReadbackLocked();
+  });
 
   if (ctx->queue) {
     wgpuQueueRelease(ctx->queue);
@@ -1031,11 +1626,15 @@ void Buffer::release() {
     WGPUInstance instance = mgpu.tryGetInstance();
     WGPUQueue queue = mgpu.tryGetQueue();
     mgpu::mutex &gpuMutex = mgpu.getGpuMutex();
+    MGPU *owner = &mgpu;
 
-    auto cleanupTask = [bufferHandle, stagingHandle, queue, instance, &gpuMutex]() {
+    auto cleanupTask = [bufferHandle, stagingHandle, queue, instance, &gpuMutex,
+                        owner]() {
       LOG_INFO("Releasing buffer on WebGPU thread: %p", bufferHandle);
       {
         mgpu::lock_guard<mgpu::mutex> lock(gpuMutex);
+        // Pending batched dispatches may still reference this buffer.
+        owner->flushBatchLocked();
         if (queue) {
           wgpuQueueSubmit(queue, 0, nullptr);
         }
@@ -1322,6 +1921,16 @@ void Buffer::readAsync(uint64_t *outputData, size_t elementCount, size_t offset,
   readAsyncImpl(outputData, elementCount, offset, kUInt64, callback);
 }
 
+void Buffer::readBytesAt(void *outputData, size_t byteSize,
+                         size_t srcByteOffset) {
+  if (!outputData || byteSize == 0) return;
+  // readDirect<uint8_t> is a RAW byte read: elementSize == 1, so elementCount
+  // is the byte count and offset is the byte offset.  No per-type unpacking —
+  // identical bytes to what the batched path copies out of the mapped range.
+  readDirect<uint8_t>(static_cast<uint8_t *>(outputData), byteSize,
+                      srcByteOffset);
+}
+
 void Buffer::writeBytesAt(const void *inputData, size_t byteSize,
                           size_t dstByteOffset) {
   if (!inputData || byteSize == 0) {
@@ -1339,6 +1948,9 @@ void Buffer::writeBytesAt(const void *inputData, size_t byteSize,
   }
   // 4-byte alignment is a WebGPU requirement for queue writes.
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  // Queue writes are ordered by SUBMISSION time — flush pending batched
+  // dispatches first so they execute before this write, not after.
+  mgpu.flushBatchLocked();
   WGPUQueue queue = mgpu.getQueue();
   if (!queue || !bufferData.buffer) {
     LOG_ERROR("Invalid WebGPU handles for writeBytesAt");
@@ -1371,6 +1983,9 @@ void Buffer::writeDirect(const T *inputData, size_t byteSize,
 
   // Acquire WebGPU operation lock to prevent conflicts with compute dispatch
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  // Queue writes are ordered by SUBMISSION time — flush pending batched
+  // dispatches first so they execute before this write, not after.
+  mgpu.flushBatchLocked();
 
   WGPUDevice device = mgpu.getDevice();
   WGPUQueue queue = mgpu.getQueue();
@@ -1490,6 +2105,9 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
   // calling wgpuInstanceProcessEvents at the end, which must run outside the
   // lock to avoid blocking buffer-release cleanup tasks that also acquire it.
   mgpu::unique_lock<mgpu::mutex> lock(mgpu.getGpuMutex());
+  // Readbacks copy via their own encoder — flush pending batched dispatches
+  // first so their results are visible to this read.
+  mgpu.flushBatchLocked();
 
   WGPUDevice device = mgpu.getDevice();
   WGPUQueue queue = mgpu.getQueue();

@@ -2,7 +2,107 @@
 
 ## 1.5.8
 
+- **Fix: `MINIGPU_DAWN_DIR` was ignored when building through Flutter / dart
+  pub.** The build hook always passes `-DDAWN_DIR=<platform central path>`, and
+  because `dawn.cmake` only consults the env var when `DAWN_DIR` is undefined,
+  that define outranked it — the env var changed only where the hook LOOKED for a
+  prebuilt `webgpu_dawn` library, while cmake was still told
+  `%SYSTEMDRIVE%\dawn` and cloned/built Dawn there. The hook now resolves
+  `MINIGPU_DAWN_DIR` first for the define too.
+- **Fix: a Windows Dawn root broke a from-source Dawn build with "Invalid
+  character escape".** `DAWN_DIR` reached `FetchContent_Declare` with
+  backslashes (`C:\dawn`), and FetchContent writes `SOURCE_DIR` / `BINARY_DIR`
+  verbatim into the sub-build `CMakeLists.txt` it generates, where `\d` is an
+  invalid escape — configure failed inside a generated file, pointing at
+  `<dawn>/build_win_x86_64/tmp/CMakeLists.txt`. `dawn.cmake` now runs
+  `file(TO_CMAKE_PATH …)` on `DAWN_DIR`, and the hook emits forward slashes.
+  Only machines WITHOUT a prebuilt Dawn were affected: when `ENABLE_DAWN_FIND`
+  finds an existing build, the FetchContent branch never runs.
+- **Fix: `make build_weblib` (the Emscripten build) was broken by the
+  `DAWN_COMMIT` bump.** `--use-port=` hardcoded a version-stamped
+  `emdawnwebgpu-v<stamp>.remoteport.py` — a standalone port older Dawn shipped —
+  so em++ failed with "not a valid port path", and only ~370 targets in, after
+  Dawn itself had compiled. Current Dawn requires the port to come from its
+  ASSEMBLED package: the port file checks for generated headers copied in beside
+  it and otherwise errors "must sit in a built emdawnwebgpu_pkg". `--use-port`
+  now points at `${CMAKE_BINARY_DIR}/emdawnwebgpu_pkg/emdawnwebgpu.port.py`, and
+  `webgpu_web` takes a build dependency on Dawn's `emdawnwebgpu_pkg` target that
+  produces it — without that edge ninja may compile before the package exists.
+  The stamped layout is still accepted for older pins, the resolved path is
+  logged as `emdawnwebgpu port -> …`, and a Dawn tree with neither layout is a
+  configure-time `FATAL_ERROR` naming `DAWN_COMMIT` rather than a confusing
+  failure deep in the build.
+- **Fix: the Dawn event drain no longer costs a Windows timer quantum per GPU
+  wait.** `drain_dawn_events_with_timeout` waited with a 1 ms timeout on a future
+  nothing could notify early (the promise is set from a callback that runs later
+  in the same loop), and a 1 ms wait on Windows rounds up to the ~15.6 ms system
+  timer granularity — so every GPU wait cost a whole tick. It now probes with a
+  zero timeout and yield-spins for a bounded budget before degrading to coarse
+  sleeping. Measured p50 on an RTX 4090: shared-texture present 15.69 -> 2.57 ms
+  at 1280x720, 15.69 -> 10.07 ms at 3840x2160. Affects every caller that waits
+  through this drain (present, Dawn-side debug reads, video import).
+  `MGPU_DRAIN_SPIN_MS=<0..1000>` tunes the budget (default 8); `0` restores the
+  pre-fix behaviour, for A/B only. It is parsed strictly and warns on both a
+  malformed value and an explicit `0` — it previously used `std::atoi`, so
+  `on`/`true`/a typo silently selected the pathological 0.
+- New `mgpuDrainSpinBudgetMs()` — the budget the loaded binary implements, so a
+  caller can assert it is not running a stale artifact.
+- New ADDITIVE batched-staging-upload scope: `mgpuBeginUploads` /
+  `mgpuStageWrite` / `mgpuStageReserve` / `mgpuEndUploads` (+
+  `mgpuUploadsSupported`, `mgpuUploadStats`, `MGPU_UPLOAD_PROF=1`, and
+  `mgpuContextBeginUploads` / `mgpuContextEndUploads` for multi-GPU). N
+  scattered host writes become ONE `wgpuQueueWriteBuffer` into a persistent
+  staging buffer plus N `copyBufferToBuffer` recorded into the compute batch
+  already being built — one mutex acquire, zero extra submits, unchanged
+  ordering. A scope must not span a dispatch that READS what it stages. With no
+  scope open (or an unaligned range) `mgpuStageWrite` writes inline.
+- New ADDITIVE batched-readback scope: `mgpuBeginReadbacks` / `mgpuStageRead` /
+  `mgpuReadbackReserve` / `mgpuEndReadbacks` (+ `mgpuReadbacksSupported`,
+  `mgpuReadbackStats`, `MGPU_READBACK_PROF=1`, and `mgpuContextBeginReadbacks` /
+  `mgpuContextEndReadbacks`). N per-buffer `mgpuReadSync*` calls — each taking
+  the device mutex, flushing the batch with its own submit and blocking for GPU
+  completion — become ONE submit, ONE fence and ONE map into a persistent
+  readback buffer. Measured on an RTX 4090: 8 reads totalling 2.72 MB,
+  1.098 -> 0.465 ms of API time. Three contract differences from the upload
+  twin: a staged read is not filled until `mgpuEndReadbacks` (keep `dst` alive,
+  do not inspect it earlier); every staged read observes its source as of End,
+  so a scope must not span a dispatch that OVERWRITES what it stages; and
+  `mgpuStageRead` is a RAW BYTE read (mirror of `mgpuWriteBufferAt`, not of
+  `mgpuReadSyncUint8`). Unaligned or scopeless reads fall back inline.
+- Both scopes resolve INLINE on the calling thread under the same device mutex
+  the inline read/write paths take. Emitting on minigpu's WebGPU thread would
+  race, because `mgpuReadSync*` / `mgpuWrite*` do not join that FIFO.
+- New multi-adapter context handles: `mgpuCreateContextHandle(adapterFilter)`,
+  `mgpuContextInitializeAsync`, `mgpuContextGetAdapterName`,
+  `mgpuContextCreateBuffer`, `mgpuContextCreateComputeShader`,
+  `mgpuDestroyContextHandle` — an independent device, queue and task FIFO per
+  handle, exposed in Dart as `createSecondaryPlatform`. Resources from two
+  contexts must never be mixed in one dispatch.
+- New `mgpuEnumAdapters(namesOut, totalOut, usedOut, cap)` (DXGI) plus the Dart
+  `listAdapters()` override returning `GpuAdapterInfo` — adapter name, total
+  dedicated VRAM, current usage.
+- New `mgpuSetBufferFire` plus Dart `setBufferFire` / `dispatchFire`:
+  `dispatchFire` drops the per-dispatch completer round trip (the enqueue was
+  already async) and `setBufferFire` makes the bind join that same FIFO, so
+  bind -> fire -> rebind -> fire is ordered. Bindings are snapshotted when the
+  dispatch RUNS, not when it is fired.
+- New Dart `Buffer.writeRawBytes`: 4-byte-aligned raw upload streamed through a
+  host scratch allocation of at most 32 MB, so a multi-GB write never pins its
+  own size in host RAM or driver staging. `ArgumentError` on a misaligned
+  offset or length.
+- New `mgpuDebugConsumerChecksumSharedHandle(handle, w, h)` — FNV-1a over the
+  shared output surface read through an independent ID3D11Device, i.e. the way a
+  compositor sees it. Unlike `...DebugReadFirstPixel` (which reads through
+  Dawn's own device) it can observe a half-written present, making it usable as
+  a tearing/staleness oracle. Verification only.
+- New `MGPU_PRESENT_NO_WAIT=1` — deliberately broken, test-only: drops the
+  present's completion wait so the oracle above can be positive-controlled.
+  Never set it in production.
+
 ## 1.5.7
+
+- Release cut of the adapter-selection / Tier B–Tier C work documented under
+  1.5.6; no additional API change.
 
 ## 1.5.6
 

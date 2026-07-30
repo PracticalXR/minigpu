@@ -2,7 +2,40 @@
 
 ## 1.5.8
 
+All additions have concrete defaults, so a backend that `extends` these classes
+keeps compiling unchanged. **A class that `implements` them must add the new
+members** — Dart requires every member to be defined when implementing an
+interface, whether or not the declaration has a body.
+
+- New `GpuAdapterInfo` (name, total/used dedicated VRAM, `freeVramBytes`) and
+  `MinigpuPlatform.listAdapters()` — defaults to `const []`.
+- New `MinigpuPlatform.createSecondaryPlatform(String adapterFilter)`: an
+  INDEPENDENT platform context on the matching adapter, with its own device,
+  queue and task FIFO. Never mix two contexts' resources in one dispatch.
+  Defaults to `null` (no multi-adapter support).
+- New `MinigpuPlatform.drainSpinBudgetMs` — runtime provenance for the loaded
+  native binary's event-drain spin budget; defaults to `null` where it cannot be
+  asked. A build without the drain fix burns a ~15.6 ms Windows timer quantum per
+  GPU wait, so a latency-path caller can assert `> 0` rather than trust that it
+  linked a fresh artifact.
+- New `PlatformComputeShader.dispatchFire(x, y, z)` — fire-and-forget dispatch;
+  call order with reads/writes is preserved, so a later awaited
+  `PlatformBuffer.read` synchronizes any number of fired dispatches. Default
+  delegates to `dispatch`. **Bindings are snapshotted when the dispatch runs, not
+  when it is fired.**
+- New `PlatformComputeShader.setBufferFire(tag, buffer)` — ordered bind that
+  joins the dispatch/read/write FIFO, making bind → fire → rebind → fire
+  race-free on one shader. Default delegates to `setBuffer`, already correct for
+  inherently in-order backends.
+- New `PlatformBuffer.writeRawBytes(bytes, {dstByteOffset = 0})` for LARGE
+  transfers: implementations should stream in bounded chunks so neither host
+  scratch nor driver staging holds the full payload. Offset and length must be
+  4-byte multiples; the default falls back to `write` at offset 0 and throws
+  `UnsupportedError` otherwise.
+
 ## 1.5.7
+
+- Version lockstep with minigpu 1.5.7; no interface change.
 
 ## 1.5.6
 

@@ -60,6 +60,30 @@ class MinigpuFfi extends MinigpuPlatform {
   int queryVramBytes() => ffi.mgpuQueryVramBytes();
 
   @override
+  List<GpuAdapterInfo> listAdapters() {
+    const cap = 16;
+    final names = malloc.allocate<Char>(cap * 128);
+    final totals = malloc.allocate<Int64>(cap);
+    final used = malloc.allocate<Int64>(cap);
+    try {
+      final n = ffi.mgpuEnumAdapters(names, totals, used, cap);
+      final count = n < cap ? n : cap;
+      return [
+        for (int i = 0; i < count; i++)
+          GpuAdapterInfo(
+            name: _decodeCString(names + i * 128),
+            totalVramBytes: totals[i],
+            usedVramBytes: used[i],
+          ),
+      ];
+    } finally {
+      malloc.free(names);
+      malloc.free(totals);
+      malloc.free(used);
+    }
+  }
+
+  @override
   bool isExternalContentTypeSupported(ExternalContentType type) =>
       ffi.mgpuIsExternalContentTypeSupported(
         ffi.MGPUExternalContentType.fromValue(type.index),
@@ -105,6 +129,16 @@ class MinigpuFfi extends MinigpuPlatform {
       ffi.mgpuPreferDisplayAdapter(enable ? 1 : 0) == 0;
 
   @override
+  int? get drainSpinBudgetMs {
+    try {
+      return ffi.mgpuDrainSpinBudgetMs();
+    } catch (_) {
+      // Binary predates the export — which is itself the answer: no drain fix.
+      return null;
+    }
+  }
+
+  @override
   String? get selectedAdapterName {
     const cap = 256;
     final buf = malloc.allocate<Char>(cap);
@@ -114,6 +148,18 @@ class MinigpuFfi extends MinigpuPlatform {
       return _decodeCString(buf);
     } finally {
       malloc.free(buf);
+    }
+  }
+
+  @override
+  MinigpuPlatform? createSecondaryPlatform(String adapterFilter) {
+    final filterPtr = adapterFilter.toNativeUtf8();
+    try {
+      final handle = ffi.mgpuCreateContextHandle(filterPtr.cast());
+      if (handle == nullptr) return null;
+      return FfiSecondaryPlatform(handle);
+    } finally {
+      malloc.free(filterPtr);
     }
   }
 
@@ -354,6 +400,67 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
   }
 }
 
+/// An independent native context bound to a specific adapter (multi-GPU).
+/// Created via [MinigpuFfi.createSecondaryPlatform]; owns its MGPU instance
+/// (device, queue, WebGPU thread).  Buffers/shaders created here route every
+/// later operation through that instance automatically — only creation and
+/// context lifecycle need handle-aware calls.
+class FfiSecondaryPlatform extends MinigpuPlatform {
+  FfiSecondaryPlatform(this._handle);
+
+  final Pointer<ffi.MGPUContextHandle> _handle;
+  bool _destroyed = false;
+
+  @override
+  Future<void> initializeContext() async {
+    final completer = Completer<void>();
+    final nativeCallable = NativeCallable<Void Function()>.listener(
+      () => completer.complete(),
+    );
+    try {
+      ffi.mgpuContextInitializeAsync(_handle, nativeCallable.nativeFunction);
+      await completer.future;
+    } finally {
+      nativeCallable.close();
+    }
+  }
+
+  @override
+  Future<void> destroyContext() async {
+    if (_destroyed) return;
+    _destroyed = true;
+    ffi.mgpuDestroyContextHandle(_handle);
+  }
+
+  @override
+  PlatformComputeShader createComputeShader() {
+    final self = ffi.mgpuContextCreateComputeShader(_handle);
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiComputeShader(self);
+  }
+
+  @override
+  PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
+    final self =
+        ffi.mgpuContextCreateBuffer(_handle, bufferSize, dataType.index);
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiBuffer(self);
+  }
+
+  @override
+  String? get selectedAdapterName {
+    const cap = 256;
+    final buf = malloc.allocate<Char>(cap);
+    try {
+      final len = ffi.mgpuContextGetAdapterName(_handle, buf, cap);
+      if (len <= 0) return null;
+      return MinigpuFfi._decodeCString(buf);
+    } finally {
+      malloc.free(buf);
+    }
+  }
+}
+
 // Compute shader FFI
 final class FfiComputeShader implements PlatformComputeShader {
   FfiComputeShader(Pointer<ffi.MGPUComputeShader> self) : _self = self;
@@ -383,6 +490,11 @@ final class FfiComputeShader implements PlatformComputeShader {
   }
 
   @override
+  void setBufferFire(int tag, PlatformBuffer buffer) {
+    ffi.mgpuSetBufferFire(_self, tag, (buffer as FfiBuffer)._self);
+  }
+
+  @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
     final completer = Completer<void>();
 
@@ -405,6 +517,13 @@ final class FfiComputeShader implements PlatformComputeShader {
     } finally {
       nativeCallable.close();
     }
+  }
+
+  @override
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    // mgpuDispatch enqueues the pass on the WebGPU thread and returns
+    // immediately — no completer/NativeCallable round trip per dispatch.
+    ffi.mgpuDispatch(_self, groupsX, groupsY, groupsZ);
   }
 
   @override
@@ -438,6 +557,14 @@ final class FfiBuffer implements PlatformBuffer {
   Pointer<NativeType>? _writeScratch;
   int _writeScratchBytes = 0;
   bool _writeInFlight = false;
+
+  /// Pool scratch only for SMALL transfers.  The pool exists for per-frame
+  /// streaming buffers (thousands of small writes/sec); pooling large
+  /// transfers instead PINS a native allocation the size of the transfer for
+  /// the buffer's whole lifetime — with thousands of live weight buffers
+  /// (e.g. 40 GB of model experts) that leaked tens of GB of host RAM.
+  /// Large transfers malloc/free per call.
+  static const int _maxPooledScratchBytes = 1 << 20;
 
   bool _destroyed = false;
 
@@ -555,8 +682,11 @@ final class FfiBuffer implements PlatformBuffer {
     final int bytesToAllocate = elementsToRead * elementSize;
 
     // Use the pooled scratch + listener on the common (non-reentrant) path;
-    // fall back to a private local allocation if a read is already in flight.
-    final bool usePool = !_readInFlight && !_destroyed;
+    // fall back to a private local allocation if a read is already in flight
+    // or the transfer is too large to pin (see _maxPooledScratchBytes).
+    final bool usePool = !_readInFlight &&
+        !_destroyed &&
+        bytesToAllocate <= _maxPooledScratchBytes;
     final Completer<void> completer = Completer<void>();
     final Pointer<NativeType> nativePtr;
     final NativeCallable<Void Function()> nativeCallable;
@@ -930,7 +1060,9 @@ final class FfiBuffer implements PlatformBuffer {
         ? ((byteSize + 3) & ~3)
         : byteSize;
 
-    final bool usePool = !_writeInFlight && !_destroyed;
+    final bool usePool = !_writeInFlight &&
+        !_destroyed &&
+        scratchBytes <= _maxPooledScratchBytes;
     final Pointer<NativeType> nativePtr;
     final bool ownsLocal;
     if (usePool) {
@@ -1053,6 +1185,36 @@ final class FfiBuffer implements PlatformBuffer {
       } else {
         _writeInFlight = false;
       }
+    }
+  }
+
+  /// Chunked raw upload: streams [bytes] through a bounded native scratch
+  /// (32 MiB) via mgpuWriteBufferAt, so a multi-GB weight upload never
+  /// allocates host memory proportional to the payload (neither our scratch
+  /// nor Dawn's staging sees more than one chunk at a time).
+  @override
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) async {
+    if (bytes.length % 4 != 0 || dstByteOffset % 4 != 0) {
+      throw ArgumentError('writeRawBytes needs 4-byte-aligned length/offset');
+    }
+    const chunkBytes = 32 << 20;
+    final scratchBytes =
+        bytes.length < chunkBytes ? bytes.length : chunkBytes;
+    if (scratchBytes == 0) return;
+    final scratch = malloc.allocate<Uint8>(scratchBytes);
+    try {
+      var off = 0;
+      while (off < bytes.length) {
+        final n = (bytes.length - off) < chunkBytes
+            ? (bytes.length - off)
+            : chunkBytes;
+        scratch.asTypedList(scratchBytes).setRange(
+            0, n, Uint8List.sublistView(bytes, off, off + n));
+        ffi.mgpuWriteBufferAt(_self, scratch.cast(), n, dstByteOffset + off);
+        off += n;
+      }
+    } finally {
+      malloc.free(scratch);
     }
   }
 

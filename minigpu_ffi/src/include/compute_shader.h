@@ -47,6 +47,11 @@ public:
   bool hasKernel() const;
 
   void setBuffer(int tag, const Buffer &buffer);
+  // Ordered variant: enqueues the binding update on the WebGPU thread so it
+  // executes in FIFO order with dispatch/read/write tasks.  Required when
+  // rebinding a shader between fire-and-forget dispatches (a plain setBuffer
+  // mutates immediately and would race the still-queued earlier dispatch).
+  void setBufferQueued(int tag, const Buffer &buffer);
   // Extended binding setters for video texture interop
   void setTextureView(int slot, WGPUTextureView view);
   void setStorageBuffer(int slot, WGPUBuffer buf, size_t size, size_t offset);

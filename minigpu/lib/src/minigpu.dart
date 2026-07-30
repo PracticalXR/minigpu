@@ -20,11 +20,29 @@ import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 /// context is now destroyed ONLY by explicit [destroy] / [destroySync].
 final class Minigpu {
   factory Minigpu() => _instance;
-  Minigpu._();
+  Minigpu._() : _platform = MinigpuPlatform.instance;
+
+  /// Creates an INDEPENDENT context on the adapter whose name contains
+  /// [adapterFilter] (case-insensitive substring, e.g. `'3090'`) — its own
+  /// device, queue, and task FIFO.  NOT the singleton: call [init] before
+  /// use and [destroy] when done.  Buffers/shaders from different [Minigpu]
+  /// instances must never be mixed in one dispatch.  Throws
+  /// [UnsupportedError] on platforms without multi-adapter support (web).
+  factory Minigpu.forAdapter(String adapterFilter) {
+    final platform =
+        MinigpuPlatform.instance.createSecondaryPlatform(adapterFilter);
+    if (platform == null) {
+      throw UnsupportedError(
+          'Multi-adapter contexts are not supported on this platform');
+    }
+    return Minigpu._withPlatform(platform);
+  }
+
+  Minigpu._withPlatform(this._platform);
 
   static final Minigpu _instance = Minigpu._();
 
-  final _platform = MinigpuPlatform.instance;
+  final MinigpuPlatform _platform;
   bool isInitialized = false;
   Future<void>? _initializing;
 
@@ -126,6 +144,32 @@ final class Minigpu {
   /// is not initialized / the platform does not expose it.
   static String? get selectedAdapterName =>
       MinigpuPlatform.instance.selectedAdapterName;
+
+  /// Yield-spin budget (ms) the LOADED native binary implements before the
+  /// event drain degrades to coarse sleeping — `null` when it can't be asked
+  /// (web, or a binary predating the export), which for a native build means
+  /// the drain fix is NOT in it.
+  ///
+  /// Latency-sensitive callers (screen recording, live present) should assert
+  /// this is > 0 at startup. Without the fix every GPU wait rounds up to the
+  /// Windows timer quantum (~15.6 ms): the shared-texture present measured p50
+  /// 15.69 ms at BOTH 720p and 4K, and a cost that doesn't move with 9× the
+  /// pixels is a clock tick, not work. Loading a stale native artifact is a
+  /// mistake this repo has made more than once, and it is silent — this is how
+  /// you catch it in-process rather than in a profile.
+  static int? get drainSpinBudgetMs =>
+      MinigpuPlatform.instance.drainSpinBudgetMs;
+
+  /// Name of the adapter THIS instance selected — meaningful for
+  /// [Minigpu.forAdapter] contexts, where the process-global
+  /// [selectedAdapterName] refers to the default context.
+  String? get adapterName => _platform.selectedAdapterName;
+
+  /// Enumerates hardware adapters with total/used dedicated VRAM (empty on
+  /// platforms without adapter enumeration).  Static: this queries the OS,
+  /// not any particular context.
+  static List<GpuAdapterInfo> listAdapters() =>
+      MinigpuPlatform.instance.listAdapters();
 
   /// Synchronous variant of [destroy] intended for use in Flutter hot-restart
   /// teardown hooks where `await` is not available (e.g. inside

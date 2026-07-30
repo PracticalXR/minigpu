@@ -345,6 +345,39 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixel(
 EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
         MGPUSharedOutputTexture* tex);
 
+/**
+ * Introspection: the yield-spin budget (milliseconds) the internal Dawn
+ * event drain uses before it degrades to coarse sleeping.  Default 8.
+ *
+ * MGPU_DRAIN_SPIN_MS overrides it, but only when it parses as an integer in
+ * [0, 1000]; anything else is ignored with a warning and the default stands.
+ * An explicit 0 restores the pre-2026-07-28 behaviour where every GPU wait
+ * cost one Windows timer quantum (~15.6 ms) — an A/B measurement mode that
+ * announces itself in the log, not something to ship with.
+ *
+ * Exists so callers/tests can assert which drain policy the loaded binary
+ * actually implements (a stale artifact has no such export at all).
+ */
+EXPORT int mgpuDrainSpinBudgetMs(void);
+
+/**
+ * Verification: FNV-1a (offset 0x811c9dc5, prime 0x01000193) over the whole
+ * shared output surface, read through an INDEPENDENT ID3D11Device that opens
+ * [sharedHandle] (the legacy DXGI shared handle from
+ * mgpuSharedOutputTextureGetD3D11Handle) — i.e. the way Flutter's compositor
+ * sees it, with no synchronisation against the producer beyond whatever the
+ * present path itself guarantees.  Bytes are hashed in RGBA order so the
+ * result compares directly against a checksum of an RGBA recon buffer.
+ *
+ * Call IMMEDIATELY after the producing decode returns: inserting any wait
+ * first gives the producer free time and hides a present/consume race.
+ *
+ * Returns 0 on failure.
+ */
+EXPORT uint32_t mgpuDebugConsumerChecksumSharedHandle(void*    sharedHandle,
+                                                      uint32_t width,
+                                                      uint32_t height);
+
 #ifdef __cplusplus
 }
 #endif

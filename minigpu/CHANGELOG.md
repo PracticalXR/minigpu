@@ -2,7 +2,76 @@
 
 ## 1.5.8
 
+- **Breaking-ish fix: `Minigpu()` is now a per-isolate SINGLETON and the context
+  is destroyed only by explicit `destroy()` / `destroySync()`.** Each
+  construction used to attach a `Finalizer` calling `destroyContext()`, but there
+  is only ONE process-global native context — so any temporary wrapper (e.g.
+  `Minigpu().isInitialized` in a test `setUp`) destroyed the device, whenever the
+  GC ran, out from under every live buffer and shader. Resources created before
+  the loss were invalid on the auto-reinitialized device and their dispatches
+  were silently dropped: zero outputs, no Dart-visible error.
+- **`Minigpu.init()` is now idempotent and concurrency-safe** — returns
+  immediately when already initialized, awaits the in-flight init when raced, and
+  no longer throws `MinigpuAlreadyInitError`. Update any code relying on that
+  throw.
+- **`ComputeShader.dispatch` / `dispatchFire` now throw `ArgumentError` above
+  `ComputeShader.maxWorkgroupsPerDim` (65535).** Exceeding WebGPU's per-dimension
+  cap invalidated the whole CommandBuffer, and since validation errors are
+  STICKY, every later submit on the device failed too — one oversized dispatch
+  silently poisoned unrelated work. The error names the offending dims and gives
+  the canonical fold (`gx = min(n, 65535); gy = (n + gx - 1) ~/ gx`, flat index
+  rebuilt in the shader as
+  `gid.x + gid.y * (num_workgroups.x * workgroup_size_x)`).
+- New `ComputeShader.dispatchFire(x, y, z)` — fire-and-forget dispatch with no
+  per-dispatch completer round trip. Call order is still honoured, so awaiting
+  any later buffer read synchronizes every fired dispatch. **Bindings are
+  snapshotted when the dispatch RUNS, not when it is fired**: do not `setBuffer`
+  on a shader with an unsynchronized fired dispatch outstanding. Use
+  `setBufferFire` (the bind joins the same FIFO) or a shader instance per call
+  site.
+- New `Minigpu.forAdapter(String adapterFilter)` — an INDEPENDENT context on the
+  adapter whose name contains `adapterFilter` (case-insensitive substring), with
+  its own device, queue and task FIFO. Not the singleton: `init()` before use,
+  `destroy()` when done, and never mix two instances' resources in one dispatch.
+  Throws `UnsupportedError` on web. Instance getter `adapterName` reports which
+  adapter THIS context bound.
+- New `Minigpu.listAdapters()` — hardware adapters with dedicated-VRAM total and
+  usage (DXGI on Windows; empty elsewhere). Returns `GpuAdapterInfo` from
+  `package:minigpu_platform_interface/minigpu_platform_interface.dart`.
+- New `Buffer.writeRawBytes(bytes, {dstByteOffset = 0})` — raw 4-byte-aligned
+  upload streamed in 32 MB chunks, so neither host scratch nor driver staging
+  holds the whole payload. For LARGE transfers where a single `write` would spike
+  or pin host RAM.
+- New `Minigpu.drainSpinBudgetMs` — the event-drain spin budget the LOADED native
+  binary implements; `null` on web, or on a binary predating the export, which
+  for a native build means the drain fix below is NOT in it. Latency-sensitive
+  callers should assert `> 0` at startup, since loading a stale native artifact
+  is silent.
+- Native (`minigpu_ffi` 1.5.8), reaching consumers of this package through the
+  shared context — see `minigpu_ffi/CHANGELOG.md` for the contracts:
+  - **The Dawn event drain no longer costs a Windows timer quantum (~15.6 ms)
+    per GPU wait**: present p50 15.69 → 2.57 ms at 1280x720 and 15.69 →
+    10.07 ms at 3840x2160 on an RTX 4090. Strictly better — waits can only
+    return sooner. `MGPU_DRAIN_SPIN_MS=<0..1000>` tunes it (default 8).
+  - Additive batched staging upload and readback scopes: N scattered host writes
+    become one queue write plus N recorded copies, and N per-buffer
+    `mgpuReadSync*` calls become one submit, one fence and one map (8 reads of
+    2.72 MB: 1.098 → 0.465 ms of API time). **No Dart API on this package yet**
+    — reachable through the `minigpu_ffi` bindings.
+  - Multi-adapter context handles and `mgpuEnumAdapters`, backing
+    `Minigpu.forAdapter` and `Minigpu.listAdapters` above.
+  - Three build fixes worth knowing if you have ever fought the Dawn step:
+    `MINIGPU_DAWN_DIR` is now honoured when building through Flutter / dart pub
+    (it previously only moved the prebuilt-library search, not the Dawn root
+    given to cmake); a Windows Dawn root no longer breaks a from-source Dawn
+    build with `Invalid character escape '\d'`; and the Emscripten build's
+    emdawnwebgpu port file is detected rather than hardcoded. See
+    `minigpu_ffi/README.md` → Troubleshooting.
+
 ## 1.5.7
+
+- Release cut of the adapter-selection and Tier B/Tier C work documented under
+  1.5.6; no additional API change in this package.
 
 ## 1.5.6
 

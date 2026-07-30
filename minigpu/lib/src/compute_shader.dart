@@ -46,6 +46,16 @@ final class ComputeShader {
     }
   }
 
+  /// Ordered variant of [setBuffer] for fire-and-forget hot paths: the bind
+  /// joins the WebGPU-thread FIFO, so rebinding between [dispatchFire] calls
+  /// is race-free (each queued dispatch snapshots the binds queued before
+  /// it).  Do not destroy the shader or the buffer until a later buffer read
+  /// has been awaited (reads flush the FIFO).
+  void setBufferFire(String tag, Buffer buffer) {
+    _kernelTags.putIfAbsent(tag, () => _kernelTags.length);
+    _shader.setBufferFire(_kernelTags[tag]!, buffer.platformBuffer!);
+  }
+
   /// Sets a buffer at an explicit binding [slot] index.
   ///
   /// Use this when mixing texture bindings (set via [VideoTexture.setOnShader])
@@ -55,9 +65,47 @@ final class ComputeShader {
     _shader.setBuffer(slot, buffer.platformBuffer!);
   }
 
+  /// WebGPU caps the workgroup count at 65535 PER DIMENSION. A dispatch that
+  /// exceeds it invalidates the whole CommandBuffer — and because WebGPU
+  /// validation errors are sticky, every SUBSEQUENT submit on the device then
+  /// fails with "[Invalid CommandBuffer] is invalid due to a previous error",
+  /// so one bad dispatch silently poisons unrelated work. Fail loudly and
+  /// early instead, naming the offending dims, so callers get a catchable error
+  /// (e.g. fall back to CPU) rather than a cascading device-wide failure.
+  static const int maxWorkgroupsPerDim = 65535;
+  static void _checkDispatch(int x, int y, int z) {
+    if (x > maxWorkgroupsPerDim ||
+        y > maxWorkgroupsPerDim ||
+        z > maxWorkgroupsPerDim) {
+      throw ArgumentError(
+        'Compute dispatch ($x, $y, $z) exceeds WebGPU\'s limit of '
+        '$maxWorkgroupsPerDim workgroups per dimension. Fold the overflow into '
+        'another dimension: gx = min(n, 65535); gy = (n + gx - 1) ~/ gx; and '
+        'reconstruct the flat index in the shader as '
+        '`gid.x + gid.y * (num_workgroups.x * workgroup_size_x)`.',
+      );
+    }
+  }
+
   /// Dispatches the specified kernel with the given work group counts.
-  Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async =>
-      _shader.dispatch(groupsX, groupsY, groupsZ);
+  Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
+    _checkDispatch(groupsX, groupsY, groupsZ);
+    return _shader.dispatch(groupsX, groupsY, groupsZ);
+  }
+
+  /// Fire-and-forget dispatch: enqueues the compute pass and returns
+  /// immediately (no per-dispatch completer round trip).  Dispatches, buffer
+  /// writes and reads still execute in call order, so awaiting any later
+  /// buffer read synchronizes every fired dispatch before it.
+  ///
+  /// Do NOT [setBuffer] on a shader that has a fired dispatch which hasn't
+  /// been synchronized by a readback yet — bindings are snapshotted when the
+  /// dispatch runs, not when it's fired. Use per-call-site shader instances
+  /// with stable bindings on fire-and-forget hot paths.
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    _checkDispatch(groupsX, groupsY, groupsZ);
+    _shader.dispatchFire(groupsX, groupsY, groupsZ);
+  }
 
   /// Destroys the compute shader.
   void destroy() {

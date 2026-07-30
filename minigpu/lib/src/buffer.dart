@@ -64,6 +64,16 @@ final class Buffer {
     );
   }
 
+  /// Raw byte upload at [dstByteOffset] (both must be 4-byte multiples),
+  /// streamed in bounded chunks — use for LARGE uploads (model weights) so
+  /// host scratch/driver staging never holds the whole payload.
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) async {
+    if (!isValid) {
+      throw StateError('Cannot write to a destroyed buffer.');
+    }
+    await _platformBuffer!.writeRawBytes(bytes, dstByteOffset: dstByteOffset);
+  }
+
   /// Destroys the buffer and releases associated resources.
   /// Can be called multiple times safely.
   void destroy() {

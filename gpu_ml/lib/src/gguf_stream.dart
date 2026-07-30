@@ -21,6 +21,11 @@ class GgufStream {
   final RandomAccessFile _raf;
   final int _fileLength;
 
+  /// Serializes seek+read pairs: RandomAccessFile allows only one pending
+  /// async operation, and callers (the decode plan's expert fetches) may
+  /// issue concurrent reads.
+  Future<void> _ioTail = Future.value();
+
   int get fileLength => _fileLength;
 
   /// Opens [path] and parses the header.  [maxHeaderBytes] bounds the
@@ -81,24 +86,31 @@ class GgufStream {
       );
     }
     final out = Uint8List(size);
-    await _raf.setPosition(start);
-    int done = 0;
-    while (done < size) {
-      final n = await _raf.readInto(
-        Uint8List.sublistView(out, done, size),
-      );
-      if (n <= 0) {
-        throw Exception(
-          "Short read for tensor '${info.name}': $done of $size bytes",
+    final result = _ioTail.then((_) async {
+      await _raf.setPosition(start);
+      int done = 0;
+      while (done < size) {
+        final n = await _raf.readInto(
+          Uint8List.sublistView(out, done, size),
         );
+        if (n <= 0) {
+          throw Exception(
+            "Short read for tensor '${info.name}': $done of $size bytes",
+          );
+        }
+        done += n;
       }
-      done += n;
-    }
-    return out;
+      return out;
+    });
+    // Keep the chain alive even when a read fails.
+    _ioTail = result.then((_) {}, onError: (_) {});
+    return result;
   }
 
   /// Loads a quantized/f16 weight (2D, or 3D expert stack) by [name]
-  /// straight from disk to VRAM.
+  /// straight from disk to VRAM.  Large tensors STREAM in bounded chunks so
+  /// host RAM never holds the whole payload (expert stacks approach 1 GB
+  /// each; a full-resident 40 GB model must not spike host memory).
   Future<QuantizedTensor> loadQuantized(String name, {Minigpu? gpu}) async {
     final info = tensor(name);
     if (info == null) {
@@ -107,6 +119,15 @@ class GgufStream {
     if (info.ne.length != 2 && info.ne.length != 3) {
       throw Exception(
         "loadQuantized supports 2D/3D tensors; '$name' has ne ${info.ne}",
+      );
+    }
+    const streamThreshold = 64 << 20;
+    if (info.byteSize > streamThreshold) {
+      return QuantizedTensor.createStreamed(
+        info.shape,
+        info.type,
+        (off, len) => readTensorBytes(info, byteOffset: off, byteLength: len),
+        gpu: gpu,
       );
     }
     final bytes = await readTensorBytes(info);

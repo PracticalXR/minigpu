@@ -2,7 +2,19 @@
 
 ## 1.5.8
 
+- Implement the new platform-interface members on web:
+  `setBufferFire` aliases `setBuffer` (single-threaded wasm runs GPU tasks in call
+  order, so the plain bind already has FIFO semantics); `dispatchFire` drops the
+  returned promise (`queue.submit` is synchronous in JS WebGPU — the promise only
+  covers call plumbing, so submission order holds); `writeRawBytes` writes at
+  offset 0 via the u32 path and throws `UnsupportedError` otherwise.
+- `listAdapters` / `createSecondaryPlatform` / `drainSpinBudgetMs` inherit the
+  interface's no-op defaults — no multi-adapter contexts on web, and the native
+  drain fix does not apply.
+
 ## 1.5.7
+
+- Version lockstep with minigpu 1.5.7; no behavior change.
 
 ## 1.5.6
 
