@@ -80,8 +80,8 @@ Future<void> main() async {
   Future<double> bench(String src) async {
     final s = gpu.createComputeShader();
     s.loadKernelString(src);
-    s.setBufferFire('xb', xb);
-    s.setBufferFire('yb', yb);
+    s.setBuffer('xb', xb);
+    s.setBuffer('yb', yb);
     s.dispatchFire(wgs, 1, 1); // pipeline compile + warmup
     await yb.read(tmp, 4);
     double best = 0;

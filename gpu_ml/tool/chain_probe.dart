@@ -54,12 +54,12 @@ Future<void> main() async {
   for (final (label, wgs, it) in configs) {
     final sAB = gpu.createComputeShader();
     sAB.loadKernelString(chainKernel('a', 'b', wgs, it));
-    sAB.setBufferFire('a', bufA);
-    sAB.setBufferFire('b', bufB);
+    sAB.setBuffer('a', bufA);
+    sAB.setBuffer('b', bufB);
     final sBA = gpu.createComputeShader();
     sBA.loadKernelString(chainKernel('b', 'a', wgs, it));
-    sBA.setBufferFire('a', bufA);
-    sBA.setBufferFire('b', bufB);
+    sBA.setBuffer('a', bufA);
+    sBA.setBuffer('b', bufB);
     sAB.dispatchFire(wgs, 1, 1);
     sBA.dispatchFire(wgs, 1, 1);
     await bufA.read(tmp, 4);
@@ -87,11 +87,11 @@ Future<void> main() async {
     for (int rep = 0; rep < reps; rep++) {
       final sw = Stopwatch()..start();
       for (int i = 0; i < n ~/ 2; i++) {
-        sAB.setBufferFire('a', bufA);
-        sAB.setBufferFire('b', bufB);
+        sAB.setBuffer('a', bufA);
+        sAB.setBuffer('b', bufB);
         sAB.dispatchFire(wgs, 1, 1);
-        sBA.setBufferFire('a', bufA);
-        sBA.setBufferFire('b', bufB);
+        sBA.setBuffer('a', bufA);
+        sBA.setBuffer('b', bufB);
         sBA.dispatchFire(wgs, 1, 1);
       }
       await bufA.read(tmp, 4);
@@ -129,12 +129,12 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 ''';
   final sC = gpu.createComputeShader();
   sC.loadKernelString(soloKernel(256, 64));
-  sC.setBufferFire('a', bufC);
-  sC.setBufferFire('b', bufD);
+  sC.setBuffer('a', bufC);
+  sC.setBuffer('b', bufD);
   final sE = gpu.createComputeShader();
   sE.loadKernelString(soloKernel(256, 64));
-  sE.setBufferFire('a', bufE);
-  sE.setBufferFire('b', bufF);
+  sE.setBuffer('a', bufE);
+  sE.setBuffer('b', bufF);
   sC.dispatchFire(256, 1, 1);
   sE.dispatchFire(256, 1, 1);
   await bufD.read(tmp, 4);

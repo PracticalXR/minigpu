@@ -405,10 +405,10 @@ ${QuantizedTensor.matVecDp4aBodyWGSL(threadVar: 'trd', stride: '${tpr}u')}
   if (trd == 0u && row < ROWS) { y[row] = scratch[lid.x]; }
 }
 '''));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('xq', xq);
-    s.setBufferFire('xsc', xsc);
-    s.setBufferFire('y', y);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('xq', xq);
+    s.setBuffer('xsc', xsc);
+    s.setBuffer('y', y);
     final rowsPerWg = tpr == 1 ? 256 : 256 ~/ tpr;
     final g = (w.rows + rowsPerWg - 1) ~/ rowsPerWg;
     final gx = g <= 65535 ? g : 65535;
@@ -430,9 +430,9 @@ ${QuantizedTensor.matVecDp4aBodyWGSL(threadVar: 'trd', stride: '${tpr}u')}
         key,
         () => _sh(_qmvSrc(w.rows, w.cols, w.type, tag,
             threadsPerRow: t, sharedX: xs)));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
     _fireRows(s, (w.rows + 256 ~/ t - 1) ~/ (256 ~/ t));
   }
 
@@ -451,10 +451,10 @@ ${QuantizedTensor.matVecDp4aBodyWGSL(threadVar: 'trd', stride: '${tpr}u')}
         key,
         () => _sh(_qmvSrc(w.rows, w.cols, w.type, tag,
             accumSlot: slot, threadsPerRow: t, sharedX: xs)));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
-    s.setBufferFire('wsel', wsel);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
+    s.setBuffer('wsel', wsel);
     _fireRows(s, (w.rows + 256 ~/ t - 1) ~/ (256 ~/ t));
   }
 
@@ -530,10 +530,10 @@ $bodyB
 }
 ''');
     });
-    s.setBufferFire('wq', w1.buffer);
-    s.setBufferFire('wqb', w2.buffer);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
+    s.setBuffer('wq', w1.buffer);
+    s.setBuffer('wqb', w2.buffer);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
     _fireRows(s, (rt + r - 1) ~/ r);
   }
 
@@ -570,9 +570,9 @@ $bodyB
         key,
         () => _sh(_qmvSrc(w.rows, w.cols, w.type, tag,
             threadsPerRow: t, sharedX: xs, accumPlain: true)));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('x', src);
-    s.setBufferFire('y', _x);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('x', src);
+    s.setBuffer('y', _x);
     _fireRows(s, (w.rows + 256 ~/ t - 1) ~/ (256 ~/ t));
   }
 
@@ -660,9 +660,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   quantizeBlock(blk, 0u, lid.x);
 }
 ''');
-    s.setBufferFire('xin', src);
-    s.setBufferFire('xq', xq);
-    s.setBufferFire('xsc', xsc);
+    s.setBuffer('xin', src);
+    s.setBuffer('xq', xq);
+    s.setBuffer('xsc', xsc);
     _fireRows(s, nb);
   }
 
@@ -711,9 +711,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   if (ln == 0u && ok) { xsc[blk] = scale; }
 }
 ''');
-    s.setBufferFire('xin', src);
-    s.setBufferFire('xq', xq);
-    s.setBufferFire('xsc', xsc);
+    s.setBuffer('xin', src);
+    s.setBuffer('xq', xq);
+    s.setBuffer('xsc', xsc);
     _fireRows(s, (nb + 7) ~/ 8);
   }
 
@@ -955,10 +955,10 @@ $reduce
   }
 }
 ''');
-      s.setBufferFire('wq', stack.buffer);
-      s.setBufferFire('x', x);
-      s.setBufferFire('y', y);
-      s.setBufferFire('idxb', _topkIdx);
+      s.setBuffer('wq', stack.buffer);
+      s.setBuffer('x', x);
+      s.setBuffer('y', y);
+      s.setBuffer('idxb', _topkIdx);
       _fireRowsZ(s, (stack.rows + r - 1) ~/ r, topK);
     }
 
@@ -1004,11 +1004,11 @@ $body
   if (row < ROWS) { y[slot * ROWS + row] = acc; }
 }
 ''');
-      s.setBufferFire('wq', stack.buffer);
-      s.setBufferFire('xq', xq);
-      s.setBufferFire('xsc', xsc);
-      s.setBufferFire('y', y);
-      s.setBufferFire('idxb', _topkIdx);
+      s.setBuffer('wq', stack.buffer);
+      s.setBuffer('xq', xq);
+      s.setBuffer('xsc', xsc);
+      s.setBuffer('y', y);
+      s.setBuffer('idxb', _topkIdx);
       s.dispatchFire((stack.rows + 255) ~/ 256, 1, topK);
     }
 
@@ -1078,11 +1078,11 @@ $bodyU
   }
 }
 ''');
-      s.setBufferFire('wq', gkk.buffer);
-      s.setBufferFire('wqu', ukk.buffer);
-      s.setBufferFire('x', _xn);
-      s.setBufferFire('y', y);
-      s.setBufferFire('idxb', _topkIdx);
+      s.setBuffer('wq', gkk.buffer);
+      s.setBuffer('wqu', ukk.buffer);
+      s.setBuffer('x', _xn);
+      s.setBuffer('y', y);
+      s.setBuffer('idxb', _topkIdx);
       s.dispatchFire((gkk.rows + r - 1) ~/ r, 1, topK * 2);
     }
 
@@ -1142,10 +1142,10 @@ $body
   if (trd == 0u && row < ROWS) { y[slot * ROWS + row] = scratch[lid.x]; }
 }
 ''');
-      s.setBufferFire('wq', dkk.buffer);
-      s.setBufferFire('gu', gu);
-      s.setBufferFire('y', y);
-      s.setBufferFire('idxb', _topkIdx);
+      s.setBuffer('wq', dkk.buffer);
+      s.setBuffer('gu', gu);
+      s.setBuffer('y', y);
+      s.setBuffer('idxb', _topkIdx);
       s.dispatchFire((dkk.rows + r - 1) ~/ r, 1, topK);
     }
 
@@ -1191,9 +1191,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   prod[i] = (gv / (1.0 + exp(-gv))) * u[i];
 }
 ''');
-    sm.setBufferFire('g', _gExpAll!);
-    sm.setBufferFire('u', _uExpAll!);
-    sm.setBufferFire('prod', _prodExpAll!);
+    sm.setBuffer('g', _gExpAll!);
+    sm.setBuffer('u', _uExpAll!);
+    sm.setBuffer('prod', _prodExpAll!);
     _fireLinear(sm, topK * interRows);
 
     // down: ydown[slot*dim + row] = Wdown[idxb[slot]] @ prod[slot], all slots.
@@ -1257,10 +1257,10 @@ $reduce
   }
 }
 ''');
-      s.setBufferFire('wq', dk.buffer);
-      s.setBufferFire('x', _prodExpAll!);
-      s.setBufferFire('y', _downExpAll!);
-      s.setBufferFire('idxb', _topkIdx);
+      s.setBuffer('wq', dk.buffer);
+      s.setBuffer('x', _prodExpAll!);
+      s.setBuffer('y', _downExpAll!);
+      s.setBuffer('idxb', _topkIdx);
       _fireRowsZ(s, (dk.rows + r - 1) ~/ r, topK);
     }
     } // end !fuse2
@@ -1287,13 +1287,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   ${directX && hasSh ? 'ffn[row] = ffn[row] + shout[row] + acc;' : 'ffn[row] = ffn[row] + acc;'}
 }
 ''');
-    cb.setBufferFire('ydown', _downExpAll!);
-    cb.setBufferFire('wsel', _topkW);
+    cb.setBuffer('ydown', _downExpAll!);
+    cb.setBuffer('wsel', _topkW);
     // directX: this IS the residual add — the single write folds the shared
     // expert's gated output and every routed slot straight into x, so the
     // ffnOut zero pass and the res_ffn add both disappear.
-    cb.setBufferFire('ffn', directX ? _x : _ffnOut);
-    if (directX && hasSh) cb.setBufferFire('shout', _shOut!);
+    cb.setBuffer('ffn', directX ? _x : _ffnOut);
+    if (directX && hasSh) cb.setBuffer('shout', _shOut!);
     _fireLinear(cb, dim);
   }
 
@@ -1344,9 +1344,9 @@ ${_reduceSum(256)}
   }
 }
 ''');
-    s.setBufferFire('input', input);
-    s.setBufferFire('w', weight);
-    s.setBufferFire('output', output);
+    s.setBuffer('input', input);
+    s.setBuffer('w', weight);
+    s.setBuffer('output', output);
     s.dispatchFire(1, 1, 1);
   }
 
@@ -1363,8 +1363,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   x[i] = x[i] + a[i];
 }
 ''');
-    s.setBufferFire('x', x);
-    s.setBufferFire('a', a);
+    s.setBuffer('x', x);
+    s.setBuffer('a', a);
     _fireLinear(s, dim);
   }
 
@@ -1380,7 +1380,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   y[i] = 0.0;
 }
 ''');
-    s.setBufferFire('y', y);
+    s.setBuffer('y', y);
     _fireLinear(s, n);
   }
 
@@ -1399,9 +1399,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   prod[i] = (gv / (1.0 + exp(-gv))) * u[i];
 }
 ''');
-    s.setBufferFire('g', g);
-    s.setBufferFire('u', u);
-    s.setBufferFire('prod', prod);
+    s.setBuffer('g', g);
+    s.setBuffer('u', u);
+    s.setBuffer('prod', prod);
     _fireLinear(s, n);
   }
 
@@ -1435,10 +1435,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   pout[V + h] = 1.0 / (1.0 + exp(-betaraw[h]));
 }
 ''');
-    pk.setBufferFire('alpha', _alphaRaw!);
-    pk.setBufferFire('betaraw', _betaRaw!);
-    pk.setBufferFire('consts', st.deltaConsts!);
-    pk.setBufferFire('pout', _dParams!);
+    pk.setBuffer('alpha', _alphaRaw!);
+    pk.setBuffer('betaraw', _betaRaw!);
+    pk.setBuffer('consts', st.deltaConsts!);
+    pk.setBuffer('pout', _dParams!);
     pk.dispatchFire((v + 63) ~/ 64, 1, 1);
   }
 
@@ -1515,11 +1515,11 @@ ${_reduceSum(256)}
 }
 ''');
     });
-    s.setBufferFire('wq', d.wBeta.buffer);
-    s.setBufferFire('wqa', d.wAlpha.buffer);
-    s.setBufferFire('x', _xn);
-    s.setBufferFire('consts', st.deltaConsts!);
-    s.setBufferFire('pout', _dParams!);
+    s.setBuffer('wq', d.wBeta.buffer);
+    s.setBuffer('wqa', d.wAlpha.buffer);
+    s.setBuffer('x', _xn);
+    s.setBuffer('consts', st.deltaConsts!);
+    s.setBuffer('pout', _dParams!);
     s.dispatchFire(2 * v, 1, 1);
   }
 
@@ -1602,10 +1602,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 }
 ''');
     if (!noConv) {
-      conv.setBufferFire('w', d.convWeight.buffer);
-      conv.setBufferFire('hist', d.convState.buffer);
-      conv.setBufferFire('cur', catQ ? _qkvz! : _qkv!);
-      conv.setBufferFire('outv', _convOut!);
+      conv.setBuffer('w', d.convWeight.buffer);
+      conv.setBuffer('hist', d.convState.buffer);
+      conv.setBuffer('cur', catQ ? _qkvz! : _qkv!);
+      conv.setBuffer('outv', _convOut!);
       _fireLinear(conv, d.convDim);
     }
 
@@ -1643,9 +1643,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
 }
 ''');
     if (!noConv) {
-      l2.setBufferFire('conv', _convOut!);
-      l2.setBufferFire('qn', _qn!);
-      l2.setBufferFire('kn', _kn!);
+      l2.setBuffer('conv', _convOut!);
+      l2.setBuffer('qn', _qn!);
+      l2.setBuffer('kn', _kn!);
       l2.dispatchFire(2 * d.kHeads, 1, 1);
     }
 
@@ -1741,12 +1741,12 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
 }
 ''');
       if (!noRec) {
-        rec.setBufferFire('q', _qn!);
-        rec.setBufferFire('k', _kn!);
-        rec.setBufferFire('conv', _convOut!);
-        rec.setBufferFire('state', d.ssmState.buffer);
-        rec.setBufferFire('outv', _core!);
-        rec.setBufferFire('params', _dParams!);
+        rec.setBuffer('q', _qn!);
+        rec.setBuffer('k', _kn!);
+        rec.setBuffer('conv', _convOut!);
+        rec.setBuffer('state', d.ssmState.buffer);
+        rec.setBuffer('outv', _core!);
+        rec.setBuffer('params', _dParams!);
         rec.dispatchFire(wgPerHead, d.vHeads, 1);
       }
       _fireGatedNorm(d, hd, catQ);
@@ -1820,14 +1820,14 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
 }
 ''');
       if (!noRec) {
-        rec.setBufferFire('q', _qn!);
-        rec.setBufferFire('k', _kn!);
-        rec.setBufferFire('conv', _convOut!);
-        rec.setBufferFire('state', d.ssmState.buffer);
-        rec.setBufferFire('params', _dParams!);
-        rec.setBufferFire('z', catQ ? _qkvz! : _z!);
-        rec.setBufferFire('nw', d.ssmNorm.buffer);
-        rec.setBufferFire('outb', _dGated!);
+        rec.setBuffer('q', _qn!);
+        rec.setBuffer('k', _kn!);
+        rec.setBuffer('conv', _convOut!);
+        rec.setBuffer('state', d.ssmState.buffer);
+        rec.setBuffer('params', _dParams!);
+        rec.setBuffer('z', catQ ? _qkvz! : _z!);
+        rec.setBuffer('nw', d.ssmNorm.buffer);
+        rec.setBuffer('outb', _dGated!);
         rec.dispatchFire(d.vHeads, 1, 1);
       }
       if (!noOut) _fireOutProj(d.wOut, 'dn_out', _dGated!);
@@ -1885,12 +1885,12 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   outv[h * D + j] = o;
 }
 ''');
-    rec.setBufferFire('q', _qn!);
-    rec.setBufferFire('k', _kn!);
-    rec.setBufferFire('conv', _convOut!);
-    rec.setBufferFire('state', d.ssmState.buffer);
-    rec.setBufferFire('outv', _core!);
-    rec.setBufferFire('params', _dParams!);
+    rec.setBuffer('q', _qn!);
+    rec.setBuffer('k', _kn!);
+    rec.setBuffer('conv', _convOut!);
+    rec.setBuffer('state', d.ssmState.buffer);
+    rec.setBuffer('outv', _core!);
+    rec.setBuffer('params', _dParams!);
     if (!skipRec) {
       rec.dispatchFire(d.vHeads, 1, 1);
     }
@@ -1931,10 +1931,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   outb[h * D + lid.x] = v * inv * nw[lid.x] * (zv / (1.0 + exp(-zv)));
 }
 ''');
-    gn.setBufferFire('core', _core!);
-    gn.setBufferFire('z', catQ ? _qkvz! : _z!);
-    gn.setBufferFire('nw', d.ssmNorm.buffer);
-    gn.setBufferFire('outb', _dGated!);
+    gn.setBuffer('core', _core!);
+    gn.setBuffer('z', catQ ? _qkvz! : _z!);
+    gn.setBuffer('nw', d.ssmNorm.buffer);
+    gn.setBuffer('outb', _dGated!);
     gn.dispatchFire(d.vHeads, 1, 1);
   }
 
@@ -2021,16 +2021,16 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   }
 }
 ''');
-    prep.setBufferFire('qfull', _qFull!);
-    prep.setBufferFire('kraw', _kRaw!);
-    prep.setBufferFire('vraw', _vRaw!);
-    prep.setBufferFire('qnw', a.qNorm.buffer);
-    prep.setBufferFire('knw', a.kNorm.buffer);
-    prep.setBufferFire('posb', _pos);
-    prep.setBufferFire('qout', _q!);
-    prep.setBufferFire('gateout', _gate!);
-    prep.setBufferFire('kcache', st.kCache!);
-    prep.setBufferFire('vcache', st.vCache!);
+    prep.setBuffer('qfull', _qFull!);
+    prep.setBuffer('kraw', _kRaw!);
+    prep.setBuffer('vraw', _vRaw!);
+    prep.setBuffer('qnw', a.qNorm.buffer);
+    prep.setBuffer('knw', a.kNorm.buffer);
+    prep.setBuffer('posb', _pos);
+    prep.setBuffer('qout', _q!);
+    prep.setBuffer('gateout', _gate!);
+    prep.setBuffer('kcache', st.kCache!);
+    prep.setBuffer('vcache', st.vCache!);
     prep.dispatchFire(a.heads + a.kvHeads, 1, 1);
 
     // Scores: one workgroup per (t, head); seqLen enters as the DISPATCH
@@ -2061,9 +2061,9 @@ ${_reduceSum(hd)}
   if (lid.x == 0u) { sc[h * MAXSEQ + t] = scratch[0] * SCALE; }
 }
 ''');
-    sc.setBufferFire('qb', _q!);
-    sc.setBufferFire('kcache', st.kCache!);
-    sc.setBufferFire('sc', _scores!);
+    sc.setBuffer('qb', _q!);
+    sc.setBuffer('kcache', st.kCache!);
+    sc.setBuffer('sc', _scores!);
     sc.dispatchFire(pos + 1, a.heads, 1);
 
     // Softmax over the live prefix + weighted-V + sigmoid output gate, one
@@ -2119,11 +2119,11 @@ ${_reduceSum(hd)}
   outb[h * D + lid.x] = (acc / total) * (1.0 / (1.0 + exp(-gv)));
 }
 ''');
-    sv.setBufferFire('sc', _scores!);
-    sv.setBufferFire('vcache', st.vCache!);
-    sv.setBufferFire('gateb', _gate!);
-    sv.setBufferFire('posb', _pos);
-    sv.setBufferFire('outb', _gated!);
+    sv.setBuffer('sc', _scores!);
+    sv.setBuffer('vcache', st.vCache!);
+    sv.setBuffer('gateb', _gate!);
+    sv.setBuffer('posb', _pos);
+    sv.setBuffer('outb', _gated!);
     sv.dispatchFire(a.heads, 1, 1);
 
     _fireOutProj(a.wo, 'attn_wo', _gated!);
@@ -2205,12 +2205,12 @@ ${_reduceSum(256)}
 ${foldGate ? '  if (lid.x == 0u && row == ROWS) { outs[0] = 1.0 / (1.0 + exp(-scratch[0])); }' : ''}
 }
 ''');
-    rt.setBufferFire('wf', m.router.buffer);
-    rt.setBufferFire('x', _xn);
-    rt.setBufferFire('y', _routLogits);
+    rt.setBuffer('wf', m.router.buffer);
+    rt.setBuffer('x', _xn);
+    rt.setBuffer('y', _routLogits);
     if (foldGate) {
-      rt.setBufferFire('wsh', m.sharedGate!.buffer);
-      rt.setBufferFire('outs', _shScalar!);
+      rt.setBuffer('wsh', m.sharedGate!.buffer);
+      rt.setBuffer('outs', _shScalar!);
     }
     if (!skipRoute) _fireRows(rt, foldGate ? experts + 1 : experts);
 
@@ -2278,9 +2278,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   }
 }
 ''');
-    tk.setBufferFire('lg', _routLogits);
-    tk.setBufferFire('idxout', _topkIdx);
-    tk.setBufferFire('wout', _topkW);
+    tk.setBuffer('lg', _routLogits);
+    tk.setBuffer('idxout', _topkIdx);
+    tk.setBuffer('wout', _topkW);
     if (!skipRoute) tk.dispatchFire(1, 1, 1);
 
     // Quantize the normed hidden state to int8 ONCE for the dp4a path;
@@ -2319,9 +2319,9 @@ ${_reduceSum(256)}
   if (lid.x == 0u) { outs[0] = 1.0 / (1.0 + exp(-scratch[0])); }
 }
 ''');
-      sg.setBufferFire('w', m.sharedGate!.buffer);
-      sg.setBufferFire('x', _xn);
-      sg.setBufferFire('outs', _shScalar!);
+      sg.setBuffer('w', m.sharedGate!.buffer);
+      sg.setBuffer('x', _xn);
+      sg.setBuffer('outs', _shScalar!);
       sg.dispatchFire(1, 1, 1);
       } // end !foldGate (otherwise the router computed the gate)
 
@@ -2385,10 +2385,10 @@ $body
 }
 ''');
         if (directX) _shOut ??= _f32(dim);
-        s.setBufferFire('wq', dsh.buffer);
-        s.setBufferFire('gu', _guSh!);
-        s.setBufferFire('y', directX ? _shOut! : _ffnOut);
-        s.setBufferFire('wsel', _shScalar!);
+        s.setBuffer('wq', dsh.buffer);
+        s.setBuffer('gu', _guSh!);
+        s.setBuffer('y', directX ? _shOut! : _ffnOut);
+        s.setBuffer('wsel', _shScalar!);
         s.dispatchFire((dsh.rows + r - 1) ~/ r, 1, 1);
       } else {
         if (shDp4a) {
@@ -2483,7 +2483,7 @@ $body
 @compute @workgroup_size(1)
 fn main() { pos[0] = pos[0] + 1u; }
 ''');
-      s.setBufferFire('pos', _pos);
+      s.setBuffer('pos', _pos);
       s.dispatchFire(1, 1, 1);
     } else {
       final posData = Uint32List(4);
@@ -2623,9 +2623,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   }
 }
 ''');
-    s1.setBufferFire('logits', _logits!);
-    s1.setBufferFire('pv', _amaxV!);
-    s1.setBufferFire('pi', _amaxI!);
+    s1.setBuffer('logits', _logits!);
+    s1.setBuffer('pv', _amaxV!);
+    s1.setBuffer('pi', _amaxI!);
     s1.dispatchFire(_amaxWgs, 1, 1);
 
     final s2 = _sh('''
@@ -2660,9 +2660,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   if (lid.x == 0u) { tok[0] = si[0]; }
 }
 ''');
-    s2.setBufferFire('pv', _amaxV!);
-    s2.setBufferFire('pi', _amaxI!);
-    s2.setBufferFire('tok', _amaxTok!);
+    s2.setBuffer('pv', _amaxV!);
+    s2.setBuffer('pi', _amaxI!);
+    s2.setBuffer('tok', _amaxTok!);
     s2.dispatchFire(1, 1, 1);
   }
 
@@ -2888,8 +2888,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   }
 }
 '''));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('w16', _pwF16!);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('w16', _pwF16!);
     _fireLinear(s, n ~/ 32);
   }
 
@@ -2938,10 +2938,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   if (row < R && tok < T) { y[tok * R + row] = acc; }
 }
 '''));
-    s.setBufferFire('w16', w16 ?? _pwF16!);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
-    s.setBufferFire('pT', _pT!);
+    s.setBuffer('w16', w16 ?? _pwF16!);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
+    s.setBuffer('pT', _pT!);
     s.dispatchFire((rows + 15) ~/ 16, (T + 15) ~/ 16, 1);
   }
 
@@ -2980,9 +2980,9 @@ ${_reduceSum(256)}
   if (lid.x == 0u && row < ROWS) { y[t * ROWS + row] = scratch[0]; }
 }
 '''));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
     _fireRowsZ(s, w.rows, T);
   }
 
@@ -3016,9 +3016,9 @@ ${_reduceSum(256)}
   }
 }
 ''');
-    s.setBufferFire('input', input);
-    s.setBufferFire('w', weight);
-    s.setBufferFire('output', output);
+    s.setBuffer('input', input);
+    s.setBuffer('w', weight);
+    s.setBuffer('output', output);
     s.dispatchFire(T, 1, 1);
   }
 
@@ -3035,8 +3035,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   x[i] = x[i] + a[i];
 }
 ''');
-    s.setBufferFire('x', x);
-    s.setBufferFire('a', a);
+    s.setBuffer('x', x);
+    s.setBuffer('a', a);
     _fireLinear(s, n);
   }
 
@@ -3118,16 +3118,16 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   }
 }
 ''');
-    prep.setBufferFire('qfull', _pqFull!);
-    prep.setBufferFire('kraw', _pkRaw!);
-    prep.setBufferFire('vraw', _pvRaw!);
-    prep.setBufferFire('qnw', a.qNorm.buffer);
-    prep.setBufferFire('knw', a.kNorm.buffer);
-    prep.setBufferFire('posb', _pos);
-    prep.setBufferFire('qout', _pq!);
-    prep.setBufferFire('gateout', _pgate!);
-    prep.setBufferFire('kcache', st.kCache!);
-    prep.setBufferFire('vcache', st.vCache!);
+    prep.setBuffer('qfull', _pqFull!);
+    prep.setBuffer('kraw', _pkRaw!);
+    prep.setBuffer('vraw', _pvRaw!);
+    prep.setBuffer('qnw', a.qNorm.buffer);
+    prep.setBuffer('knw', a.kNorm.buffer);
+    prep.setBuffer('posb', _pos);
+    prep.setBuffer('qout', _pq!);
+    prep.setBuffer('gateout', _pgate!);
+    prep.setBuffer('kcache', st.kCache!);
+    prep.setBuffer('vcache', st.vCache!);
     prep.dispatchFire(a.heads + a.kvHeads, 1, T);
 
     // Causal attention per (token, head): scores live in workgroup shared
@@ -3200,12 +3200,12 @@ ${_reduceSum(hd)}
   outb[t * QDIM + h * D + lid.x] = (acc / total) * (1.0 / (1.0 + exp(-gv)));
 }
 ''');
-    sv.setBufferFire('qb', _pq!);
-    sv.setBufferFire('kcache', st.kCache!);
-    sv.setBufferFire('vcache', st.vCache!);
-    sv.setBufferFire('gateb', _pgate!);
-    sv.setBufferFire('posb', _pos);
-    sv.setBufferFire('outb', _pgated!);
+    sv.setBuffer('qb', _pq!);
+    sv.setBuffer('kcache', st.kCache!);
+    sv.setBuffer('vcache', st.vCache!);
+    sv.setBuffer('gateb', _pgate!);
+    sv.setBuffer('posb', _pos);
+    sv.setBuffer('outb', _pgated!);
     sv.dispatchFire(T, a.heads, 1);
 
     _fireQmvB(a.wo, 'attn_wo', _pgated!, _paOut!, T);
@@ -3259,10 +3259,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   pout[t * 2u * V + V + h] = 1.0 / (1.0 + exp(-betaraw[i]));
 }
 ''');
-    pk.setBufferFire('alpha', _palphaRaw!);
-    pk.setBufferFire('betaraw', _pbetaRaw!);
-    pk.setBufferFire('consts', st.deltaConsts!);
-    pk.setBufferFire('pout', _pdParams!);
+    pk.setBuffer('alpha', _palphaRaw!);
+    pk.setBuffer('betaraw', _pbetaRaw!);
+    pk.setBuffer('consts', st.deltaConsts!);
+    pk.setBuffer('pout', _pdParams!);
     final threads = T * v;
     final wg = (threads + 63) ~/ 64;
     pk.dispatchFire(wg == 0 ? 1 : wg, 1, 1);
@@ -3301,11 +3301,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   outv[i] = acc / (1.0 + exp(-acc));
 }
 ''');
-    conv.setBufferFire('w', d.convWeight.buffer);
-    conv.setBufferFire('hist', d.convState.buffer);
-    conv.setBufferFire('xin', _pqkv!);
-    conv.setBufferFire('outv', _pconvOut!);
-    conv.setBufferFire('pT', _pT!);
+    conv.setBuffer('w', d.convWeight.buffer);
+    conv.setBuffer('hist', d.convState.buffer);
+    conv.setBuffer('xin', _pqkv!);
+    conv.setBuffer('outv', _pconvOut!);
+    conv.setBuffer('pT', _pT!);
     _fireLinear(conv, T * d.convDim);
 
     // Roll history: hist[j] = raw input at chunk position T - HIST + j.
@@ -3328,9 +3328,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   hist[i] = xin[(pT[0] - HIST + j) * C + c];
 }
 ''');
-    roll.setBufferFire('hist', d.convState.buffer);
-    roll.setBufferFire('xin', _pqkv!);
-    roll.setBufferFire('pT', _pT!);
+    roll.setBuffer('hist', d.convState.buffer);
+    roll.setBuffer('xin', _pqkv!);
+    roll.setBuffer('pT', _pT!);
     _fireLinear(roll, histLen * d.convDim);
 
     final hd = d.headDim;
@@ -3367,9 +3367,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   if (isQ) { qn[dst] = o; } else { kn[dst] = o; }
 }
 ''');
-    l2.setBufferFire('conv', _pconvOut!);
-    l2.setBufferFire('qn', _pqn!);
-    l2.setBufferFire('kn', _pkn!);
+    l2.setBuffer('conv', _pconvOut!);
+    l2.setBuffer('qn', _pqn!);
+    l2.setBuffer('kn', _pkn!);
     l2.dispatchFire(2 * d.kHeads, 1, T);
 
     // Rows per recurrence workgroup: a divisor of D fitting the 32KB
@@ -3448,12 +3448,12 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   }
 }
 ''');
-    rec.setBufferFire('q', _pqn!);
-    rec.setBufferFire('k', _pkn!);
-    rec.setBufferFire('conv', _pconvOut!);
-    rec.setBufferFire('state', d.ssmState.buffer);
-    rec.setBufferFire('outv', _pcore!);
-    rec.setBufferFire('params', _pdParams!);
+    rec.setBuffer('q', _pqn!);
+    rec.setBuffer('k', _pkn!);
+    rec.setBuffer('conv', _pconvOut!);
+    rec.setBuffer('state', d.ssmState.buffer);
+    rec.setBuffer('outv', _pcore!);
+    rec.setBuffer('params', _pdParams!);
     rec.dispatchFire(d.vHeads, hd ~/ rh, 1);
 
     final gn = _sh('''
@@ -3486,10 +3486,10 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   outb[base + lid.x] = v * inv * nw[lid.x] * (zv / (1.0 + exp(-zv)));
 }
 ''');
-    gn.setBufferFire('core', _pcore!);
-    gn.setBufferFire('z', _pz!);
-    gn.setBufferFire('nw', d.ssmNorm.buffer);
-    gn.setBufferFire('outb', _pdGated!);
+    gn.setBuffer('core', _pcore!);
+    gn.setBuffer('z', _pz!);
+    gn.setBuffer('nw', d.ssmNorm.buffer);
+    gn.setBuffer('outb', _pdGated!);
     gn.dispatchFire(d.vHeads, 1, T);
 
     _fireQmvB(d.wOut, 'dn_out', _pdGated!, _paOut!, T);
@@ -3570,12 +3570,12 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   }
 }
 ''');
-    prep.setBufferFire('idxb', _pTopkIdx!);
-    prep.setBufferFire('pT', _pT!);
-    prep.setBufferFire('off', _pExpOff!);
-    prep.setBufferFire('wl', _pWl!);
-    prep.setBufferFire('wlc', _pWlc!);
-    prep.setBufferFire('srt', _pSorted!);
+    prep.setBuffer('idxb', _pTopkIdx!);
+    prep.setBuffer('pT', _pT!);
+    prep.setBuffer('off', _pExpOff!);
+    prep.setBuffer('wl', _pWl!);
+    prep.setBuffer('wlc', _pWlc!);
+    prep.setBuffer('srt', _pSorted!);
     prep.dispatchFire(1, 1, 1);
   }
 
@@ -3731,14 +3731,14 @@ $redStore
   }
 }
 '''));
-    s.setBufferFire('wq', stack.buffer);
-    s.setBufferFire('x', x);
-    s.setBufferFire('y', y);
-    s.setBufferFire('srt', _pSorted!);
-    s.setBufferFire('off', _pExpOff!);
-    s.setBufferFire('wl', _pWl!);
-    s.setBufferFire('wlc', _pWlc!);
-    if (silu) s.setBufferFire('u4', fuseSiluU);
+    s.setBuffer('wq', stack.buffer);
+    s.setBuffer('x', x);
+    s.setBuffer('y', y);
+    s.setBuffer('srt', _pSorted!);
+    s.setBuffer('off', _pExpOff!);
+    s.setBuffer('wl', _pWl!);
+    s.setBuffer('wlc', _pWlc!);
+    if (silu) s.setBuffer('u4', fuseSiluU);
     final rowGroups = (stack.rows + _grpRPW - 1) ~/ _grpRPW;
     // Strict worklist bound: sum(ceil(cnt_e/TB)) <= ceil(T*K/TB) + E.
     final wlBound = (T * topK + _grpTB - 1) ~/ _grpTB + experts;
@@ -3881,14 +3881,14 @@ $redStore
   }
 }
 '''));
-    s.setBufferFire('wq', stack.buffer);
-    s.setBufferFire('xq', xq);
-    s.setBufferFire('xsc', xsc);
-    s.setBufferFire('y', y);
-    s.setBufferFire('srt', _pSorted!);
-    s.setBufferFire('off', _pExpOff!);
-    s.setBufferFire('wl', _pWl!);
-    s.setBufferFire('wlc', _pWlc!);
+    s.setBuffer('wq', stack.buffer);
+    s.setBuffer('xq', xq);
+    s.setBuffer('xsc', xsc);
+    s.setBuffer('y', y);
+    s.setBuffer('srt', _pSorted!);
+    s.setBuffer('off', _pExpOff!);
+    s.setBuffer('wl', _pWl!);
+    s.setBuffer('wlc', _pWlc!);
     final rowGroups = (stack.rows + _grpRPW - 1) ~/ _grpRPW;
     final wlBound = (T * topK + _grpTB - 1) ~/ _grpTB + experts;
     s.dispatchFire(rowGroups, wlBound, 1);
@@ -3999,11 +3999,11 @@ $redStore
 '''
             .replaceAll('PLACEHOLDER_ROUNDS',
                 '${(w.cols ~/ 32 + _grpTPR - 1) ~/ _grpTPR}')));
-    s.setBufferFire('wq', w.buffer);
-    s.setBufferFire('xq', xq);
-    s.setBufferFire('xsc', xsc);
-    s.setBufferFire('y', y);
-    s.setBufferFire('pT', _pT!);
+    s.setBuffer('wq', w.buffer);
+    s.setBuffer('xq', xq);
+    s.setBuffer('xsc', xsc);
+    s.setBuffer('y', y);
+    s.setBuffer('pT', _pT!);
     final rowGroups = (w.rows + _grpRPW - 1) ~/ _grpRPW;
     final tokTiles = (T + _grpTB - 1) ~/ _grpTB;
     s.dispatchFire(rowGroups, tokTiles, 1);
@@ -4043,9 +4043,9 @@ ${_reduceSum(256)}
   if (lid.x == 0u && row < ROWS) { y[t * ROWS + row] = scratch[0]; }
 }
 ''');
-    rt.setBufferFire('wf', m.router.buffer);
-    rt.setBufferFire('x', _pxn!);
-    rt.setBufferFire('y', _pRoutLogits!);
+    rt.setBuffer('wf', m.router.buffer);
+    rt.setBuffer('x', _pxn!);
+    rt.setBuffer('y', _pRoutLogits!);
     _fireRowsZ(rt, experts, T);
 
     // Per-token top-K: one workgroup per token.
@@ -4114,9 +4114,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
   }
 }
 ''');
-    tk.setBufferFire('lg', _pRoutLogits!);
-    tk.setBufferFire('idxout', _pTopkIdx!);
-    tk.setBufferFire('wout', _pTopkW!);
+    tk.setBuffer('lg', _pRoutLogits!);
+    tk.setBuffer('idxout', _pTopkIdx!);
+    tk.setBuffer('wout', _pTopkW!);
     tk.dispatchFire(T, 1, 1);
     if (mark != null) await mark('moe:route');
 
@@ -4165,9 +4165,9 @@ ${_reduceSum(256)}
   if (lid.x == 0u) { outs[t] = 1.0 / (1.0 + exp(-scratch[0])); }
 }
 ''');
-      sg.setBufferFire('w', m.sharedGate!.buffer);
-      sg.setBufferFire('x', _pxn!);
-      sg.setBufferFire('outs', _pShScalar!);
+      sg.setBuffer('w', m.sharedGate!.buffer);
+      sg.setBuffer('x', _pxn!);
+      sg.setBuffer('outs', _pShScalar!);
       sg.dispatchFire(T, 1, 1);
 
       _fireQmvB(m.gateShexp!, 'sh_gate', _pxn!, _pgSh!, T,
@@ -4218,10 +4218,10 @@ ${_reduceSum(256)}
   }
 }
 '''));
-      s.setBufferFire('wq', dsh.buffer);
-      s.setBufferFire('x', _pprodSh!);
-      s.setBufferFire('y', _pffn!);
-      s.setBufferFire('wsel', _pShScalar!);
+      s.setBuffer('wq', dsh.buffer);
+      s.setBuffer('x', _pprodSh!);
+      s.setBuffer('y', _pffn!);
+      s.setBuffer('wsel', _pShScalar!);
       _fireRowsZ(s, dsh.rows, T);
       }
     }
@@ -4266,10 +4266,10 @@ ${_reduceSum(256)}
   if (lid.x == 0u && row < ROWS) { y[z * ROWS + row] = scratch[0]; }
 }
 '''));
-      s.setBufferFire('wq', stack.buffer);
-      s.setBufferFire('x', x);
-      s.setBufferFire('y', y);
-      s.setBufferFire('idxb', _pTopkIdx!);
+      s.setBuffer('wq', stack.buffer);
+      s.setBuffer('x', x);
+      s.setBuffer('y', y);
+      s.setBuffer('idxb', _pTopkIdx!);
       _fireRowsZ(s, stack.rows, T * topK);
     }
 
@@ -4341,12 +4341,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
 ${withSh ? '  ffn[i] = shsc[t] * shd[i] + acc;' : grouped ? '  ffn[i] = acc;' : '  ffn[i] = ffn[i] + acc;'}
 }
 ''');
-    cb.setBufferFire('ydown', _pdownExp!);
-    cb.setBufferFire('wsel', _pTopkW!);
-    cb.setBufferFire('ffn', _pffn!);
+    cb.setBuffer('ydown', _pdownExp!);
+    cb.setBuffer('wsel', _pTopkW!);
+    cb.setBuffer('ffn', _pffn!);
     if (withSh) {
-      cb.setBufferFire('shd', _pshDown!);
-      cb.setBufferFire('shsc', _pShScalar!);
+      cb.setBuffer('shd', _pshDown!);
+      cb.setBuffer('shsc', _pShScalar!);
     }
     _fireLinear(cb, T * dim);
     if (mark != null) await mark('moe:comb');
@@ -4363,7 +4363,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   y[i] = 0.0;
 }
 ''');
-    s.setBufferFire('y', y);
+    s.setBuffer('y', y);
     _fireLinear(s, n);
   }
 
@@ -4381,9 +4381,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   prod[i] = (gv / (1.0 + exp(-gv))) * u[i];
 }
 ''');
-    s.setBufferFire('g', g);
-    s.setBufferFire('u', u);
-    s.setBufferFire('prod', prod);
+    s.setBuffer('g', g);
+    s.setBuffer('u', u);
+    s.setBuffer('prod', prod);
     _fireLinear(s, n);
   }
 
@@ -4513,9 +4513,9 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
     } else {
       throw Exception('embed gather unsupported for type ${embed.type}');
     }
-    s.setBufferFire('wq', embed.buffer);
-    s.setBufferFire('tok', tok);
-    s.setBufferFire('px', out);
+    s.setBuffer('wq', embed.buffer);
+    s.setBuffer('tok', tok);
+    s.setBuffer('px', out);
     final work = embed.type == GgmlType.q8_0 ? dim ~/ 32 : dim ~/ 2;
     s.dispatchFire((work + 255) ~/ 256, 1, T);
   }
@@ -4588,8 +4588,8 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>,
 @compute @workgroup_size(1)
 fn main() { h[${i}u] = t[0]; }
 ''');
-      cp.setBufferFire('t', _amaxTok!);
-      cp.setBufferFire('h', _tokHist!);
+      cp.setBuffer('t', _amaxTok!);
+      cp.setBuffer('h', _tokHist!);
       cp.dispatchFire(1, 1, 1);
     }
     final out = Uint32List(64);
@@ -4663,9 +4663,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) 
   x[i] = px[(pT[0] - 1u) * D + i];
 }
 ''');
-    cp.setBufferFire('px', _px!);
-    cp.setBufferFire('x', _x);
-    cp.setBufferFire('pT', _pT!);
+    cp.setBuffer('px', _px!);
+    cp.setBuffer('x', _x);
+    cp.setBuffer('pT', _pT!);
     _fireLinear(cp, dim);
     recordMicros += recSw.elapsedMicroseconds;
   }

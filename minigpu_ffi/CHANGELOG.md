@@ -1,5 +1,22 @@
 # minigpu_ffi CHANGELOG
 
+## 1.5.9
+
+- **`mgpuDestroyComputeShader` no longer deletes the shader inline** — it queues
+  the delete on the WebGPU FIFO (new `ComputeShader::destroyQueued`), so it lands
+  after any bind or dispatch already queued against that shader.
+  Required by the ordered binds in minigpu 1.5.9: `setBufferQueued` captures the
+  shader pointer and mutates its binding tables when the task runs, so an inline
+  delete freed the object under a pending bind. This retires the caller-side
+  constraint the fire-bind docs used to carry ("do not destroy the shader until a
+  read has been awaited").
+  Buffers are unaffected and still delete immediately — a queued bind captures
+  only the raw `WGPUBuffer` handle by value, never the `Buffer` object. Both
+  sites are commented with that asymmetry.
+  Safe against re-entrancy: the destructor enqueues its own handle-release task,
+  and the worker pops a task under `queueMutex` and runs it with the lock
+  released, so enqueueing from inside a task cannot deadlock.
+
 ## 1.5.8
 
 - **Fix: `MINIGPU_DAWN_DIR` was ignored when building through Flutter / dart

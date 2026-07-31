@@ -1,6 +1,6 @@
 name: minigpu_ffi
 description: FFI implementation of minigpu. A library that brings multiplatform GPU compute to Dart and Flutter using WebGPU and Google Dawn.
-version: 1.5.8
+version: 1.5.9
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu_ffi
 
 #####
@@ -10,10 +10,19 @@ environment:
   flutter: ">=1.20.0"
 
 dependencies:
+  # Native-assets build-hook deps. These MUST be real dependencies: a consumer
+  # never receives dev_dependencies, so hook/build.dart could not resolve its
+  # own imports and the native asset silently failed to build downstream.
+  # `dart pub publish` reports this as an error; it shipped anyway because
+  # publishing runs with validation skipped.
+  code_assets: ^1.2.1
+  hooks: ^2.0.2
+  logging: ^1.2.0
+  path: ^1.9.0
   flutter:
     sdk: flutter
   ffi: ^2.0.2
-  minigpu_platform_interface: 1.5.8
+  minigpu_platform_interface: ^1.5.9
   native_toolchain_cmake: ^0.2.4
 
 dev_dependencies:

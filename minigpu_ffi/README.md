@@ -140,6 +140,32 @@ Readbacks *did*: 8 reads of 2.72 MB, 1.098 → 0.465 ms of API time. Batched
 readback now sits at the hardware floor (submit 0.09 / map 0.24 at PCIe /
 memcpy-out 0.13 at host speed).
 
+## Ordering: binds, dispatches and destruction
+
+Three things run on the WebGPU thread's FIFO and are therefore ordered against
+each other: **buffer binds**, **dispatches**, and **shader destruction**.
+
+- `mgpuSetBufferFire` / `ComputeShader::setBufferQueued` enqueue the bind. As of
+  minigpu 1.5.9 the Dart facade routes *every* bind through this, so
+  `setBuffer` / `setBufferAtSlot` are correct with `dispatchFire` as well as
+  `dispatch`. Before that the binds ran inline and racing was silent: with
+  `dispatchFire`, every fired dispatch saw the LAST binding.
+- `mgpuDestroyComputeShader` queues the delete rather than freeing inline,
+  because a queued bind captures the shader pointer and mutates its binding
+  tables when it runs.
+- `mgpuDestroyBuffer` still frees inline, and that asymmetry is deliberate: a
+  queued bind captures only the raw `WGPUBuffer` handle **by value**, so it never
+  touches the `Buffer` object.
+
+What is **not** on that FIFO: `mgpuReadSync*` and `mgpuWrite*` run inline on the
+caller's thread. So `mgpuDispatch` followed by `mgpuReadSync` is racy for any
+caller — the read can overtake queued work. Use an awaited read (which flushes)
+as the synchronization point.
+
+Video textures are the remaining gap: `mgpuSetVideoTexture` binds inline and
+`mgpuDestroyVideoTexture` frees inline, so a texture-bound shader must use an
+**awaited** `dispatch`, never `dispatchFire`.
+
 ## GPU waits and the Windows timer quantum
 
 `drain_dawn_events_with_timeout` previously waited with a 1 ms timeout on a

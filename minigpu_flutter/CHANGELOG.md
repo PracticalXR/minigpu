@@ -1,3 +1,7 @@
+## 1.5.9
+
+- Version lockstep with minigpu 1.5.9; no API change.
+
 ## 1.5.8
 
 ## 1.5.7

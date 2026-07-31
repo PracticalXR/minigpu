@@ -73,10 +73,13 @@ Follows markdownlint rules:
 - No multiple consecutive blank lines (consolidates 3+ newlines to 2)
 """
 import os
+import sys
 import re
 import argparse
 import subprocess
 from datetime import datetime
+
+import release_checks
 
 def load_yaml_preserve_structure(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
@@ -364,6 +367,88 @@ def add_message_to_current_version(file_path, message):
 
 PACKAGES = ["minigpu", "minigpu_platform_interface", "minigpu_ffi", "minigpu_web", "gpu_tensor", "minigpu_view", "gpu_pipeline", "minigpu_flutter"]
 
+def read_local_versions(root_dir):
+    """Map every managed package to the version currently in its own pubspec.
+
+    Internal pins must name the SIBLING's version, not the version being
+    released. Those used to be the same number because every package moved in
+    lockstep; they are not any more (miniav_tools_codecs is on 0.6.x and
+    miniav_player on 0.2.x while the rest are on 0.5.x). Stamping one version
+    across every internal pin wrote `miniav_tools_codecs: 0.5.2` into
+    miniav_player — a version of that package that has never existed — and left
+    every other pin naming a stale release whose own constraints had since
+    moved. Local builds hide this completely, because pubspec_overrides.yaml
+    redirects each pin to a path; it only surfaces off-repo, as a version solve
+    that blames whichever pair of packages it noticed first.
+    """
+    versions = {}
+    for pkg in PACKAGES:
+        path = os.path.join(root_dir, pkg, "pubspec.yaml")
+        if not os.path.exists(path):
+            continue
+        with open(path, 'r', encoding='utf-8') as f:
+            m = re.search(r'^version:\s*(\S+)', f.read(), re.MULTILINE)
+        if m:
+            versions[pkg] = m.group(1)
+    return versions
+
+
+
+def main_sync():
+    """Rewrite every internal pin to the sibling's current on-disk version.
+
+    `version <v>` stamps one version across the whole family, which is correct
+    when they move in lockstep and wrong the moment they do not. Bumping a
+    single package by hand leaves every pin naming its predecessor, and
+    pubspec_overrides.yaml makes that invisible in-repo — the first symptom is a
+    consumer's version solve failing on a constraint nobody touched.
+
+    Run this after any hand edit to a version, and before publishing.
+    """
+    root_dir = os.path.dirname(os.path.abspath(__file__))
+    versions = read_local_versions(root_dir)
+    print("On-disk versions:")
+    for pkg, ver in versions.items():
+        print(f"  {pkg}: {ver}")
+
+    changed = False
+    for dir_name in PACKAGES:
+        pubspec_path = os.path.join(root_dir, dir_name, "pubspec.yaml")
+        if not os.path.exists(pubspec_path):
+            continue
+        content = load_yaml_preserve_structure(pubspec_path)
+        original = content
+        for pkg, ver in versions.items():
+            if pkg == dir_name:
+                continue  # a package never pins itself
+            # Normalise to a CARET range, never an exact pin.
+            #
+            # Exact internal pins turn every patch into a cascade: publishing
+            # miniav_tools_platform_interface 0.5.3 instantly made the already
+            # published miniav_tools 0.5.3 and miniav_tools_ffmpeg 0.5.3
+            # unsatisfiable alongside it, because they pinned 0.5.2 exactly and
+            # nothing in that set can move independently. Every fix then needs a
+            # fresh release of everything above it, which is how a one-line
+            # change became six. `dart pub publish` warns about this ("should
+            # allow more than one version") and it is worth listening to.
+            #
+            # Only rewrite an existing exact or caret pin; leave `path:` and any
+            # other form alone rather than guessing at its intent.
+            content = re.sub(
+                rf'^(\s+{re.escape(pkg)}:\s*)\^?[\d]+\.[\d]+\.[\d]+\S*$',
+                lambda m, v=ver: f'{m.group(1)}^{v}',
+                content, flags=re.MULTILINE)
+        if content != original:
+            with open(pubspec_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            print(f"  Updated pins: {pubspec_path}")
+            changed = True
+    if not changed:
+        print("All internal pins already match on-disk versions.")
+    return changed
+
+
+
 def main_version_update(version, is_release, message):
     root_dir = os.path.dirname(os.path.abspath(__file__))
     for dir_name in PACKAGES:
@@ -399,6 +484,9 @@ def main_change(packages_args, message):
             print(f"Warning: Package directory for {dir_name} not found")
 
 def main_publish():
+    if not release_checks.preflight(os.path.dirname(os.path.abspath(__file__)), PACKAGES):
+        print('Aborting publish. Override with `check` if you are certain.')
+        return
     root_dir = os.path.dirname(os.path.abspath(__file__))
     all_actions_successful = True
 
@@ -532,6 +620,10 @@ if __name__ == "__main__":
     change_parser.add_argument("message", help="Message to add to changelog (e.g., \"Fixed an issue with X\")")
     change_parser.add_argument("packages", nargs="*", help="Specific package names (comma or space separated). If empty, applies to all.")
     
+    subparsers.add_parser('check', help='Pre-publish checks: pin drift, stale published constraints, unbumped versions, publish validation.')
+
+    subparsers.add_parser('sync', help="Rewrite internal pins to each sibling's on-disk version (caret).")
+
     publish_parser = subparsers.add_parser('publish', help='Prepares all packages for release and attempts to publish them.')
     
     args = parser.parse_args()
@@ -540,6 +632,10 @@ if __name__ == "__main__":
         main_version_update(args.version, args.release, args.message)
     elif args.command == 'change':
         main_change(args.packages, args.message)
+    elif args.command == 'sync':
+        main_sync()
+    elif args.command == 'check':
+        sys.exit(0 if release_checks.preflight(os.path.dirname(os.path.abspath(__file__)), PACKAGES) else 1)
     elif args.command == 'publish':
         main_publish()
     else:

@@ -61,6 +61,15 @@ public:
   void dispatchAsync(int groupsX, int groupsY, int groupsZ,
                      std::function<void()> callback = nullptr);
 
+  // Queues `delete this` on the WebGPU FIFO instead of deleting inline.
+  //
+  // Binds are queued (see setBufferQueued) and capture `this` to mutate the
+  // binding tables when they run, so an INLINE delete would free the object out
+  // from under a pending bind. Buffers do not have this problem — a queued bind
+  // captures only the raw WGPUBuffer handle by value — which is why
+  // mgpuDestroyBuffer can delete immediately and this cannot.
+  void destroyQueued();
+
 private:
   MGPU &mgpu;
   std::string shaderCode;

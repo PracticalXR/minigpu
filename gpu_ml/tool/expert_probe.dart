@@ -173,16 +173,16 @@ Future<void> main() async {
 
   const t = 16;
   final sGU = gpu.createComputeShader()..loadKernelString(gateUpKernel(t));
-  sGU.setBufferFire('wq', wg);
-  sGU.setBufferFire('wqu', wu);
-  sGU.setBufferFire('x', x);
-  sGU.setBufferFire('y', guOut);
-  sGU.setBufferFire('idxb', idxb);
+  sGU.setBuffer('wq', wg);
+  sGU.setBuffer('wqu', wu);
+  sGU.setBuffer('x', x);
+  sGU.setBuffer('y', guOut);
+  sGU.setBuffer('idxb', idxb);
   final sD = gpu.createComputeShader()..loadKernelString(downKernel(t));
-  sD.setBufferFire('wq', wd);
-  sD.setBufferFire('gu', guOut);
-  sD.setBufferFire('y', yOut);
-  sD.setBufferFire('idxb', idxb);
+  sD.setBuffer('wq', wd);
+  sD.setBuffer('gu', guOut);
+  sD.setBuffer('y', yOut);
+  sD.setBuffer('idxb', idxb);
 
   final guWgs = (interRows + (256 ~/ t) - 1) ~/ (256 ~/ t);
   final dWgs = (dim + (256 ~/ t) - 1) ~/ (256 ~/ t);
@@ -258,10 +258,10 @@ Future<void> main() async {
         final s = Platform.environment['PROBE_PIN'] == '1'
             ? 0
             : blk % stacksG.length;
-        sGU.setBufferFire('wq', stacksG[s]);
-        sGU.setBufferFire('wqu', stacksU[s]);
+        sGU.setBuffer('wq', stacksG[s]);
+        sGU.setBuffer('wqu', stacksU[s]);
         sGU.dispatchFire(guWgs, 1, topK * 2);
-        sD.setBufferFire('wq', stacksD[s]);
+        sD.setBuffer('wq', stacksD[s]);
         sD.dispatchFire(dWgs, 1, topK);
       }
       await yOut.read(tmp, 4);
@@ -272,9 +272,9 @@ Future<void> main() async {
     stdout.writeln('$label  ${best.toStringAsFixed(2)} ms/token '
         '(${(bytes / (best / 1000) / 1e9).toStringAsFixed(0)} GB/s)');
     // Restore stack 0 bindings for later cases.
-    sGU.setBufferFire('wq', wg);
-    sGU.setBufferFire('wqu', wu);
-    sD.setBufferFire('wq', wd);
+    sGU.setBuffer('wq', wg);
+    sGU.setBuffer('wqu', wu);
+    sD.setBuffer('wq', wd);
   }
 
   final n = blocksPerToken * topK;

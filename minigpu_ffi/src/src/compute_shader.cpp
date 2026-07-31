@@ -51,6 +51,20 @@ void ComputeShader::cleanup() {
   // defer to destructor
 }
 
+void ComputeShader::destroyQueued() {
+  ComputeShader *self = this;
+  try {
+    // Lands after any bind/dispatch already queued against this shader. The
+    // destructor itself enqueues its handle-release task from inside this one;
+    // that re-entrant enqueue is safe because the worker pops a task under
+    // queueMutex and then runs it with the lock released.
+    mgpu.getWebGPUThread().enqueueAsync([self]() { delete self; });
+  } catch (...) {
+    // GPU thread already shut down: nothing can still be queued against us.
+    delete self;
+  }
+}
+
 void ComputeShader::loadKernelString(const std::string &kernelString) {
   if (kernelString.empty() || shaderCode == kernelString) {
     return; // No change, skip

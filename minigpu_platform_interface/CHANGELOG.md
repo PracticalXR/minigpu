@@ -1,5 +1,14 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.5.9
+
+- No interface change. Note for backend implementors: as of minigpu 1.5.9 the
+  facade routes ALL buffer binds through `PlatformComputeShader.setBufferFire`,
+  never `setBuffer`. A backend whose `setBufferFire` is not actually ordered
+  against its dispatches will corrupt fire-and-forget callers. The default
+  implementation delegates to `setBuffer`, which remains correct only for
+  inherently in-order backends (e.g. single-threaded web).
+
 ## 1.5.8
 
 All additions have concrete defaults, so a backend that `extends` these classes

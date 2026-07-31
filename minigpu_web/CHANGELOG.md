@@ -1,5 +1,11 @@
 # minigpu_web CHANGELOG
 
+## 1.5.9
+
+- Version lockstep with minigpu 1.5.9; no behavior change. `setBufferFire`
+  aliases `setBuffer` on web, which stays correct now that the facade always
+  binds through it — single-threaded wasm executes GPU tasks in call order.
+
 ## 1.5.8
 
 - Implement the new platform-interface members on web:

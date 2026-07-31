@@ -108,10 +108,10 @@ Future<void> main() async {
       try {
         final s = gpu.createComputeShader();
         s.loadKernelString(kernel(rows, cols, t, slots: slots));
-        s.setBufferFire('wq', wq);
-        s.setBufferFire('x', x);
-        s.setBufferFire('y', y);
-        s.setBufferFire('idxb', idxb);
+        s.setBuffer('wq', wq);
+        s.setBuffer('x', x);
+        s.setBuffer('y', y);
+        s.setBuffer('idxb', idxb);
         final wgs = (rows + r - 1) ~/ r;
         s.dispatchFire(wgs, 1, slots ? topK : 1);
         await y.read(tmp, 4);

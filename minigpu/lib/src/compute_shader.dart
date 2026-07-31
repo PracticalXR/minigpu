@@ -32,6 +32,11 @@ final class ComputeShader {
   bool hasKernel() => _shader.hasKernel();
 
   /// Sets a buffer for the specified kernel and tag.
+  ///
+  /// The bind joins the WebGPU-thread FIFO, so it is ordered against dispatches
+  /// however they were issued — including [dispatchFire]. Each queued dispatch
+  /// sees the binds queued before it, which makes bind → fire → rebind → fire
+  /// correct on a single shader.
   void setBuffer(String tag, Buffer buffer) {
     try {
       if (!_kernelTags.containsKey(tag)) {
@@ -39,22 +44,19 @@ final class ComputeShader {
       } else {
         _kernelTags[tag] = _kernelTags[tag]!;
       }
-      _shader.setBuffer(_kernelTags[tag]!, buffer.platformBuffer!);
+      _shader.setBufferFire(_kernelTags[tag]!, buffer.platformBuffer!);
     } catch (e, stackTrace) {
       print('Error setting buffer for tag $tag: $e\n$stackTrace');
       throw Exception('Failed to set buffer for tag $tag: $e');
     }
   }
 
-  /// Ordered variant of [setBuffer] for fire-and-forget hot paths: the bind
-  /// joins the WebGPU-thread FIFO, so rebinding between [dispatchFire] calls
-  /// is race-free (each queued dispatch snapshots the binds queued before
-  /// it).  Do not destroy the shader or the buffer until a later buffer read
-  /// has been awaited (reads flush the FIFO).
-  void setBufferFire(String tag, Buffer buffer) {
-    _kernelTags.putIfAbsent(tag, () => _kernelTags.length);
-    _shader.setBufferFire(_kernelTags[tag]!, buffer.platformBuffer!);
-  }
+  /// Deprecated alias for [setBuffer], which is now always ordered.
+  @Deprecated(
+    'Binds are always ordered as of 1.5.9 — use setBuffer. '
+    'This alias will be removed in a future release.',
+  )
+  void setBufferFire(String tag, Buffer buffer) => setBuffer(tag, buffer);
 
   /// Sets a buffer at an explicit binding [slot] index.
   ///
@@ -62,7 +64,7 @@ final class ComputeShader {
   /// with buffer bindings in the same shader, where slot numbers must be
   /// coordinated explicitly rather than derived from tag insertion order.
   void setBufferAtSlot(int slot, Buffer buffer) {
-    _shader.setBuffer(slot, buffer.platformBuffer!);
+    _shader.setBufferFire(slot, buffer.platformBuffer!);
   }
 
   /// WebGPU caps the workgroup count at 65535 PER DIMENSION. A dispatch that

@@ -1,4 +1,17 @@
-## 1.5.9 (unreleased)
+# minigpu_view CHANGELOG
+
+## 1.5.10
+
+- Fixes the `miniav` constraint, which was still `^0.5.2` while miniav is at
+  0.7.0 — this package was the only thing blocking any consumer that depends on
+  both. Now `^0.7.0`.
+- The published 1.5.9 shipped `minigpu`/`minigpu_platform_interface` at 1.5.8;
+  those were bumped to 1.5.9 in the repo but never republished. This release
+  carries them.
+- TRAP: `pubspec_overrides.yaml` applies in-repo only, so a stale constraint here
+  is invisible locally and fails only for consumers.
+
+## 1.5.9
 
 - Web: the `webVideoFrame` present path now works. A raw JS `VideoFrame` cannot
   cross the method-channel `StandardMessageCodec`, so the plugin resolves a

@@ -71,8 +71,8 @@ Future<void> main() async {
     final it = (1 << 28) ~/ (wgs * 256);
     final s = gpu.createComputeShader();
     s.loadKernelString(streamKernel(it));
-    s.setBufferFire('xb', xb);
-    s.setBufferFire('yb', yb);
+    s.setBuffer('xb', xb);
+    s.setBuffer('yb', yb);
     s.dispatchFire(wgs, 1, 1);
     await yb.read(tmp, 4);
     double best = 0;
@@ -93,8 +93,8 @@ Future<void> main() async {
   stdout.writeln('--- per-dispatch overhead (fire-and-forget batch) ---');
   final s = gpu.createComputeShader();
   s.loadKernelString(tinyKernel);
-  s.setBufferFire('xb', xb);
-  s.setBufferFire('yb', yb);
+  s.setBuffer('xb', xb);
+  s.setBuffer('yb', yb);
   s.dispatchFire(1, 1, 1);
   await yb.read(tmp, 4);
   for (final n in [64, 256, 512]) {

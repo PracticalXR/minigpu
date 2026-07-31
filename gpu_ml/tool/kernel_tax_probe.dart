@@ -209,9 +209,9 @@ Future<void> main() async {
     try {
       final s = gpu.createComputeShader();
       s.loadKernelString(src);
-      s.setBufferFire('wq', wq);
-      s.setBufferFire(vec4x ? 'x4' : 'x', x);
-      s.setBufferFire('y', y);
+      s.setBuffer('wq', wq);
+      s.setBuffer(vec4x ? 'x4' : 'x', x);
+      s.setBuffer('y', y);
       s.dispatchFire(512, 1, 1);
       await y.read(tmp, 4);
       double bestUs = 1e18;

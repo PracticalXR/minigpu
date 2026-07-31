@@ -58,7 +58,10 @@ MGPUComputeShader *mgpuCreateComputeShader() {
 }
 
 void mgpuDestroyComputeShader(MGPUComputeShader *shader) {
-  delete reinterpret_cast<mgpu::ComputeShader *>(shader);
+  if (!shader) return;
+  // NOT an inline delete: binds are queued and capture the shader pointer, so
+  // deleting here would free it under a pending bind. See destroyQueued().
+  reinterpret_cast<mgpu::ComputeShader *>(shader)->destroyQueued();
 }
 
 void mgpuLoadKernel(MGPUComputeShader *shader, const char *kernelString) {

@@ -1,5 +1,33 @@
 # minigpu
 
+## 1.5.9
+
+- **`ComputeShader.setBuffer` and `setBufferAtSlot` are now always ORDERED** —
+  the bind joins the WebGPU-thread FIFO, so it is correct against `dispatchFire`
+  as well as `dispatch`. This removes a silent-corruption trap rather than
+  documenting it: the binds used to run inline on the caller's thread while
+  `dispatchFire` enqueued, so rebinds raced ahead and **every fired dispatch saw
+  the LAST binding**. Measured on a 3-iteration bind→fire→rebind→fire loop, the
+  old inline binds produced `[[0,0], [0,0], [31,31]]` — two destinations never
+  written, no error raised — where the ordered binds produce
+  `[[11,11], [21,21], [31,31]]`. Nothing prevented the bad pairing but choosing
+  the right one of four bind methods.
+- `ComputeShader.setBufferFire` is **deprecated** — it is now an alias for
+  `setBuffer`. `setBufferAtSlotFire` (added and never released during 1.5.9
+  development) is removed; use `setBufferAtSlot`.
+- **A compute shader is no longer destroyed inline.** `mgpuDestroyComputeShader`
+  queues the delete on the same FIFO, so it lands after any bind or dispatch
+  already queued against that shader. Ordered binds capture the shader pointer
+  to mutate its binding tables when they run, so an inline delete would free it
+  under a pending bind — the hazard `setBufferFire`'s docs previously pushed onto
+  callers ("do not destroy the shader until a read has been awaited"). That
+  constraint is now gone. (Buffers never had it: a queued bind captures only the
+  raw WGPU handle by value, which is why `mgpuDestroyBuffer` can still delete
+  immediately.)
+- New test `test/minigpu_fire_bind_test.dart`: fire-then-read synchronization,
+  rebind-between-fires ordering, equivalence with the fully awaited chain, and
+  the 65535 cap on `dispatchFire`.
+
 ## 1.5.8
 
 - **Breaking-ish fix: `Minigpu()` is now a per-isolate SINGLETON and the context

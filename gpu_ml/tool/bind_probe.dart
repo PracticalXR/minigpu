@@ -38,15 +38,15 @@ Future<void> main() async {
   final s = gpu.createComputeShader()..loadKernelString(kernel);
 
   Future<double> timed(List<Buffer> pool) async {
-    s.setBufferFire('a', pool[0]);
-    s.setBufferFire('b', out);
+    s.setBuffer('a', pool[0]);
+    s.setBuffer('b', out);
     s.dispatchFire(1, 1, 1);
     await out.read(tmp, 4);
     double best = 1e18;
     for (int rep = 0; rep < reps; rep++) {
       final sw = Stopwatch()..start();
       for (int i = 0; i < n; i++) {
-        s.setBufferFire('a', pool[i % pool.length]);
+        s.setBuffer('a', pool[i % pool.length]);
         s.dispatchFire(1, 1, 1);
       }
       await out.read(tmp, 4);
