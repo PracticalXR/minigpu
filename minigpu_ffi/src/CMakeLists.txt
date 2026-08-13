@@ -81,6 +81,24 @@ target_sources(${MAIN_LIB} PRIVATE ${MAIN_SOURCES})
 target_include_directories(${MAIN_LIB} PUBLIC ${MAIN_INCLUDES})
 target_compile_definitions(${MAIN_LIB} PUBLIC DART_SHARED_LIB)
 
+# ── Dart dynamic-linking API (native builds only) ──────────────────────────
+# third_party/dart_dl is a verbatim copy of the Dart SDK's include/ plus
+# dart_api_dl.c. It lets mgpu::Logger deliver log lines to a Dart NATIVE PORT
+# instead of an MGPULogCallback function pointer. The log registry is
+# PROCESS-GLOBAL: a Dart NativeCallable registered there outlives the isolate
+# that created it, and the VM aborts the whole process the moment a Dawn
+# worker thread logs afterwards. A stale port id is inert.
+#
+# Not built for web — a wasm module has no Dart VM to post to, and the glob
+# above only picks up .cpp so dart_api_dl.c is listed explicitly.
+if(NOT EMSCRIPTEN)
+    target_sources(${MAIN_LIB} PRIVATE
+        "${MAIN_PATH}/third_party/dart_dl/dart_api_dl.c")
+    target_include_directories(${MAIN_LIB} PRIVATE
+        "${MAIN_PATH}/third_party/dart_dl")
+    target_compile_definitions(${MAIN_LIB} PRIVATE MINIGPU_HAVE_DART_DL)
+endif()
+
 # ── Optional: fold EXTRA sources into the main target. Generic hook used to
 # build single-blob wasm modules that link client codecs against minigpu
 # in-module (e.g. the livetensor crosscoder, GSPLATS420_C_GPU_DESIGN.md §9).

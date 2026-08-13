@@ -1,5 +1,20 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- Add `MinigpuPlatform.drainWorkQueue()` — blocks until every GPU task already
+  queued on the native worker thread has run. Default implementation is a no-op,
+  so existing platform implementations (web) need no change.
+
+## 1.6.0
+
+- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
+  in this package.
+
 ## 1.5.9
 
 - No interface change. Note for backend implementors: as of minigpu 1.5.9 the

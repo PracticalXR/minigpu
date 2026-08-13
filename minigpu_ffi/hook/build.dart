@@ -18,6 +18,15 @@ void main(List<String> args) async {
       sourceDir.absolute.uri,
       logger,
     );
+    // EVERY C/C++ SOURCE IS A BUILD DEPENDENCY. Without this the hooks runner
+    // has no reason to re-run the hook when src/ changes, so it serves the
+    // PREVIOUSLY built DLL and edits appear to do nothing — a silent failure
+    // that costs hours, because the Dart side compiles fine and the old binary
+    // behaves exactly as it always did. (Symptom to recognise: a newly added
+    // export is missing from the DLL while the rest of the library works.
+    // Verify a NEW SYMBOL, never the mtime.)
+    _addSourceDependencies(sourceDir.absolute.uri, output);
+
     await runBuild(input, output, sourceDir.absolute.uri);
 
     final minigpuLib = await output.findAndAddCodeAssets(
@@ -104,6 +113,29 @@ void main(List<String> args) async {
 }
 
 const name = 'mingpu_ffi.dart';
+
+/// Registers every buildable source under [srcDir] as a hook dependency, so an
+/// edit to the C/C++ actually rebuilds the library.
+///
+/// Skips the two directories that are outputs rather than inputs — a vendored
+/// Dawn tree and any in-tree `build_*` output — because walking them costs far
+/// more than the whole build and their contents change as a RESULT of building.
+void _addSourceDependencies(Uri srcDir, BuildOutputBuilder output) {
+  const buildable = {
+    '.c', '.cc', '.cpp', '.h', '.hpp', '.inc', '.m', '.mm', '.txt', '.cmake',
+  };
+  final dir = Directory.fromUri(srcDir);
+  if (!dir.existsSync()) return;
+  for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+    if (entity is! File) continue;
+    final path = p.normalize(entity.path);
+    final rel = p.relative(path, from: dir.path);
+    final first = p.split(rel).first;
+    if (first == 'external' || first.startsWith('build_')) continue;
+    if (!buildable.contains(p.extension(path).toLowerCase())) continue;
+    output.dependencies.add(entity.uri);
+  }
+}
 
 Future<void> runBuild(
   BuildInput input,

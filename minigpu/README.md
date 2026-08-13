@@ -56,7 +56,7 @@ dart pub get
 
 ### Flutter apps: use `minigpu_flutter` instead
 
-If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that fires registered teardown callbacks during hot reload — preventing stale `NativeCallable` invocations when the Dart isolate is rebuilt mid-dispatch.
+If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that runs your registered GPU teardown at hot reload — the one moment a long-lived context has no other disposal hook.
 
 ```yaml
 dependencies:

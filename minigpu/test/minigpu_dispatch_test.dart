@@ -2,6 +2,22 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:minigpu/minigpu.dart';
+import 'package:minigpu_ffi/minigpu_ffi_bindings.dart' as ffi;
+
+/// True when another isolate in THIS process is also attached to the
+/// process-global minigpu context.
+///
+/// `ProcessInfo.currentRss` is process-wide: in a whole-package `dart test`
+/// run every suite is an isolate in ONE process, so the RSS deltas below
+/// include every other suite's allocations and cannot be attributed to these
+/// cycles. Run this file on its own to get the leak assertions.
+bool _sharedProcess() {
+  try {
+    return ffi.mgpuContextRefCount() > 1;
+  } catch (_) {
+    return false; // binary predates the export
+  }
+}
 
 void main() {
   late Minigpu gpu;
@@ -1147,8 +1163,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         final cycleMB = (afterMemory / 1024 / 1024).toStringAsFixed(1);
         print('  Cycle $cycle: ${cycleMB} MB');
 
-        // Check for excessive growth
-        if (cycle > 5) {
+        // Check for excessive growth (only when the measurement is
+        // attributable — see _sharedProcess()).
+        if (cycle > 5 && !_sharedProcess()) {
           final recentGrowth =
               (afterMemory - memoryHistory[cycle - 5]) / 1024 / 1024;
           if (recentGrowth > 100) {

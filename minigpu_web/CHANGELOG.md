@@ -1,5 +1,28 @@
 # minigpu_web CHANGELOG
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- **`writeRawBytes` no longer allocates and fills a whole second list per
+  call.** It built a fresh `Uint32List` the size of the payload and memcpy'd
+  into it on every call, only to reinterpret the same bytes as words. On a
+  streaming path that is a whole-frame allocation plus a whole-frame copy per
+  frame — 33 MB at 4K — and the allocation is per-frame garbage large enough to
+  be a frame-time spike source in its own right, not just a copy. It now takes a
+  4-byte-aligned VIEW over the caller's bytes, which aliases the same store and
+  costs nothing. The copy remains only for the one case a view cannot describe
+  (a caller-supplied view whose `offsetInBytes` is not 4-aligned). This is the
+  web half of the same bug fixed natively in minigpu_ffi, and it matters more
+  here: the browser has no equivalent of the native path's escape hatches.
+
+## 1.6.0
+
+- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
+  in this package (the fix is native-only and does not apply to the web build).
+
 ## 1.5.9
 
 - Version lockstep with minigpu 1.5.9; no behavior change. `setBufferFire`

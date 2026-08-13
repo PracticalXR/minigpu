@@ -160,6 +160,34 @@ final class Minigpu {
   static int? get drainSpinBudgetMs =>
       MinigpuPlatform.instance.drainSpinBudgetMs;
 
+  /// BLOCKS until every GPU task already queued has run.
+  ///
+  /// Dispatches, readbacks and shared-texture blits execute on a native worker
+  /// thread, so destroying a buffer or texture can free a resource a queued
+  /// task is about to touch. Draining first makes teardown ordered instead of
+  /// hopeful.
+  ///
+  /// SYNCHRONOUS on purpose — the caller that needs it most is one that cannot
+  /// await. In Flutter, [State.reassemble] runs on hot reload and is the only
+  /// hook you get before the framework rebuilds the tree on top of your GPU
+  /// resources; it is synchronous, so `await stop()` is not available there.
+  /// The shape that works:
+  ///
+  /// ```dart
+  /// @override
+  /// void reassemble() {
+  ///   super.reassemble();
+  ///   stopProducingFrames();   // nothing new may be queued
+  ///   Minigpu.drainWorkQueue(); // everything queued has now finished
+  ///   releaseGpuResources();    // safe: nothing is still pointing at them
+  /// }
+  /// ```
+  ///
+  /// Drain AFTER you have stopped producing — draining while a loop is still
+  /// submitting just waits for a queue that keeps refilling. Never per frame.
+  /// No-op on web and on a native binary predating the export.
+  static void drainWorkQueue() => MinigpuPlatform.instance.drainWorkQueue();
+
   /// Name of the adapter THIS instance selected — meaningful for
   /// [Minigpu.forAdapter] contexts, where the process-global
   /// [selectedAdapterName] refers to the default context.

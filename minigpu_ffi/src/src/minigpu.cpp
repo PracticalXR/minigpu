@@ -1,9 +1,126 @@
 #include "../include/minigpu.h"
+#include "../include/dart_port.h"
 #include "../include/log.h"
+#include <exception>
+#ifdef MINIGPU_HAVE_DART_DL
+// Vendored Dart SDK dynamic-linking API (third_party/dart_dl).
+#include "dart_api_dl.h"
+#endif
 #ifdef _WIN32
 #include <dxgi1_4.h>
 #pragma comment(lib, "dxgi.lib")
 #endif
+
+// --- Dart native-port log delivery ------------------------------------------
+//
+// mgpu's log registry is PROCESS-GLOBAL. A Dart `NativeCallable` installed
+// through mgpuSetLogCallback belongs to exactly ONE isolate; when that isolate
+// exits the VM deletes the trampoline while this library still holds the
+// pointer, and the next Dawn worker thread that logs runs it on a thread with
+// no isolate group at all -> "Callback invoked after it has been deleted" ->
+// the whole process aborts. Posting to a Dart port is defined, silent and
+// thread-safe even after the port has closed, so the port is the supported
+// Dart delivery path. The function-pointer API stays for non-Dart embedders.
+namespace mgpu {
+
+#ifdef MINIGPU_HAVE_DART_DL
+static Dart_Port g_log_port = ILLEGAL_PORT;
+static bool g_dart_api_ready = false;
+#endif
+
+bool logPostToPort(int level, const char *message, size_t len) {
+#ifdef MINIGPU_HAVE_DART_DL
+  const Dart_Port port = g_log_port;
+  if (port == ILLEGAL_PORT || !g_dart_api_ready || message == nullptr)
+    return false;
+
+  // Bytes rather than Dart_CObject_kString: Dawn/driver strings can carry
+  // non-UTF-8 (Latin-1) sequences and kString demands valid UTF-8.
+  // Dart_PostCObject_DL COPIES the typed data, so nothing crosses ownership
+  // and there is nothing for Dart to free.
+  Dart_CObject c_level;
+  c_level.type = Dart_CObject_kInt32;
+  c_level.value.as_int32 = static_cast<int32_t>(level);
+
+  Dart_CObject c_msg;
+  c_msg.type = Dart_CObject_kTypedData;
+  c_msg.value.as_typed_data.type = Dart_TypedData_kUint8;
+  c_msg.value.as_typed_data.length = static_cast<intptr_t>(len);
+  c_msg.value.as_typed_data.values =
+      reinterpret_cast<uint8_t *>(const_cast<char *>(message));
+
+  Dart_CObject *parts[2] = {&c_level, &c_msg};
+
+  Dart_CObject payload;
+  payload.type = Dart_CObject_kArray;
+  payload.value.as_array.length = 2;
+  payload.value.as_array.values = parts;
+
+  // A false return just means the port is gone (its isolate exited). That is
+  // the entire reason this path exists — swallow it, and keep reporting
+  // "delivered" so a dead registration silences output instead of falling
+  // back to a stale function pointer.
+  (void)Dart_PostCObject_DL(port, &payload);
+  return true;
+#else
+  (void)level;
+  (void)message;
+  (void)len;
+  return false;
+#endif
+}
+
+intptr_t logInitDartApi(void *initialize_api_dl_data) {
+#ifdef MINIGPU_HAVE_DART_DL
+  // Idempotent: Dart_InitializeApiDL re-populates the same function table.
+  const intptr_t rc = Dart_InitializeApiDL(initialize_api_dl_data);
+  if (rc == 0)
+    g_dart_api_ready = true;
+  return rc;
+#else
+  (void)initialize_api_dl_data;
+  return -1;
+#endif
+}
+
+void logSetPort(int64_t port) {
+#ifdef MINIGPU_HAVE_DART_DL
+  g_log_port = static_cast<Dart_Port>(port);
+#else
+  (void)port;
+#endif
+}
+
+// --- Dart native-port completions -------------------------------------------
+// Doctrine and wire format: dart_port.h. Unlike the log port there is no
+// registration step and no global — the destination rides along with each
+// call, so completions cannot be misrouted between isolates and there is no
+// last-writer-wins hazard.
+void completionPost(int64_t port, int64_t token, bool ok) {
+#ifdef MINIGPU_HAVE_DART_DL
+  if (port == ILLEGAL_PORT || !g_dart_api_ready) return;
+  // A false return means the port is gone (isolate exited, hot restart, the
+  // app is shutting down). That is the entire reason this path exists: the
+  // completion is dropped instead of aborting the process.
+  (void)Dart_PostInteger_DL(static_cast<Dart_Port>(port),
+                            (token << 1) | (ok ? 1 : 0));
+#else
+  (void)port;
+  (void)token;
+  (void)ok;
+#endif
+}
+
+bool dartApiReady() {
+#ifdef MINIGPU_HAVE_DART_DL
+  return g_dart_api_ready;
+#else
+  return false;
+#endif
+}
+
+} // namespace mgpu
+
 #ifdef __cplusplus
 using namespace mgpu;
 extern "C" {
@@ -16,6 +133,12 @@ mgpu::LogLevel level = mgpu::LOG_INFO;
 void mgpuSetLogCallback(MGPULogCallback callback) {
   SET_LOG_CALLBACK(callback);
 }
+
+int mgpuInitDartApi(void *initialize_api_dl_data) {
+  return (int)mgpu::logInitDartApi(initialize_api_dl_data);
+}
+
+void mgpuSetLogPort(int64_t port) { mgpu::logSetPort(port); }
 
 void mgpuSetLogLevel(int lvl) {
   level = static_cast<mgpu::LogLevel>(lvl);
@@ -42,15 +165,23 @@ int mgpuGetSelectedAdapterName(char* out, int cap) {
   return (int)name.size();
 }
 
+// ── Attach / detach, NOT raw init / destroy ─────────────────────────────────
+// `minigpu` is process-global; the Dart wrapper driving it is per-isolate, and
+// `dart test` puts N isolates in ONE process. Counting the EXPLICIT attaches
+// here (and only here — the lazy re-init inside getDevice/getQueue must not
+// count) is what stops isolate A's teardown from destroying the device isolate
+// B is still dispatching on.
 void mgpuInitializeContext() {
-  minigpu.initializeContext();
+  minigpu.attachContext();
 }
 
 void mgpuInitializeContextAsync(MGPUCallback callback) {
-  minigpu.initializeContextAsync(callback);
+  minigpu.attachContextAsync(callback);
 }
 
-void mgpuDestroyContext() { minigpu.destroyContext(); }
+void mgpuDestroyContext() { minigpu.detachContext(); }
+
+int mgpuContextRefCount() { return minigpu.attachCount(); }
 
 MGPUComputeShader *mgpuCreateComputeShader() {
   return reinterpret_cast<MGPUComputeShader *>(
@@ -208,6 +339,16 @@ void mgpuContextInitializeAsync(MGPUContextHandle *handle,
   }
 }
 
+void mgpuContextInitializeAsyncToPort(MGPUContextHandle *handle, int64_t port,
+                                      int64_t token) {
+  if (!handle) {
+    mgpu::completionPost(port, token, false);
+    return;
+  }
+  reinterpret_cast<mgpu::MGPU *>(handle)->initializeContextAsync(
+      [port, token]() { mgpu::completionPost(port, token, true); });
+}
+
 void mgpuDestroyContextHandle(MGPUContextHandle *handle) {
   if (handle) {
     auto *m = reinterpret_cast<mgpu::MGPU *>(handle);
@@ -279,6 +420,102 @@ void mgpuDispatchAsync(MGPUComputeShader *shader, int groupsX, int groupsY,
     reinterpret_cast<mgpu::ComputeShader *>(shader)->dispatchAsync(
         groupsX, groupsY, groupsZ, callback);
   }
+}
+
+// ── Port-based completions ──────────────────────────────────────────────────
+// Same work, same threads; the only difference is that the completion travels
+// as an int64 on a Dart port instead of through a function pointer whose
+// lifetime the caller cannot safely manage. See dart_port.h.
+//
+// Every one of these ALWAYS posts exactly once, including on the argument
+// checks — a caller awaiting a completion that silently never arrives is a
+// hang, which is worse to debug than a failure.
+
+void mgpuDispatchAsyncToPort(MGPUComputeShader *shader, int groupsX,
+                             int groupsY, int groupsZ, int64_t port,
+                             int64_t token) {
+  if (!shader) {
+    mgpu::completionPost(port, token, false);
+    return;
+  }
+  reinterpret_cast<mgpu::ComputeShader *>(shader)->dispatchAsync(
+      groupsX, groupsY, groupsZ,
+      [port, token]() { mgpu::completionPost(port, token, true); });
+}
+
+void mgpuReadAsyncToPort(MGPUBuffer *buffer, void *outputData,
+                         size_t elementCount, size_t elementOffset,
+                         int elementType, int64_t port, int64_t token) {
+  if (!buffer || !outputData) {
+    mgpu::completionPost(port, token, false);
+    return;
+  }
+  auto *buf = reinterpret_cast<mgpu::Buffer *>(buffer);
+  auto done = [port, token]() { mgpu::completionPost(port, token, true); };
+  try {
+    switch (static_cast<MGPUElementType>(elementType)) {
+    case MGPU_ELEM_I8:
+      buf->readAsync(static_cast<int8_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_U8:
+      buf->readAsync(static_cast<uint8_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_I16:
+      buf->readAsync(static_cast<int16_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_U16:
+      buf->readAsync(static_cast<uint16_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_I32:
+      buf->readAsync(static_cast<int32_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_U32:
+      buf->readAsync(static_cast<uint32_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_I64:
+      buf->readAsync(static_cast<int64_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_U64:
+      buf->readAsync(static_cast<uint64_t *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_F32:
+      buf->readAsync(static_cast<float *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    case MGPU_ELEM_F64:
+      buf->readAsync(static_cast<double *>(outputData), elementCount,
+                     elementOffset, done);
+      break;
+    default:
+      LOG_ERROR("mgpuReadAsyncToPort: unknown element type %d", elementType);
+      mgpu::completionPost(port, token, false);
+      break;
+    }
+  } catch (...) {
+    LOG_ERROR("mgpuReadAsyncToPort: exception issuing the read");
+    mgpu::completionPost(port, token, false);
+  }
+}
+
+void mgpuInitializeContextAsyncToPort(int64_t port, int64_t token) {
+  minigpu.attachContextAsync(
+      [port, token]() { mgpu::completionPost(port, token, true); });
+}
+
+void mgpuDrainWorkQueue() {
+  auto &thread = minigpu.getWebGPUThread();
+  // Called FROM the worker (a completion handler, say) the wait could never be
+  // satisfied — the queue cannot drain while we are the thing draining it.
+  if (std::this_thread::get_id() == thread.threadId()) return;
+  thread.enqueueSync<int>([]() { return 0; });
 }
 
 void mgpuReadSync(MGPUBuffer *buffer, void *outputData, size_t size,
@@ -608,9 +845,22 @@ void mgpuWriteUint32(MGPUBuffer *buffer, const uint32_t *inputData,
 
 void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
                        size_t byteSize, size_t dstByteOffset) {
-  if (buffer && inputData) {
+  if (!buffer || !inputData) return;
+  // MUST NOT THROW. writeBytesAt throws on an invalid context or an
+  // out-of-range range, and letting a C++ exception unwind out of an FFI entry
+  // point is undefined behaviour for any caller — it does not become a Dart
+  // exception, it corrupts the frame it unwinds through. This entry point is
+  // additionally bound as a LEAF call (see mgpuWriteBufferAtLeaf on the Dart
+  // side), where the VM has not transitioned out of Dart state at all, so an
+  // escaping exception is not merely undefined but reliably fatal. Log and
+  // return: the same outcome the caller already got, minus the crash.
+  try {
     reinterpret_cast<mgpu::Buffer *>(buffer)->writeBytesAt(inputData, byteSize,
                                                            dstByteOffset);
+  } catch (const std::exception &e) {
+    LOG_ERROR("mgpuWriteBufferAt: %s", e.what());
+  } catch (...) {
+    LOG_ERROR("mgpuWriteBufferAt: unknown exception");
   }
 }
 

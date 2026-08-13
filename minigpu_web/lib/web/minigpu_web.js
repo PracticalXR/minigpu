@@ -1107,7 +1107,7 @@ async function createWasm() {
   errorCallback:(callback, type, message, userdata) => {
         var sp = stackSave();
         var messagePtr = stringToUTF8OnStack(message);
-        ((a1, a2, a3) => {} /* a dynamic function call to signature viii, but there are no exported function pointers with that signature, so this path should never be taken. Build with ASSERTIONS enabled to validate. */)(type, messagePtr, userdata);
+        ((a1, a2, a3) => dynCall_viii(callback, a1, a2, a3))(type, messagePtr, userdata);
         stackRestore(sp);
       },
   iterateExtensions:(root, handlers) => {
@@ -2943,12 +2943,14 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 // end include: postlibrary.js
 
 var ASM_CONSTS = {
-  29876: ($0) => { window.gpuDevice = WebGPU.getJsObject($0); }
+  32924: ($0) => { window.gpuDevice = WebGPU.getJsObject($0); }
 };
 
 // Imports from the Wasm binary.
 var _malloc,
   _mgpuSetLogCallback,
+  _mgpuInitDartApi,
+  _mgpuSetLogPort,
   _mgpuSetLogLevel,
   _mgpuFreeLogMessage,
   _free,
@@ -2957,6 +2959,7 @@ var _malloc,
   _mgpuInitializeContext,
   _mgpuInitializeContextAsync,
   _mgpuDestroyContext,
+  _mgpuContextRefCount,
   _mgpuCreateComputeShader,
   _mgpuDestroyComputeShader,
   _mgpuLoadKernel,
@@ -2965,6 +2968,7 @@ var _malloc,
   _mgpuDestroyBuffer,
   _mgpuCreateContextHandle,
   _mgpuContextInitializeAsync,
+  _mgpuContextInitializeAsyncToPort,
   _mgpuDestroyContextHandle,
   _mgpuContextGetAdapterName,
   _mgpuContextCreateBuffer,
@@ -2973,6 +2977,10 @@ var _malloc,
   _mgpuSetBufferFire,
   _mgpuDispatch,
   _mgpuDispatchAsync,
+  _mgpuDispatchAsyncToPort,
+  _mgpuReadAsyncToPort,
+  _mgpuInitializeContextAsyncToPort,
+  _mgpuDrainWorkQueue,
   _mgpuReadSync,
   _mgpuReadAsyncFloat,
   _mgpuReadAsyncInt8,
@@ -3040,6 +3048,8 @@ var _malloc,
   _mgpuCopyBufferToSharedOutputTexture,
   _mgpuCopyBufferToSharedOutputTextureAsync,
   _mgpuVideoTextureBGRAToRGBASharedOutputAsync,
+  _mgpuCopyBufferToSharedOutputTextureAsyncToPort,
+  _mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort,
   _mgpuCopyBufferF32ToSharedOutputTexture,
   _mgpuSharedOutputTextureDebugReadFirstPixel,
   _mgpuSharedOutputTextureDebugReadFirstPixelDawn,
@@ -3089,14 +3099,15 @@ var _malloc,
   dynCall_ii,
   dynCall_vi,
   dynCall_viiii,
-  dynCall_viiiii,
-  dynCall_vii,
-  dynCall_iii,
   dynCall_v,
+  dynCall_viiiii,
+  dynCall_iii,
+  dynCall_vii,
   dynCall_viji,
   dynCall_iidiiii,
   dynCall_iiii,
   dynCall_jiji,
+  dynCall_viii,
   dynCall_viiiiii,
   _asyncify_start_unwind,
   _asyncify_stop_unwind,
@@ -3107,6 +3118,8 @@ var _malloc,
 function assignWasmExports(wasmExports) {
   Module['_malloc'] = _malloc = wasmExports['malloc'];
   Module['_mgpuSetLogCallback'] = _mgpuSetLogCallback = wasmExports['mgpuSetLogCallback'];
+  Module['_mgpuInitDartApi'] = _mgpuInitDartApi = wasmExports['mgpuInitDartApi'];
+  Module['_mgpuSetLogPort'] = _mgpuSetLogPort = wasmExports['mgpuSetLogPort'];
   Module['_mgpuSetLogLevel'] = _mgpuSetLogLevel = wasmExports['mgpuSetLogLevel'];
   Module['_mgpuFreeLogMessage'] = _mgpuFreeLogMessage = wasmExports['mgpuFreeLogMessage'];
   Module['_free'] = _free = wasmExports['free'];
@@ -3115,6 +3128,7 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuInitializeContext'] = _mgpuInitializeContext = wasmExports['mgpuInitializeContext'];
   Module['_mgpuInitializeContextAsync'] = _mgpuInitializeContextAsync = wasmExports['mgpuInitializeContextAsync'];
   Module['_mgpuDestroyContext'] = _mgpuDestroyContext = wasmExports['mgpuDestroyContext'];
+  Module['_mgpuContextRefCount'] = _mgpuContextRefCount = wasmExports['mgpuContextRefCount'];
   Module['_mgpuCreateComputeShader'] = _mgpuCreateComputeShader = wasmExports['mgpuCreateComputeShader'];
   Module['_mgpuDestroyComputeShader'] = _mgpuDestroyComputeShader = wasmExports['mgpuDestroyComputeShader'];
   Module['_mgpuLoadKernel'] = _mgpuLoadKernel = wasmExports['mgpuLoadKernel'];
@@ -3123,6 +3137,7 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuDestroyBuffer'] = _mgpuDestroyBuffer = wasmExports['mgpuDestroyBuffer'];
   Module['_mgpuCreateContextHandle'] = _mgpuCreateContextHandle = wasmExports['mgpuCreateContextHandle'];
   Module['_mgpuContextInitializeAsync'] = _mgpuContextInitializeAsync = wasmExports['mgpuContextInitializeAsync'];
+  Module['_mgpuContextInitializeAsyncToPort'] = _mgpuContextInitializeAsyncToPort = wasmExports['mgpuContextInitializeAsyncToPort'];
   Module['_mgpuDestroyContextHandle'] = _mgpuDestroyContextHandle = wasmExports['mgpuDestroyContextHandle'];
   Module['_mgpuContextGetAdapterName'] = _mgpuContextGetAdapterName = wasmExports['mgpuContextGetAdapterName'];
   Module['_mgpuContextCreateBuffer'] = _mgpuContextCreateBuffer = wasmExports['mgpuContextCreateBuffer'];
@@ -3131,6 +3146,10 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuSetBufferFire'] = _mgpuSetBufferFire = wasmExports['mgpuSetBufferFire'];
   Module['_mgpuDispatch'] = _mgpuDispatch = wasmExports['mgpuDispatch'];
   Module['_mgpuDispatchAsync'] = _mgpuDispatchAsync = wasmExports['mgpuDispatchAsync'];
+  Module['_mgpuDispatchAsyncToPort'] = _mgpuDispatchAsyncToPort = wasmExports['mgpuDispatchAsyncToPort'];
+  Module['_mgpuReadAsyncToPort'] = _mgpuReadAsyncToPort = wasmExports['mgpuReadAsyncToPort'];
+  Module['_mgpuInitializeContextAsyncToPort'] = _mgpuInitializeContextAsyncToPort = wasmExports['mgpuInitializeContextAsyncToPort'];
+  Module['_mgpuDrainWorkQueue'] = _mgpuDrainWorkQueue = wasmExports['mgpuDrainWorkQueue'];
   Module['_mgpuReadSync'] = _mgpuReadSync = wasmExports['mgpuReadSync'];
   Module['_mgpuReadAsyncFloat'] = _mgpuReadAsyncFloat = wasmExports['mgpuReadAsyncFloat'];
   Module['_mgpuReadAsyncInt8'] = _mgpuReadAsyncInt8 = wasmExports['mgpuReadAsyncInt8'];
@@ -3198,6 +3217,8 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuCopyBufferToSharedOutputTexture'] = _mgpuCopyBufferToSharedOutputTexture = wasmExports['mgpuCopyBufferToSharedOutputTexture'];
   Module['_mgpuCopyBufferToSharedOutputTextureAsync'] = _mgpuCopyBufferToSharedOutputTextureAsync = wasmExports['mgpuCopyBufferToSharedOutputTextureAsync'];
   Module['_mgpuVideoTextureBGRAToRGBASharedOutputAsync'] = _mgpuVideoTextureBGRAToRGBASharedOutputAsync = wasmExports['mgpuVideoTextureBGRAToRGBASharedOutputAsync'];
+  Module['_mgpuCopyBufferToSharedOutputTextureAsyncToPort'] = _mgpuCopyBufferToSharedOutputTextureAsyncToPort = wasmExports['mgpuCopyBufferToSharedOutputTextureAsyncToPort'];
+  Module['_mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort'] = _mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort = wasmExports['mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort'];
   Module['_mgpuCopyBufferF32ToSharedOutputTexture'] = _mgpuCopyBufferF32ToSharedOutputTexture = wasmExports['mgpuCopyBufferF32ToSharedOutputTexture'];
   Module['_mgpuSharedOutputTextureDebugReadFirstPixel'] = _mgpuSharedOutputTextureDebugReadFirstPixel = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixel'];
   Module['_mgpuSharedOutputTextureDebugReadFirstPixelDawn'] = _mgpuSharedOutputTextureDebugReadFirstPixelDawn = wasmExports['mgpuSharedOutputTextureDebugReadFirstPixelDawn'];
@@ -3247,14 +3268,15 @@ function assignWasmExports(wasmExports) {
   dynCalls['ii'] = dynCall_ii = wasmExports['dynCall_ii'];
   dynCalls['vi'] = dynCall_vi = wasmExports['dynCall_vi'];
   dynCalls['viiii'] = dynCall_viiii = wasmExports['dynCall_viiii'];
-  dynCalls['viiiii'] = dynCall_viiiii = wasmExports['dynCall_viiiii'];
-  dynCalls['vii'] = dynCall_vii = wasmExports['dynCall_vii'];
-  dynCalls['iii'] = dynCall_iii = wasmExports['dynCall_iii'];
   dynCalls['v'] = dynCall_v = wasmExports['dynCall_v'];
+  dynCalls['viiiii'] = dynCall_viiiii = wasmExports['dynCall_viiiii'];
+  dynCalls['iii'] = dynCall_iii = wasmExports['dynCall_iii'];
+  dynCalls['vii'] = dynCall_vii = wasmExports['dynCall_vii'];
   dynCalls['viji'] = dynCall_viji = wasmExports['dynCall_viji'];
   dynCalls['iidiiii'] = dynCall_iidiiii = wasmExports['dynCall_iidiiii'];
   dynCalls['iiii'] = dynCall_iiii = wasmExports['dynCall_iiii'];
   dynCalls['jiji'] = dynCall_jiji = wasmExports['dynCall_jiji'];
+  dynCalls['viii'] = dynCall_viii = wasmExports['dynCall_viii'];
   dynCalls['viiiiii'] = dynCall_viiiiii = wasmExports['dynCall_viiiiii'];
   _asyncify_start_unwind = wasmExports['asyncify_start_unwind'];
   _asyncify_stop_unwind = wasmExports['asyncify_stop_unwind'];

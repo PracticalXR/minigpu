@@ -5,9 +5,14 @@
 ///
 /// Additionally provides [MinigpuBinding], a thin root widget whose
 /// [State.reassemble] fires all callbacks registered with
-/// [MinigpuFlutterBinding.addDisposeCallback] during Flutter hot reload.
-/// This allows GPU contexts to be torn down cleanly before the Dart isolate
-/// is rebuilt, preventing stale [NativeCallable] invocations.
+/// [MinigpuFlutterBinding.addDisposeCallback] during Flutter hot reload —
+/// the one moment a long-lived GPU resource has no other teardown hook
+/// (nothing is disposed, `initState` does not re-run).
+///
+/// This is a teardown-ordering aid, NOT a crash guard: `reassemble` is
+/// synchronous, so it can stop new work but cannot wait for work already
+/// handed to the GPU worker thread. Completion safety lives in minigpu_ffi,
+/// which delivers completions on a Dart native port.
 ///
 /// ## Usage
 ///

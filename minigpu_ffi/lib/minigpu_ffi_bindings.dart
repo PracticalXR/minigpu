@@ -294,6 +294,12 @@ external void mgpuInitializeContextAsync(MGPUCallback callback);
 @ffi.Native<ffi.Void Function()>()
 external void mgpuDestroyContext();
 
+/// Explicit attaches currently outstanding on the process-global context
+/// (0 when it is torn down). Diagnostics/tests only — lazy internal
+/// re-initialization does not count.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuContextRefCount();
+
 /// Install a native log callback. [callback] receives (int level, Pointer<Char> message)
 /// where level: 0=DEBUG 1=INFO 2=WARN 3=ERROR. Pass a null pointer to revert to stderr.
 @ffi.Native<
@@ -380,6 +386,44 @@ external void mgpuSetBufferFire(
 external void mgpuWriteBufferAt(
   ffi.Pointer<MGPUBuffer> buffer,
   ffi.Pointer<ffi.Void> inputData,
+  int byteSize,
+  int dstByteOffset,
+);
+
+/// The same C symbol as [mgpuWriteBufferAt], bound as a LEAF call taking
+/// `Pointer<Uint8>`.
+///
+/// WHY A SECOND BINDING: `TypedData.address` is only accepted as a direct
+/// argument to a leaf native call, and it is the only way to hand a Dart list's
+/// backing store to C without copying it first. Raw uploads are the streaming
+/// path — one whole frame per call — so that copy was a full frame-sized host
+/// memcpy per frame that bought nothing but a stable pointer. Measured at 4K
+/// (33.2 MB/frame): the staging copy was ~1.8 ms of a ~3.7 ms upload stage,
+/// i.e. HALF the stage, spent duplicating bytes that `wgpuQueueWriteBuffer`
+/// immediately copies again into its own staging ring.
+///
+/// LEAF IS SAFE HERE, and the reasoning matters because leaf calls block the
+/// isolate from reaching a GC safepoint for their whole duration:
+///   * the callee never re-enters Dart (no callbacks, no port posts), which is
+///     the hard requirement;
+///   * it is bounded work — a memcpy of at most one 32 MiB chunk;
+///   * it takes the device mutex, but no minigpu path holds that mutex across a
+///     GPU wait any more (see the read path's note on releasing it across the
+///     map), so the worst case is another thread's queue write, not a fence.
+/// The Dart-side memcpy it replaces was itself an uninterruptible intrinsic of
+/// the same length, so the safepoint exposure is not new — it is the same
+/// duration, minus one copy.
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Size,
+    ffi.Size,
+  )
+>(symbol: 'mgpuWriteBufferAt', isLeaf: true)
+external void mgpuWriteBufferAtLeaf(
+  ffi.Pointer<MGPUBuffer> buffer,
+  ffi.Pointer<ffi.Uint8> inputData,
   int byteSize,
   int dstByteOffset,
 );

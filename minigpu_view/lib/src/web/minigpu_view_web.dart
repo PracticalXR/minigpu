@@ -432,8 +432,8 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   static int _alignBytesPerRow(int byteCount) => (byteCount + 255) & ~255;
 
   // ── rgba8 DIRECT path: storage-buffer read + unpack4x8unorm ──
-  // The zero-readback display route for packed-RGBA8 producers (e.g. the
-  // gsplats420 codec framebuffer): the producer buffer is bound straight into
+  // The zero-readback display route for packed-RGBA8 producers (a codec
+  // framebuffer, say): the producer buffer is bound straight into
   // the fragment shader; unpack4x8unorm maps the little-endian u32 (R in the
   // low byte) to vec4f exactly as the bytes lie in memory.
   JSObject? _rgba8Pipeline;

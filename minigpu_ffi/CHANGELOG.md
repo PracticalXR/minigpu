@@ -1,5 +1,187 @@
 # minigpu_ffi CHANGELOG
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- **`Buffer.writeRawBytes` no longer copies at all on the way to the GPU —
+  `upload` measured 3.71 → 1.84 ms/frame at 4K (-50%).** The chunked path used
+  to memcpy the payload into a native scratch first, purely so the FFI call had
+  a stable address to pass; `wgpuQueueWriteBuffer` then copied it AGAIN into
+  Dawn's staging ring. On a streaming path that is a whole-frame host memcpy per
+  frame (33.2 MB at 4K) buying nothing. `TypedData.address` in a leaf call hands
+  C the caller's own backing store, so the payload is copied exactly once, by
+  the driver. The isolate-wide raw scratch is gone with it — one fewer 32 MiB
+  pinned host allocation. Chunking (32 MiB) and byte ordering are unchanged; the
+  chunked branch uses `Uint8List.sublistView`, which aliases rather than copies.
+  Profiled confirmation that the removed time was pure waste: the time inside
+  `wgpuQueueWriteBuffer` itself did not move (1.83 → 1.78 ms).
+
+- **`mgpuWriteBufferAt` no longer lets a C++ exception escape into the caller.**
+  `writeBytesAt` throws on an invalid context or an out-of-range write, and
+  unwinding out of an FFI entry point is undefined behaviour for any caller — it
+  never became a Dart exception, it corrupted the frame it unwound through.
+  Now caught and logged. This became load-bearing with the leaf binding above,
+  where the VM has not transitioned out of Dart state and an escaping exception
+  is reliably fatal rather than merely undefined.
+
+- **The read path's staging buffer grows on demand instead of being resized to
+  fit every call.** It was destroyed and recreated whenever the next read asked
+  for a different length — fine for a fixed-size tensor, pathological for the
+  case this path actually serves, a compacted payload whose length changes every
+  frame. Measured over 723 reads at 4K, the destroy/create cycle cost 33.05 ms;
+  grow-on-demand costs 0.28 ms (-99%). Capacity only ever grows, to the next
+  power of two, bounded by the source buffer's own size, and is released with
+  the buffer — the same contract the batched-readback arena already shipped
+  with. This is the sibling of the raw-upload scratch bug above: a per-frame
+  allocate/free cycle wrapped around a transfer, costing more than the transfer.
+
+- **New: `MGPU_WAIT_PROF=1` — per-site attribution for the blocking waits and
+  per-call allocations on the transfer path**, with `MGPU_WAIT_PROF_MS=<n>` to
+  log every individual event over n ms as it happens. It reports each site's
+  count / total / mean / max AND the SPIN ITERATION COUNT of the waits, which is
+  the one thing host-side stage timers cannot tell you: a wait that is long
+  because the device is busy spins thousands of times, while a wait that is long
+  because the OS descheduled the thread shows a long wall against a handful of
+  iterations. Sites: the read path's lock / flush / staging-alloc / submit /
+  map-wait / copy-out / trailing event pump, the write path's lock / flush /
+  queue-write, the worker thread's enqueue-to-start latency, and the shared
+  texture drain. Off by default (one cached bool check).
+
+- **`Buffer.writeRawBytes` no longer `malloc`s its staging scratch per call —
+  ~3 ms/frame and a much fatter tail off any streaming upload.** It is the
+  whole-frame path (one call per frame, tens of times a second), and at 4K the
+  allocator cost more than the copy it was wrapping: 33.2 MB x 240 iterations
+  measured 4.55–4.67 ms median for allocate + copy + free against 1.31–1.69 ms
+  for the same copy through a scratch allocated once, with p99 6.14–8.72 ms
+  against 2.56–4.06 and a 12.8–15.6 ms worst case against 3.4–6.1. A per-frame
+  33 MB commit / first-touch / decommit cycle is a frame-time spike source in
+  its own right, which is what the tail numbers are showing. The scratch is now
+  one ISOLATE-WIDE buffer, grown on demand and bounded by the existing 32 MiB
+  chunk size no matter how many buffers stream through it — deliberately not a
+  per-buffer field, because pinning a transfer-sized scratch on every live
+  buffer is exactly what the 1 MiB `_maxPooledScratchBytes` cap exists to
+  prevent (thousands of live weight buffers). No API or semantic change; byte
+  ordering and chunking are unchanged.
+
+- **Async completions are delivered on a Dart native port — fixes the VM abort
+  `runtime_entry.cc: Callback invoked after it has been deleted` (whole-process
+  death, surfaced to the user as `Lost connection to device.`).** Every async
+  entry point built a `NativeCallable.listener` per call and `close()`d it in a
+  `finally`. That is unsound: `close()` DELETES the trampoline, this library
+  cannot be told to forget a pointer it has already been handed (there is no
+  cancel), and the dart:ffi contract for invoking a closed callable is
+  undefined behaviour that the VM implements as an unconditional `FATAL` —
+  uncatchable, no stack, takes the app with it. Completions fire on the WebGPU
+  worker thread, so a busy pipeline re-armed the race 5–10 times per frame.
+  `FfiBuffer.destroy()` was the same bug without a race: it closed the pooled
+  readback listener with no in-flight check at all. And `close()` was never the
+  only deleter — ISOLATE TEARDOWN deletes every callback the isolate owns, so
+  hot restart, a hard kill, and any worker isolate exiting with work in flight
+  were fatal too, which no amount of Dart-side discipline could have covered.
+  Posting to a Dart port that is closed, or whose isolate is gone, is a
+  defined, silent no-op instead. New exports carry the destination with each
+  call — no registration, so completions cannot be misrouted between isolates:
+  `mgpuInitializeContextAsyncToPort`, `mgpuContextInitializeAsyncToPort`,
+  `mgpuDispatchAsyncToPort`, `mgpuReadAsyncToPort`,
+  `mgpuCopyBufferToSharedOutputTextureAsyncToPort` and
+  `mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort`. Call
+  `mgpuInitDartApi(NativeApi.initializeApiDLData)` once first (the same bridge
+  the log port uses). WIRE FORMAT: one int64 per completion, `(token << 1) |
+  ok`; tokens are allocated by Dart and never reused, so a late or duplicate
+  completion is a lookup miss rather than somebody else's future resolving
+  early — a silent-corruption window the callback form could not close. Every
+  port entry point posts EXACTLY ONCE, including on argument-validation
+  failures, so a bad call now fails instead of hanging forever.
+  The `MGPUCallback` variants remain for embedders that own their function's
+  lifetime, and back a pooled never-closed fallback used only where the Dart
+  API is unavailable (the Emscripten build). Delivery is the same mechanism
+  either way — `NativeCallable.listener` is itself a port post underneath — so
+  there is no latency cost, and the per-call trampoline allocation is gone.
+  `MGPU_UNSAFE_CALLBACK_COMPLETIONS=1` forces the old callback path; it exists
+  only so the abort can be reproduced on demand (an isolate exiting with work
+  in flight kills the process under it, passes without it) and must never be
+  set in production.
+  FULLY BACKWARD COMPATIBLE: no Dart or C signature changed, every previous
+  export still exists and still behaves as before, and the Dart side PROBES for
+  one of the new symbols before committing to the port path — the Dart API
+  bridge shipped before these entry points did, so a binary older than the Dart
+  code (or a stale one served from a build cache) falls back cleanly instead of
+  throwing from the middle of a frame.
+- **`mgpuDrainWorkQueue()`**, surfaced in Dart as
+  `MinigpuPlatform.drainWorkQueue()` — blocks until everything already queued on
+  the WebGPU worker thread has run. Teardown ordering: destroying a resource an
+  enqueued task still references frees it under that task. Synchronous, because
+  the caller that needs it most cannot await (Flutter's `reassemble` on hot
+  reload). No-op when called from the worker thread itself, which cannot drain
+  the queue it heads, and on a binary predating the export.
+- **The build hook now declares `src/**` as build dependencies.** Only the Dawn
+  DLL was declared, so editing the C/C++ never re-ran the hook and the runner
+  served the previously built library — edits appeared to do nothing, silently,
+  because the Dart side still compiled and the stale binary behaved exactly as
+  it always had. Recognise it by a newly added export missing from the DLL
+  while everything else works, and verify a NEW SYMBOL, never the mtime.
+- Element-type codes for `mgpuReadAsyncToPort` are a dedicated `MGPUElementType`
+  enum rather than `BufferDataType`: the Dart and C++ `BufferDataType` enums are
+  ordered DIFFERENTLY, so an `.index` crossing the boundary is ambiguous.
+
+## 1.6.0
+
+- **The process-global context is now serialized and reference-counted.**
+  `mgpuInitializeContext` / `mgpuInitializeContextAsync` ATTACH,
+  `mgpuDestroyContext` DETACHES, and teardown happens only when the last
+  attached consumer leaves; new export `mgpuContextRefCount()` reports the
+  outstanding attaches. Init is idempotent under concurrency: a caller that
+  arrives while another thread is creating the device waits for it and shares
+  the result. Lazy internal re-initialization (`getDevice` / `getQueue` /
+  `isDeviceValid` / `ensureDeviceValid`) does NOT take a reference.
+  Single-consumer behaviour is unchanged: attach → 1 → real init, detach → 0 →
+  real teardown. TRAP this fixes: `initializeContext()` bailed out only on
+  `ctx && ctx->initialized`, so while one thread sat in the multi-millisecond
+  adapter/device request with `initialized` still false, another thread's lazy
+  `getDevice()` fell straight through the guard and re-assigned `ctx` — freeing
+  a live Context under a thread still holding raw pointers into it. Any host
+  that puts several independent consumers in ONE process (Dart isolates being
+  the obvious case) hit it as an access violation, and the surviving symptom
+  when it did not crash was one consumer's teardown killing another's device.
+  SECOND TRAP, for anyone touching this code: the lock must NOT be held across
+  the device request — teardown drains the WebGPU thread with a synchronous
+  enqueue, so a lock held across the slow work deadlocks. The state machine
+  holds it only across transitions, and the async init now runs on a one-shot
+  thread rather than the WebGPU thread for the same reason. Consequence worth
+  knowing: a consumer that exits without detaching keeps the context alive for
+  the life of the process — deliberate, and much cheaper than the alternative.
+  `MGPU_UNSAFE_NO_CTX_LOCK=1` restores the old unguarded behaviour (it exists
+  only to demonstrate the regression; it is the bug).
+- **`minigpu_external`'s cached D3D11 device/immediate context are locked and
+  dropped on teardown.** The lazy creation was an unlocked double-check —
+  concurrent callers each created a device and the second assignment released
+  the first out from under a pointer already handed out — and
+  `ID3D11DeviceContext` is not free-threaded, so every immediate-context use in
+  that file now takes the same lock (consumer-side debug device likewise; lock
+  order is consumer → producer). TRAP: on the D3D11 backend the cached
+  `ID3D11Device` IS Dawn's own device, so it used to survive a destroy/re-init
+  pointing at the dead one and the next `createSharedOutputTexture` silently
+  took the cross-device path and returned null.
+
+- **`setLogCallback` now delivers over a Dart native port, not a
+  `NativeCallable`.** New exports `mgpuInitDartApi(void*)` and
+  `mgpuSetLogPort(int64)`; log lines arrive as `[int32 level, Uint8List utf8]`
+  (bytes, because driver strings are not always valid UTF-8 — nothing to free,
+  `mgpuFreeLogMessage` does not apply to this path). TRAP this fixes: the log
+  registry is PROCESS-GLOBAL, so a `NativeCallable` registered by one isolate
+  outlived it — after that isolate exited, the next line a Dawn worker thread
+  logged ran a deleted trampoline and aborted the whole VM process
+  (`Callback invoked after it has been deleted`). A whole-suite `dart test` run
+  reproduced it every time and took down unrelated downstream suites. A closed
+  port is inert. Semantics are unchanged otherwise: process-global, LAST WRITER
+  WINS, and the registration is replaced natively *before* the old port is
+  closed. `mgpuSetLogCallback` stays exported for non-Dart embedders. Web/wasm
+  is unaffected (`MINIGPU_HAVE_DART_DL` is native-only; the Dart API is vendored
+  under `src/third_party/dart_dl`).
+
 ## 1.5.9
 
 - **`mgpuDestroyComputeShader` no longer deletes the shader inline** — it queues

@@ -41,6 +41,15 @@ bool preferDisplayAdapterEnabled();
 // destroyContext().
 std::string selectedAdapterName();
 
+// Defined in minigpu_external.cpp. Drops the process-global D3D11 device and
+// immediate-context caches that ALIAS the context being torn down (on the
+// D3D11 backend the cached ID3D11Device IS Dawn's own device). Without this
+// they survive a destroy/re-init cycle pointing at the dead device, and the
+// next createSharedOutputTexture() silently takes the cross-device path and
+// returns null. No-op unless [context] is the process-global one that built
+// them, and on non-Windows.
+void externalOnContextDestroyed(const void *context);
+
 // no gpu library dependency
 struct BufferData {
   WGPUBuffer buffer = nullptr;
@@ -75,6 +84,11 @@ private:
 public:
   WebGPUThread();
   ~WebGPUThread();
+
+  // Identity of the worker thread. Used by the context state machine to
+  // recognise "I am the thread the teardown is about to enqueueSync onto" and
+  // refuse to block there (that wait would deadlock the teardown).
+  std::thread::id threadId() const { return worker.get_id(); }
 
   // returns immediately
   void enqueueAsync(std::function<void()> task);
@@ -118,9 +132,57 @@ public:
 #endif
   };
 
+  // ── Context lifecycle ────────────────────────────────────────────────────
+  // The native context is PROCESS-global; the Dart wrapper that drives it is
+  // PER-ISOLATE.  `dart test` runs every suite as an isolate inside ONE
+  // process, so N isolates concurrently believe they must create and later
+  // destroy "their" context.  Two things follow, and both are handled here:
+  //
+  //   1. LIFECYCLE RACE.  initializeContext() used to bail out only on
+  //      `ctx && ctx->initialized`.  Thread A allocated a fresh Context and
+  //      then spent milliseconds in the adapter/device request with
+  //      `initialized == false`; thread B's lazy getDevice() saw exactly that,
+  //      called initializeContext(), fell through the guard and re-assigned
+  //      `ctx` — FREEING A's live Context while A still held raw pointers into
+  //      it.  Access violation.  The fix is a state machine (below) whose lock
+  //      is held only across the STATE TRANSITIONS, never across the slow
+  //      device request: holding a lock across the work deadlocks, because
+  //      initializeContextAsync runs the init ON webgpuThread while
+  //      destroyContext enqueueSync()s onto that same thread.
+  //
+  //   2. PREMATURE TEARDOWN.  One isolate finishing and destroying the context
+  //      pulled the device out from under every other isolate still using it
+  //      (observed as createSharedOutputTexture() returning null in a later
+  //      suite of a serialized run).  attach/detach reference-count the
+  //      EXPLICIT consumers so teardown happens only when the last one leaves.
+  //
+  // State transitions are serialized; the work is not.
+  enum class CtxState { Uninitialized, Initializing, Ready, Destroying };
+
+  // Idempotent, concurrency-safe.  Blocks while another thread is initializing
+  // or destroying, then returns the resulting context (or does the work).
+  // Does NOT take a reference — this is the LAZY path (getDevice, getQueue,
+  // isDeviceValid, ensureDeviceValid).
   void initializeContext();
   void initializeContextAsync(std::function<void()> callback);
+  // Unconditional teardown.  Ignores the reference count — internal use and
+  // ensureDeviceValid()'s device-loss recovery.  Blocks while an init is in
+  // flight so it can never free a Context another thread is still building.
   void destroyContext();
+
+  // ── Explicit attach / detach (the exported C-API boundary) ───────────────
+  // mgpuInitializeContext / mgpuInitializeContextAsync attach; mgpuDestroy-
+  // Context detaches.  Teardown happens only on the transition to zero, so a
+  // second isolate's destroy cannot kill a first isolate's live device.
+  // SINGLE-CONSUMER BEHAVIOUR IS UNCHANGED: attach -> 1 -> init,
+  // detach -> 0 -> real teardown.  The lazy re-init paths deliberately do NOT
+  // attach — counting them would make the count depend on how many buffers
+  // happened to be created before the device existed.
+  void attachContext();
+  void attachContextAsync(std::function<void()> callback);
+  void detachContext();
+  int attachCount() const;
+
   bool isDeviceValid();
   void ensureDeviceValid();
 
@@ -358,11 +420,31 @@ public:
   static bool uploadProfEnabled();
 
 private:
+  // The unguarded body of initializeContext() / destroyContext(): runs with NO
+  // lock held (the device request takes milliseconds and destroyContext joins
+  // the WebGPU thread), serialized purely by ctxState.
+  void initializeContextUnlocked();
+  void destroyContextUnlocked();
+
   std::unique_ptr<Context> ctx;
   mgpu::mutex gpuOperationMutex;
   WebGPUThread webgpuThread;
   std::string adapterFilter;
   std::string selectedName;
+
+  // ── Context lifecycle state (see the enum above) ─────────────────────────
+  // Guards ONLY the state word, the owner id and the reference count — never
+  // held across device creation or teardown.  Distinct from gpuOperationMutex
+  // on purpose: teardown takes gpuOperationMutex on the WebGPU thread, so
+  // sharing one mutex would reintroduce the deadlock this design avoids.
+  mutable mgpu::mutex ctxStateMutex;
+  std::condition_variable ctxStateCv;
+  CtxState ctxState = CtxState::Uninitialized;
+  // Thread currently performing the Initializing/Destroying work, so a
+  // re-entrant call from that same thread returns instead of waiting on
+  // itself.
+  std::thread::id ctxOwner;
+  int ctxAttachCount = 0;
 };
 class Buffer {
 public:

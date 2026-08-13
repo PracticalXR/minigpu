@@ -109,56 +109,85 @@ void MinigpuViewPlugin::HandleMethodCall(
     // from the producer's (e.g. Dawn's) D3D11 device.  The raw texture
     // pointer path only works if both producer and Flutter run on the
     // same D3D11 device, which is not the case in practice.
-    auto it = handlers_.find(instance_id);
-    if (shared_handle != 0) {
-      void* shared_h = reinterpret_cast<void*>(shared_handle);
-      // Cross-adapter guard: a handle the display adapter can't open would
-      // register fine and then fail EVERY raster-time bind ("Binding D3D
-      // surface failed.") with nothing surfaced here. Failing the present
-      // instead lets the app drop to its CPU preview path (and the producer
-      // can re-align via mgpuPreferDisplayAdapter before its GPU init).
-      std::string why;
-      if (!D3D11TextureHandler::ProbeSharedHandleBindable(shared_h, &why)) {
-        result->Error(
-            "cross_adapter",
-            "Shared texture is not bindable on Flutter's (primary display) "
-            "adapter: " + why +
-            " -- the producer created it on a different GPU.");
-        return;
-      }
-      if (it == handlers_.end()) {
+    //
+    // ONE HANDLER PER SOURCE HANDLE — see the header. A known handle is a
+    // pure MarkTextureFrameAvailable; only a NEW handle creates a texture
+    // (and evicts the least-recently presented one at the cap).
+    auto& per_instance = handlers_[instance_id];
+    const int64_t key = shared_handle != 0 ? shared_handle : handle;
+    auto it = per_instance.find(key);
+
+    if (it == per_instance.end()) {
+      if (shared_handle != 0) {
+        void* shared_h = reinterpret_cast<void*>(shared_handle);
+        // Cross-adapter guard: a handle the display adapter can't open would
+        // register fine and then fail EVERY raster-time bind ("Binding D3D
+        // surface failed.") with nothing surfaced here. Failing the present
+        // instead lets the app drop to its CPU preview path (and the producer
+        // can re-align via mgpuPreferDisplayAdapter before its GPU init).
+        std::string why;
+        if (!D3D11TextureHandler::ProbeSharedHandleBindable(shared_h, &why)) {
+          // The verdict comes from `why` — the probe classifies the HRESULT.
+          result->Error("not_bindable",
+                        "Shared texture is not bindable on Flutter's "
+                        "(primary display) adapter: " + why);
+          return;
+        }
         auto handler = std::make_unique<D3D11TextureHandler>(textures_);
         if (!handler->InitializeFromSharedHandle(shared_h, width, height)) {
           result->Error("init_failed",
                         "Failed to initialize D3D11 shared-handle texture handler");
           return;
         }
-        it = handlers_.emplace(instance_id, std::move(handler)).first;
+        HandlerEntry entry;
+        entry.handler = std::move(handler);
+        it = per_instance.emplace(key, std::move(entry)).first;
       } else {
-        it->second->UpdateFromSharedHandle(shared_h, width, height);
-      }
-    } else {
-      auto* tex = reinterpret_cast<ID3D11Texture2D*>(handle);
-      if (!tex) {
-        result->Error("invalid_handle", "Missing handle and sharedHandle");
-        return;
-      }
-      if (it == handlers_.end()) {
+        auto* tex = reinterpret_cast<ID3D11Texture2D*>(handle);
+        if (!tex) {
+          result->Error("invalid_handle", "Missing handle and sharedHandle");
+          return;
+        }
         auto handler = std::make_unique<D3D11TextureHandler>(textures_);
         if (!handler->Initialize(tex, width, height)) {
           result->Error("init_failed",
                         "Failed to initialize D3D11 texture handler");
           return;
         }
-        it = handlers_.emplace(instance_id, std::move(handler)).first;
+        HandlerEntry entry;
+        entry.handler = std::move(handler);
+        it = per_instance.emplace(key, std::move(entry)).first;
+      }
+      // Evict least-recently presented above the cap. AFTER the insert, so a
+      // producer at exactly the cap alternates without thrash; the handler
+      // dtor's completion-callback lifetime makes the unregister safe while
+      // the raster may still be sampling it.
+      if (per_instance.size() > kMaxHandlersPerInstance) {
+        auto lru = per_instance.begin();
+        for (auto e = per_instance.begin(); e != per_instance.end(); ++e) {
+          if (e->first == key) continue;  // never evict the one just used
+          if (lru->first == key || e->second.last_use < lru->second.last_use) {
+            lru = e;
+          }
+        }
+        if (lru->first != key) per_instance.erase(lru);
+      }
+    } else {
+      // Same source as some earlier present: the texture, its size and its
+      // ANGLE swapchain are already right — just tell the engine to sample.
+      if (shared_handle != 0) {
+        it->second.handler->UpdateFromSharedHandle(
+            reinterpret_cast<void*>(shared_handle), width, height);
       } else {
-        it->second->Update(tex, width, height);
+        it->second.handler->Update(reinterpret_cast<ID3D11Texture2D*>(handle),
+                                   width, height);
       }
     }
+    it->second.last_use = ++use_counter_;
 
     flutter::EncodableMap reply{
         {flutter::EncodableValue("textureId"),
-         flutter::EncodableValue(it->second->texture_id())},
+         flutter::EncodableValue(it->second.handler->texture_id())},
         {flutter::EncodableValue("width"), flutter::EncodableValue(width)},
         {flutter::EncodableValue("height"), flutter::EncodableValue(height)},
         {flutter::EncodableValue("presentedAtUs"),

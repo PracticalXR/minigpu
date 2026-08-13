@@ -27,13 +27,90 @@ EXPORT void mgpuDestroyContext();
 /// Install a log callback. [callback] is invoked on the thread that produces
 /// the log line. Pass NULL to revert to the default stderr output.
 /// [level]: 0=DEBUG 1=INFO 2=WARN 3=ERROR  (-1 = silence all)
+///
+/// NOT FOR DART. This registry is PROCESS-GLOBAL, so a Dart NativeCallable
+/// installed here outlives the isolate that created it: once that isolate
+/// exits the VM has deleted the trampoline while this library still holds
+/// the pointer, and the next line a Dawn worker thread logs aborts the whole
+/// process ("Callback invoked after it has been deleted"). Kept for non-Dart
+/// embedders, which own their own function's lifetime. Dart must use
+/// mgpuInitDartApi + mgpuSetLogPort below.
 EXPORT void mgpuSetLogCallback(MGPULogCallback callback);
 EXPORT void mgpuSetLogLevel(int level);
+
+/// --- Dart native-port log delivery ---------------------------------------
+/// A Dart port id is inert once its isolate is gone, so this is the only
+/// delivery path a whole-suite `dart test` run (one process, one isolate per
+/// test FILE) survives.
+///
+/// Call mgpuInitDartApi(NativeApi.initializeApiDLData) once, then
+/// mgpuSetLogPort(receivePort.sendPort.nativePort). Messages arrive as
+/// [int32 level, Uint8List utf8Message] — the bytes are COPIED into the
+/// message, so there is nothing to free and mgpuFreeLogMessage does not
+/// apply. Pass 0 to stop delivery.
+///
+/// LAST WRITER WINS across isolates, exactly like the function pointer.
+/// A registered port takes precedence over any MGPULogCallback.
+/// mgpuInitDartApi returns 0 on success, non-zero when this build has no
+/// Dart API (the Emscripten/web build) or the SDK version does not match.
+EXPORT int mgpuInitDartApi(void* initialize_api_dl_data);
+EXPORT void mgpuSetLogPort(int64_t port);
 /// Free a log message string returned via the log callback.
 /// The log callback passes a heap-allocated copy of each message so the
 /// pointer stays valid until the asynchronous Dart listener reads it.
 /// Dart MUST call this after consuming the string.
 EXPORT void mgpuFreeLogMessage(const char* msg);
+
+/// --- Dart native-port COMPLETIONS ----------------------------------------
+/// The `MGPUCallback` variants below are for embedders that own their
+/// function's lifetime. DART MUST USE THESE INSTEAD.
+///
+/// A Dart `NativeCallable` can only be released by `close()`, which deletes
+/// the trampoline, and this library cannot be told to forget a pointer it
+/// already holds — so a completion arriving after the close aborts the whole
+/// process with "Callback invoked after it has been deleted". Isolate teardown
+/// (hot restart, a worker isolate exiting) deletes them too, which no
+/// Dart-side discipline can cover. Posting to a port that is closed or whose
+/// isolate is gone is a defined, silent no-op.
+///
+/// Call `mgpuInitDartApi(NativeApi.initializeApiDLData)` once per isolate
+/// first (same call the log port uses; 0 = success). Then pass
+/// `receivePort.sendPort.nativePort` and a token you allocate.
+///
+/// WIRE FORMAT: one int64 per completion, `(token << 1) | ok`. Tokens are
+/// yours; never reuse one, so a late completion is a lookup miss rather than
+/// somebody else's resolved future. Every entry point posts EXACTLY ONCE,
+/// including on argument-validation failures — never leave a caller awaiting.
+///
+/// Element type codes for mgpuReadAsyncToPort. Deliberately NOT either
+/// BufferDataType enum: the Dart and C++ enums are ordered DIFFERENTLY, so an
+/// `.index` crossing this boundary is ambiguous.
+typedef enum {
+  MGPU_ELEM_I8 = 0,
+  MGPU_ELEM_U8 = 1,
+  MGPU_ELEM_I16 = 2,
+  MGPU_ELEM_U16 = 3,
+  MGPU_ELEM_I32 = 4,
+  MGPU_ELEM_U32 = 5,
+  MGPU_ELEM_I64 = 6,
+  MGPU_ELEM_U64 = 7,
+  MGPU_ELEM_F32 = 8,
+  MGPU_ELEM_F64 = 9
+} MGPUElementType;
+
+EXPORT void mgpuInitializeContextAsyncToPort(int64_t port, int64_t token);
+EXPORT void mgpuDispatchAsyncToPort(MGPUComputeShader *shader, int groupsX,
+                                    int groupsY, int groupsZ, int64_t port,
+                                    int64_t token);
+EXPORT void mgpuReadAsyncToPort(MGPUBuffer *buffer, void *outputData,
+                                size_t elementCount, size_t elementOffset,
+                                int elementType, int64_t port, int64_t token);
+
+/// Blocks until every task already queued on the WebGPU worker thread has
+/// run. Ordering aid for teardown: destroying a resource that an enqueued
+/// task still references frees it under that task. No-op when called from the
+/// worker thread itself (it cannot drain a queue it is the head of).
+EXPORT void mgpuDrainWorkQueue(void);
 
 /// Pre-init hint (Windows): make mgpuInitializeContext() bind Dawn to the
 /// adapter driving the PRIMARY display, so screen capture (Desktop
@@ -55,9 +132,21 @@ EXPORT int mgpuPreferDisplayAdapter(int enable);
 /// context is not initialized.
 EXPORT int mgpuGetSelectedAdapterName(char* out, int cap);
 
+/// Attach to the PROCESS-GLOBAL context, initializing it on the first attach.
+/// Safe to call concurrently from any number of threads/isolates: callers that
+/// arrive while an initialization is in flight wait for it and then share the
+/// result instead of starting a second one.
 EXPORT void mgpuInitializeContext();
 EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);
+/// Detach. The context is torn down only when the LAST attached consumer
+/// detaches — one isolate finishing must not destroy a device another isolate
+/// is still using. Single-consumer behaviour is unchanged (attach -> 1 -> init,
+/// detach -> 0 -> teardown).
 EXPORT void mgpuDestroyContext();
+/// Number of explicit attaches currently outstanding on the process-global
+/// context (0 when it is torn down). Diagnostics and tests only; lazy internal
+/// re-initialization does not count.
+EXPORT int mgpuContextRefCount();
 EXPORT MGPUComputeShader *mgpuCreateComputeShader();
 EXPORT void mgpuDestroyComputeShader(MGPUComputeShader *shader);
 EXPORT void mgpuLoadKernel(MGPUComputeShader *shader, const char *kernelString);
@@ -86,6 +175,10 @@ EXPORT MGPUContextHandle *mgpuCreateContextHandle(const char *adapterFilter);
  * thread when done. */
 EXPORT void mgpuContextInitializeAsync(MGPUContextHandle *handle,
                                        MGPUCallback callback);
+/* Port-delivered completion — the form Dart must use. See the wire format
+ * note above mgpuInitializeContextAsyncToPort. */
+EXPORT void mgpuContextInitializeAsyncToPort(MGPUContextHandle *handle,
+                                             int64_t port, int64_t token);
 /* Destroys the context and frees the handle.  All buffers/shaders created
  * from it must already be destroyed. */
 EXPORT void mgpuDestroyContextHandle(MGPUContextHandle *handle);

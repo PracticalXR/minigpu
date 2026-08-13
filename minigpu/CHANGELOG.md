@@ -1,5 +1,54 @@
 # minigpu
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- **`Buffer.writeRawBytes` is now copy-free on the way to the GPU, on BOTH
+  native and web.** No API change; the payload is simply no longer duplicated
+  into an intermediate list/scratch before it is handed to the driver. On a
+  streaming path (one whole frame per call) that duplicate was a whole-frame
+  host copy per frame — at 4K, half of the entire upload cost. Measured on a
+  4K 240-frame encode: `upload` **3.71 → 1.84 ms/frame**. See minigpu_ffi and
+  minigpu_web for the platform details; the web fix also removes a whole-frame
+  ALLOCATION per frame, which was a garbage source as well as a copy.
+
+- **Read staging no longer churns a GPU buffer per call.** A read whose length
+  differs from the previous read used to destroy and recreate the staging
+  buffer; capacity now only grows. This is invisible to a caller reading a
+  fixed-size tensor and worth 33 ms per 723 reads at 4K to one reading a
+  variable-length payload.
+
+- **`Minigpu.drainWorkQueue()`** — blocks until every GPU task already queued
+  has run. Dispatches, readbacks and shared-texture blits execute on a native
+  worker thread, so destroying a buffer or texture can free a resource a queued
+  task is about to touch; draining first makes teardown ordered instead of
+  hopeful. SYNCHRONOUS on purpose: the caller that needs it most is one that
+  cannot await — Flutter's `State.reassemble`, the only hook you get on hot
+  reload before the framework rebuilds on top of your GPU resources. Use it as
+  `stop producing → drainWorkQueue() → release`, never per frame. No-op on web.
+- Picks up the minigpu_ffi completion-delivery fix. Async GPU work
+  (`ComputeShader.dispatch`, `Buffer.read`, the shared-texture present, context
+  init) used to signal Dart through a per-call `NativeCallable` that was closed
+  when the operation finished. A completion arriving after that close aborted
+  the whole process with `Callback invoked after it has been deleted` — and
+  isolate teardown deleted the callbacks too, so hot restart and any worker
+  isolate exiting with GPU work in flight were fatal as well. Completions now
+  arrive on a Dart native port, which is silently inert once its isolate is
+  gone. No API change; existing code gets the fix by upgrading.
+  Flutter hot reload was the reliable trigger, because it pauses the isolate at
+  a safepoint for hundreds of milliseconds while the GPU worker thread keeps
+  completing work.
+
+## 1.6.0
+
+- Picks up minigpu_ffi 1.6.0: the process-global native context is now
+  serialized and reference-counted, so several isolates initializing the GPU
+  concurrently share one device instead of racing to free each other's. No API
+  change in this package.
+
 ## 1.5.9
 
 - **`ComputeShader.setBuffer` and `setBufferAtSlot` are now always ORDERED** —

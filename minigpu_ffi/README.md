@@ -82,21 +82,54 @@ after Dawn itself had compiled. It is now detected at configure time (look for
 
 ## Buffer readback / upload performance
 
-`FfiBuffer` pools its native scratch memory and `NativeCallable` across frames
-to eliminate per-call `malloc`/`free` and FFI callback registration overhead.
+`FfiBuffer` pools its native scratch memory across frames to eliminate per-call
+`malloc`/`free`, and completions cost no allocation at all.
 
-**How it works:**
+### `writeRawBytes` is copy-free
+
+The raw-upload path (`writeRawBytes`) does **not** stage through a scratch at
+all. `TypedData.address` in a leaf call gives C the caller's own backing store,
+so the payload is copied exactly once — by `wgpuQueueWriteBuffer`, into the
+driver's staging ring. It used to memcpy the whole payload into a native scratch
+first, purely to obtain a stable address; on a streaming path that was a
+whole-frame host copy per frame, measured at 4K as **half the entire upload
+stage** (3.71 → 1.84 ms/frame, with the time inside `wgpuQueueWriteBuffer`
+unchanged).
+
+Payloads over 32 MiB are still chunked, so the driver's staging ring never has
+to hold more than one chunk; the chunks are `Uint8List.sublistView`s, which
+alias rather than copy.
+
+The remaining copy is the driver's own. Removing it too would require writing
+the frame directly into a persistently mapped upload buffer, which is an API
+change (the caller would have to assemble its frame in memory minigpu owns)
+rather than something this path can do transparently.
+
+### Read staging grows, it does not resize
+
+The read path keeps one staging buffer per `Buffer`, and its capacity **only
+grows** (to the next power of two, bounded by the source buffer's size). It used
+to be destroyed and recreated whenever the next read asked for a different
+length, which is invisible for a fixed-size tensor and pathological for a
+payload whose length changes every frame: measured over 723 reads at 4K, the
+destroy/create cycle cost 33.05 ms against 0.28 ms for grow-on-demand.
+
+**How the pooled scratch works:**
 
 - The first `read()` or `write()` call allocates a scratch buffer of the
-  required size and a reusable `NativeCallable` listener. Both are kept alive
-  on the `FfiBuffer` instance.
-- Subsequent calls of the same size reuse both, so the hot path has zero FFI
+  required size, kept alive on the `FfiBuffer` instance.
+- Subsequent calls of the same size reuse it, so the hot path has zero FFI
   allocation overhead.
 - If the required size grows the scratch is reallocated; if a read or write is
   already in flight (re-entrant across an `await`) a local one-shot buffer is
   used as a fallback — this is safe because Dart is single-threaded.
-- `destroy()` frees the pooled scratch and closes the `NativeCallable` exactly
-  once, guarded by a `_destroyed` flag.
+- `destroy()` frees the pooled scratch exactly once, guarded by a `_destroyed`
+  flag. It deliberately tears down **no callback state**: see below.
+- Completion of the async read is an int64 posted to a Dart port, so there is
+  no per-call `NativeCallable` to register or close. That is a correctness
+  requirement before it is a performance one — closing a callback the C layer
+  may still invoke aborts the process — and it is documented in full in
+  `lib/minigpu_ffi_completion.dart`.
 
 ## Batched transfers (scoped uploads / readbacks)
 
@@ -184,6 +217,34 @@ output texture present, Dawn-side debug reads, and the video import path.
 Measured through a zero-readback present: p50 **15.69 → 2.57 ms** at 720p and
 **15.69 → 10.07 ms** at 4K. (The pre-fix number being *identical* at 9× the
 pixels is the tell — a cost invariant in the work is a clock tick, not work.)
+
+## Attributing a frame-time spike: `MGPU_WAIT_PROF`
+
+Transfer-path spikes are hard to attribute from a consumer's own stage timers,
+because **the cost does not stay where it is spent**. `wgpuQueueWriteBuffer` is
+asynchronous, so its device-side execution is charged to whichever call next
+waits on the device. The visible symptom is a spike that moves between stages
+run to run — it lands on `upload` once, on `readback` the next time — with no
+correlation to the data. Do not read that as several different bugs: it is one
+sync point absorbing whatever the device still owed.
+
+`MGPU_WAIT_PROF=1` reports, per site, count / total / mean / max **and the spin
+iteration count**, which is the discriminator those stage timers cannot give
+you:
+
+- a long wait with **thousands of spin iterations** is the device genuinely
+  busy — the time is real GPU work and no host-side change will remove it;
+- a long wall against a **handful of iterations** is the OS descheduling the
+  thread, i.e. a scheduling or timer-granularity artifact.
+
+`MGPU_WAIT_PROF_MS=<n>` additionally logs every individual event over n ms as it
+happens, with a timestamp, so an outlier can be lined up against the consumer's
+own per-frame output instead of being averaged away.
+
+Sites: the read path's `lock` / `flush` / staging `alloc` / `submit` / `map`
+wait / `copy` out / trailing event pump, the write path's `lock` / `flush` /
+`write`, `q.lat` (the worker thread's enqueue-to-start latency) and `drain`.
+Off by default, behind a single cached bool.
 
 ## Shared-texture present: correctness
 

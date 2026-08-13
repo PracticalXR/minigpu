@@ -239,6 +239,23 @@ abstract class MinigpuPlatform {
   /// artifact.
   int? get drainSpinBudgetMs => null;
 
+  /// BLOCKS until every GPU task already queued has run.
+  ///
+  /// The native side runs dispatches, readbacks and blits on its own worker
+  /// thread, so `destroy()` on a buffer or texture can free a resource that a
+  /// still-queued task is about to touch. Draining first makes the teardown
+  /// ordered rather than hopeful.
+  ///
+  /// It is SYNCHRONOUS on purpose: the place that needs it most is a hook that
+  /// cannot await — Flutter's [State.reassemble] during hot reload, where the
+  /// app has to stop and release GPU resources before the framework rebuilds
+  /// on top of them. Cost is bounded by the work already queued, so drain
+  /// after you have stopped producing, never per frame.
+  ///
+  /// No-op on platforms with no worker thread (web) and on a binary predating
+  /// the export.
+  void drainWorkQueue() {}
+
   /// Creates an INDEPENDENT platform context bound to the adapter whose name
   /// contains [adapterFilter] (case-insensitive substring, e.g. "3090") —
   /// its own device, queue, and task FIFO.  Buffers and shaders created from

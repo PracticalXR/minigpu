@@ -10,7 +10,9 @@
 #include "../include/minigpu_external.h"
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
+#include "../include/dart_port.h"
 #include "../include/log.h"
+#include "../include/wait_prof.h"
 
 // webgpu.h is pulled in through buffer.h / minigpu.h
 #include "webgpu.h"
@@ -171,10 +173,12 @@ static bool drain_dawn_events_with_timeout(
         const char*          op,
         int                  timeout_ms = 5000) {
     using namespace std::chrono;
+    mgpu::WaitScope wpDrain(mgpu::WP_DRAIN);
     const auto start    = steady_clock::now();
     const auto deadline = start + milliseconds(timeout_ms);
     const auto spinEnd  = start + milliseconds(drain_spin_budget_ms());
     for (;;) {
+        ++wpDrain.iters;
         // Fire any Dawn callbacks that are ready; this is what sets the promise.
         wgpuInstanceProcessEvents(minigpu.getInstance());
         // Zero-timeout probe: never sleeps, so a callback that just fired is
@@ -1995,6 +1999,14 @@ static bool ensure_copy_pipeline_f32(MGPUSharedOutputTexture* tex,
 // AVHWDeviceContext device. Caching is required so that the texture and
 // the encoder live on the *same* ID3D11Device — that's what lets us skip
 // OpenSharedResource1 entirely (no cross-device sharing).
+// THREADING: ID3D11DeviceContext is NOT free-threaded, and the lazy creation
+// below was a bare double-check with no lock — two isolates racing it each
+// created a device and the second ComPtr assignment RELEASED the first while
+// the first caller was still holding the raw pointer it had just been handed.
+// g_d3d11_mutex serializes both the creation and every immediate-context use
+// in this file. (SetMultithreadProtected on the device covers D3D's own
+// internal state, not the ComPtr slots themselves.)
+static std::mutex                                  g_d3d11_mutex;
 static Microsoft::WRL::ComPtr<ID3D11Device>        g_d3d11_device;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_d3d11_context;
 
@@ -2015,7 +2027,8 @@ static void boost_d3d11_device_gpu_priority(ID3D11Device* dev) {
     }
 }
 
-static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
+// Caller MUST hold g_d3d11_mutex.
+static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter_locked() {
     if (g_d3d11_device) return g_d3d11_device.Get();
 
     WGPUDevice device = get_device();
@@ -2110,6 +2123,11 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
         (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
         static_cast<unsigned>(featureLevel));
     return g_d3d11_device.Get();
+}
+
+static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
+    std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+    return get_or_create_d3d11_device_on_dawn_adapter_locked();
 }
 
 static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
@@ -2610,6 +2628,41 @@ EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsync(
 #endif
 }
 
+/// Port-delivered completions for the two blits above. Identical work; the
+/// result travels as an int64 on a Dart port instead of through a function
+/// pointer the caller cannot safely retire. See dart_port.h.
+EXPORT void mgpuCopyBufferToSharedOutputTextureAsyncToPort(
+        MGPUBuffer*                buf,
+        MGPUSharedOutputTexture*   dst,
+        int64_t                    port,
+        int64_t                    token) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([buf, dst, port, token]() {
+        const int r = mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        mgpu::completionPost(port, token, r != 0);
+    });
+#else
+    (void)buf; (void)dst;
+    mgpu::completionPost(port, token, false);
+#endif
+}
+
+EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
+        MGPUVideoTexture*          src,
+        MGPUSharedOutputTexture*   dst,
+        int64_t                    port,
+        int64_t                    token) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([src, dst, port, token]() {
+        const int r = mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        mgpu::completionPost(port, token, r != 0);
+    });
+#else
+    (void)src; (void)dst;
+    mgpu::completionPost(port, token, false);
+#endif
+}
+
 /// Copy a GPU buffer of f32 RGBA pixels (4 floats per pixel, R,G,B,A in
 /// [0,1]) into the shared output texture.  Used by visualizers like the
 /// spectrogram which produce float colors directly into a tensor buffer.
@@ -2704,7 +2757,11 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixel(
         MGPUSharedOutputTexture* tex) {
 #ifdef _WIN32
     if (!tex || !tex->d3d11_texture) return 0xDEAD0001u;
-    ID3D11Device* dev = get_or_create_d3d11_device_on_dawn_adapter();
+    // Held across the whole read: the immediate context is not free-threaded,
+    // and CopySubresourceRegion/Map/Unmap here must not interleave with
+    // another thread's use of the same context.
+    std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+    ID3D11Device* dev = get_or_create_d3d11_device_on_dawn_adapter_locked();
     if (!dev || !g_d3d11_context) return 0xDEAD0002u;
 
     Microsoft::WRL::ComPtr<IDXGIKeyedMutex> km;
@@ -2887,10 +2944,15 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
  * Returns 0 on failure.
  * ====================================================================== */
 #ifdef _WIN32
+// Same threading story as g_d3d11_*: unlocked lazy creation plus an immediate
+// context that is not free-threaded. Lock order is ALWAYS
+// g_consumer_mutex -> g_d3d11_mutex (never the reverse).
+static std::mutex                                  g_consumer_mutex;
 static Microsoft::WRL::ComPtr<ID3D11Device>        g_consumer_device;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_consumer_context;
 
-static ID3D11Device* get_or_create_independent_consumer_device() {
+// Caller MUST hold g_consumer_mutex.
+static ID3D11Device* get_or_create_independent_consumer_device_locked() {
     if (g_consumer_device) return g_consumer_device.Get();
     ID3D11Device* producer = get_or_create_d3d11_device_on_dawn_adapter();
     if (!producer) return nullptr;
@@ -2921,15 +2983,53 @@ struct ConsumerSurface {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
     uint32_t w = 0, h = 0;
 };
-static std::unordered_map<void*, ConsumerSurface> g_consumer_surfaces;
+static std::unordered_map<void*, ConsumerSurface> g_consumer_surfaces; // g_consumer_mutex
 #endif
+
+// Drops the cached D3D11 devices when the context that produced them is torn
+// down. On the D3D11 backend g_d3d11_device IS Dawn's own device, so keeping
+// it across a destroy/re-init leaves a cache aliasing a dead device: the next
+// create_shared_output_texture() compares it against the NEW Dawn device,
+// concludes "not the same device", takes the cross-device NT-handle path on a
+// device that no longer exists, and returns null. That is the second symptom
+// of the process-global-context problem (seen in a serialized whole-package
+// run, where the first suite's teardown poisoned every later suite).
+// extern "C++": this sits inside the file's big extern "C" block, but it is a
+// C++ function declared in buffer.h.
+extern "C++" {
+namespace mgpu {
+void externalOnContextDestroyed(const void* context) {
+#ifdef _WIN32
+    // Only the process-global context builds these caches; a secondary
+    // Minigpu.forAdapter context must not clear them.
+    if (context != static_cast<const void*>(&::minigpu)) return;
+    {
+        std::lock_guard<std::mutex> lk(g_consumer_mutex);
+        g_consumer_surfaces.clear();
+        g_consumer_context.Reset();
+        g_consumer_device.Reset();
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+        g_d3d11_context.Reset();
+        g_d3d11_device.Reset();
+    }
+#else
+    (void)context;
+#endif
+}
+} // namespace mgpu
+} // extern "C++"
 
 EXPORT uint32_t mgpuDebugConsumerChecksumSharedHandle(void*    sharedHandle,
                                                       uint32_t width,
                                                       uint32_t height) {
 #ifdef _WIN32
     if (!sharedHandle || width == 0 || height == 0) return 0;
-    ID3D11Device* dev = get_or_create_independent_consumer_device();
+    // Held across the whole read: g_consumer_context is an immediate context
+    // (not free-threaded) and g_consumer_surfaces is a plain unordered_map.
+    std::lock_guard<std::mutex> lk(g_consumer_mutex);
+    ID3D11Device* dev = get_or_create_independent_consumer_device_locked();
     if (!dev || !g_consumer_context) return 0;
 
     ConsumerSurface& cs = g_consumer_surfaces[sharedHandle];

@@ -1,12 +1,12 @@
 # minigpu_flutter
 
-Flutter companion for [minigpu](../minigpu). Re-exports the full `minigpu` API and adds a thin widget that fires registered teardown callbacks during Flutter hot reload — preventing stale `NativeCallable` invocations when the Dart isolate is rebuilt mid-dispatch.
+Flutter companion for [minigpu](../minigpu). Re-exports the full `minigpu` API and adds a thin widget that runs your GPU teardown at hot reload, before Flutter rebuilds the widget tree.
 
 ## Why this package exists
 
-`minigpu` creates short-lived `NativeCallable` handles for each GPU dispatch, read, or write operation. If a Flutter hot reload tears down the isolate while one of these operations is in-flight, the `finally` block that closes the handle never runs. The next time the C GPU callback fires it invokes a dead function pointer and the VM aborts unconditionally.
+`MinigpuBinding` is a `StatefulWidget` whose `reassemble()` synchronously calls every callback registered via `MinigpuFlutterBinding.addDisposeCallback`. Hot reload is the one moment a long-lived GPU resource has no other teardown hook: nothing is disposed, `initState` does not re-run, and your app keeps whatever contexts, buffers and shaders it had. Register the ones that should not survive a reload and they get torn down deterministically instead of leaking or being rebuilt on top of themselves.
 
-`MinigpuBinding` is a `StatefulWidget` whose `reassemble()` synchronously calls all callbacks registered via `MinigpuFlutterBinding.addDisposeCallback`, allowing you to destroy GPU contexts before the isolate is rebuilt.
+**It is not a crash guard.** It used to be described as one: minigpu built a short-lived `NativeCallable` per dispatch/read/write, and a completion that arrived after Dart closed the handle aborted the whole process (`Callback invoked after it has been deleted`). That was a real bug and this widget could not have fixed it — `reassemble()` is synchronous, so it can stop new work but cannot wait for work already handed to the GPU worker thread, and isolate teardown deletes the callbacks whether or not Dart closed them. The fix belonged in minigpu_ffi, where completions now arrive on a Dart native port that is silently inert once its isolate is gone. Upgrade minigpu to get it; use this widget for teardown ordering, not for safety.
 
 ## Installation
 

@@ -304,6 +304,24 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(MGPUBuffer* buf,
                                                MGPUSharedOutputTexture* dst);
 
 /**
+ * Port-delivered async variants of the two blits above — the form Dart must
+ * use. The work (compute pass + present sync) runs on the WebGPU worker
+ * thread; when it finishes, `(token << 1) | ok` is posted to [port]. See the
+ * wire-format note in minigpu.h; the function-pointer variants remain for
+ * embedders that own their callback's lifetime.
+ *
+ * This is the per-presented-frame path, so it is also the one that made a
+ * Dart NativeCallable per frame — 30-60 deletable trampolines a second, each
+ * one a chance to abort the process.
+ */
+EXPORT void mgpuCopyBufferToSharedOutputTextureAsyncToPort(
+        MGPUBuffer* buf, MGPUSharedOutputTexture* dst,
+        int64_t port, int64_t token);
+EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
+        MGPUVideoTexture* src, MGPUSharedOutputTexture* dst,
+        int64_t port, int64_t token);
+
+/**
  * Like mgpuCopyBufferToSharedOutputTexture but reads the source as
  * `array<f32>` with 4 floats per pixel (R,G,B,A in [0,1]).  Used by
  * visualizers (e.g. the spectrogram) that produce float colors directly.
