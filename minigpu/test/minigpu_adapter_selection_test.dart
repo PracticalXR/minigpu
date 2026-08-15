@@ -155,10 +155,23 @@ void main() {
         markTestSkipped('adapter preference is Windows-only');
         return;
       }
-      // Prior tests destroy() their contexts, so no context is live here and
-      // the hint must be accepted.
+      // The native context is PROCESS-global and outlives any one isolate, so
+      // in a whole-package `dart test` run another suite may already have one
+      // live here. `preferDisplayAdapter` then correctly reports too-late, and
+      // "the hint lands" is simply not observable from this process — the
+      // assertion is only meaningful when this suite owns the context.
+      final contextAlreadyLive =
+          (Minigpu.selectedAdapterName ?? '').isNotEmpty;
       final applied = Minigpu.preferDisplayAdapter();
-      expect(applied, isTrue, reason: 'hint must land before context init');
+      if (contextAlreadyLive) {
+        expect(
+          applied,
+          isFalse,
+          reason: 'a live context must make the pre-init hint report too-late',
+        );
+      } else {
+        expect(applied, isTrue, reason: 'hint must land before context init');
+      }
       final gpu = Minigpu();
       await gpu.init();
       try {

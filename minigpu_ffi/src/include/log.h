@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,9 +24,26 @@ enum LogLevel {
     LOG_ERROR = 3
 };
 
-/// Signature for the Dart-side log bridge.
+/// Signature for a non-Dart embedder's log bridge.
 /// level: 0=DEBUG 1=INFO 2=WARN 3=ERROR
+///
+/// DART EMBEDDERS MUST NOT USE THIS. The registry below is PROCESS-GLOBAL,
+/// so a Dart `NativeCallable` installed here outlives the isolate that
+/// created it: once that isolate exits the VM has deleted the trampoline
+/// while this library still holds the pointer, and the next log line from a
+/// Dawn worker thread aborts the entire process
+/// ("Callback invoked after it has been deleted", isolate_group=(nil)).
+/// Use the native-port path (`mgpuSetLogPort`) instead — see below.
 using LogCallback = void(*)(int level, const char* message);
+
+/// Dart native-port delivery, defined in minigpu.cpp (it owns the vendored
+/// Dart API headers). `logPostToPort` returns true when a port is registered
+/// AND the message was handed to the VM — in that case the function-pointer /
+/// stderr paths are skipped. Always false in builds without MINIGPU_HAVE_DART_DL
+/// (e.g. the Emscripten/web build), so behaviour there is unchanged.
+bool logPostToPort(int level, const char* message, size_t len);
+intptr_t logInitDartApi(void* initialize_api_dl_data);
+void logSetPort(int64_t port);
 
 class Logger {
 public:
@@ -56,6 +74,11 @@ public:
         char buffer[1024];
         snprintf(buffer, sizeof(buffer), format, args...);
 
+        // A registered native port wins: it is the only Dart delivery path
+        // that survives the registering isolate exiting.  Nothing is heap
+        // allocated — Dart_PostCObject_DL copies the bytes into the message.
+        if (logPostToPort(static_cast<int>(level), buffer, strlen(buffer))) return;
+
         if (callback_) {
             // NativeCallable.listener dispatches asynchronously on the Dart
             // event loop.  By the time Dart runs, this stack frame has
@@ -81,6 +104,8 @@ public:
     void logRaw(LogLevel level, const char* message) {
         if (level_ == LOG_NONE || level < level_) return;
         mgpu::lock_guard<mgpu::mutex> lock(mutex_);
+        // Native port first — see log() above.
+        if (logPostToPort(static_cast<int>(level), message, strlen(message))) return;
         if (callback_) {
             // Same heap-copy requirement as log() — see comment above.
             char* heap_msg = static_cast<char*>(malloc(strlen(message) + 1));

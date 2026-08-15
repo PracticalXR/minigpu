@@ -1,6 +1,6 @@
 name: minigpu_view
 description: Zero-copy Flutter rendering for minigpu SharedOutputTexture and miniav GPU buffers.
-version: 1.5.8
+version: 1.6.1
 environment:
   sdk: ^3.11.4
   flutter: ">=3.24.0"
@@ -14,12 +14,18 @@ dependencies:
   meta: ^1.16.0
 
   # Core minigpu — required for SharedOutputTexture adapter.
-  minigpu: 1.5.8
-  minigpu_platform_interface: 1.5.8
+  minigpu: ^1.6.0
+  minigpu_platform_interface: ^1.6.0
 
   # miniav — required for MiniAVBuffer adapter.
-  # Uses a path override; version constraint is informational.
-  miniav: ^0.5.2
+  #
+  # NOT informational, whatever a previous comment here claimed. The path
+  # override in pubspec_overrides.yaml applies to THIS repo only; a consumer
+  # resolves against this constraint and nothing else. Leaving it at ^0.5.2
+  # while miniav moved to 0.7.0 made this package the single blocker for
+  # anything depending on both — and it was invisible in-repo, because the
+  # override meant local builds never consulted the constraint at all.
+  miniav: ^0.7.0
 
   # Used by web plugin only; pulled in unconditionally because Dart-only
   # web plugins cannot conditionally import native deps.

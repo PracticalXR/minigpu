@@ -1,5 +1,19 @@
 # gpu_tensor
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## 1.6.0
+
+- Version bump to keep the minigpu 1.6.0 family aligned; inherits the
+  serialized, reference-counted native context from minigpu_ffi 1.6.0. No API
+  change in this package.
+
+## 1.5.9
+
+- Version lockstep with minigpu 1.5.9; no API change.
+
 ## 1.5.8
 
 ## 1.5.7

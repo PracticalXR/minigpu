@@ -1,8 +1,49 @@
 # minigpu_web CHANGELOG
 
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- **`writeRawBytes` no longer allocates and fills a whole second list per
+  call.** It built a fresh `Uint32List` the size of the payload and memcpy'd
+  into it on every call, only to reinterpret the same bytes as words. On a
+  streaming path that is a whole-frame allocation plus a whole-frame copy per
+  frame — 33 MB at 4K — and the allocation is per-frame garbage large enough to
+  be a frame-time spike source in its own right, not just a copy. It now takes a
+  4-byte-aligned VIEW over the caller's bytes, which aliases the same store and
+  costs nothing. The copy remains only for the one case a view cannot describe
+  (a caller-supplied view whose `offsetInBytes` is not 4-aligned). This is the
+  web half of the same bug fixed natively in minigpu_ffi, and it matters more
+  here: the browser has no equivalent of the native path's escape hatches.
+
+## 1.6.0
+
+- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
+  in this package (the fix is native-only and does not apply to the web build).
+
+## 1.5.9
+
+- Version lockstep with minigpu 1.5.9; no behavior change. `setBufferFire`
+  aliases `setBuffer` on web, which stays correct now that the facade always
+  binds through it — single-threaded wasm executes GPU tasks in call order.
+
 ## 1.5.8
 
+- Implement the new platform-interface members on web:
+  `setBufferFire` aliases `setBuffer` (single-threaded wasm runs GPU tasks in call
+  order, so the plain bind already has FIFO semantics); `dispatchFire` drops the
+  returned promise (`queue.submit` is synchronous in JS WebGPU — the promise only
+  covers call plumbing, so submission order holds); `writeRawBytes` writes at
+  offset 0 via the u32 path and throws `UnsupportedError` otherwise.
+- `listAdapters` / `createSecondaryPlatform` / `drainSpinBudgetMs` inherit the
+  interface's no-op defaults — no multi-adapter contexts on web, and the native
+  drain fix does not apply.
+
 ## 1.5.7
+
+- Version lockstep with minigpu 1.5.7; no behavior change.
 
 ## 1.5.6
 

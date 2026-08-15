@@ -3,10 +3,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:minigpu_ffi/minigpu_ffi_bindings.dart' as ffi;
+import 'package:minigpu_ffi/minigpu_ffi_completion.dart';
+import 'package:minigpu_ffi/minigpu_ffi_log_port.dart' as log_port;
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
 typedef ReadAsyncCallbackFunc = Void Function(Pointer<Void>);
@@ -20,21 +23,12 @@ class MinigpuFfi extends MinigpuPlatform {
 
   @override
   Future<void> initializeContext() async {
-    final completer = Completer<void>();
-
-    void nativeCallback() {
-      completer.complete();
-    }
-
-    final nativeCallable = NativeCallable<Void Function()>.listener(
-      nativeCallback,
+    // Completion arrives on a Dart port, not through a NativeCallable — see
+    // minigpu_ffi_completion.dart for why the callback form aborts the VM.
+    await GpuCompletion.run(
+      (port, token) => mgpuInitializeContextAsyncToPort(port, token),
+      (callback) => ffi.mgpuInitializeContextAsync(callback),
     );
-    try {
-      ffi.mgpuInitializeContextAsync(nativeCallable.nativeFunction);
-      await completer.future;
-    } finally {
-      nativeCallable.close();
-    }
   }
 
   @override
@@ -58,6 +52,30 @@ class MinigpuFfi extends MinigpuPlatform {
 
   @override
   int queryVramBytes() => ffi.mgpuQueryVramBytes();
+
+  @override
+  List<GpuAdapterInfo> listAdapters() {
+    const cap = 16;
+    final names = malloc.allocate<Char>(cap * 128);
+    final totals = malloc.allocate<Int64>(cap);
+    final used = malloc.allocate<Int64>(cap);
+    try {
+      final n = ffi.mgpuEnumAdapters(names, totals, used, cap);
+      final count = n < cap ? n : cap;
+      return [
+        for (int i = 0; i < count; i++)
+          GpuAdapterInfo(
+            name: _decodeCString(names + i * 128),
+            totalVramBytes: totals[i],
+            usedVramBytes: used[i],
+          ),
+      ];
+    } finally {
+      malloc.free(names);
+      malloc.free(totals);
+      malloc.free(used);
+    }
+  }
 
   @override
   bool isExternalContentTypeSupported(ExternalContentType type) =>
@@ -105,6 +123,26 @@ class MinigpuFfi extends MinigpuPlatform {
       ffi.mgpuPreferDisplayAdapter(enable ? 1 : 0) == 0;
 
   @override
+  void drainWorkQueue() {
+    try {
+      mgpuDrainWorkQueue();
+    } catch (_) {
+      // Binary predates the export. Nothing to drain that we can reach; the
+      // caller's teardown is no worse off than before this API existed.
+    }
+  }
+
+  @override
+  int? get drainSpinBudgetMs {
+    try {
+      return ffi.mgpuDrainSpinBudgetMs();
+    } catch (_) {
+      // Binary predates the export — which is itself the answer: no drain fix.
+      return null;
+    }
+  }
+
+  @override
   String? get selectedAdapterName {
     const cap = 256;
     final buf = malloc.allocate<Char>(cap);
@@ -117,7 +155,39 @@ class MinigpuFfi extends MinigpuPlatform {
     }
   }
 
-  NativeCallable<Void Function(Int, Pointer<Char>)>? _logCallable;
+  @override
+  MinigpuPlatform? createSecondaryPlatform(String adapterFilter) {
+    final filterPtr = adapterFilter.toNativeUtf8();
+    try {
+      final handle = ffi.mgpuCreateContextHandle(filterPtr.cast());
+      if (handle == nullptr) return null;
+      return FfiSecondaryPlatform(handle);
+    } finally {
+      malloc.free(filterPtr);
+    }
+  }
+
+  // ---- Log callback --------------------------------------------------------
+  // Delivery is a Dart NATIVE PORT, not a NativeCallable.
+  //
+  // mgpuSetLogCallback installs a PROCESS-GLOBAL function pointer. A
+  // NativeCallable there is owned by ONE isolate, and when that isolate exits
+  // the VM deletes the trampoline while the C++ library keeps the pointer — the
+  // next line logged by mgpu (or by a Dawn worker thread, which has no isolate
+  // at all) aborts the whole process with "Callback invoked after it has been
+  // deleted". A whole-suite `dart test` run reproduces this every time,
+  // because each test file is its own isolate inside one VM process. A closed
+  // port is merely inert.
+  //
+  // PROCESS-GLOBAL, LAST WRITER WINS: with several isolates registered only the
+  // most recent one receives log lines — exactly the old function-pointer
+  // behaviour, minus the crash.
+
+  /// Receive port for native log lines in THIS isolate.
+  ReceivePort? _logPort;
+
+  /// Whether `mgpuInitDartApi` has succeeded in this isolate.
+  bool _dartApiInitialised = false;
 
   /// Decodes a null-terminated C string using [Utf8Decoder] with
   /// [allowMalformed] so that log messages containing non-UTF-8 bytes
@@ -138,27 +208,46 @@ class MinigpuFfi extends MinigpuPlatform {
     int level = 1,
   }) {
     ffi.mgpuSetLogLevel(level);
-    final old = _logCallable;
-    _logCallable = null;
-    old?.close();
+
+    // Clear/replace the NATIVE registration before releasing any old resource:
+    // the reverse order leaves a window in which the native side still points
+    // at something we have already closed.
+    final old = _logPort;
+    _logPort = null;
 
     if (callback == null) {
-      ffi.mgpuSetLogCallback(Pointer.fromAddress(0));
+      log_port.mgpuSetLogPort(0);
+      old?.close();
       return;
     }
 
-    final nc = NativeCallable<Void Function(Int, Pointer<Char>)>.listener((
-      int lvl,
-      Pointer<Char> msg,
-    ) {
-      final str = _decodeCString(msg);
-      // C++ heap-allocated this copy so the pointer stays valid across the
-      // async dispatch.  Free it now that we've consumed the string.
-      ffi.mgpuFreeLogMessage(msg);
-      callback(lvl, str);
+    if (!_dartApiInitialised) {
+      if (log_port.mgpuInitDartApi(NativeApi.initializeApiDLData) != 0) {
+        // Built without the Dart API, or an SDK mismatch. Leave the native
+        // library on its stderr sink rather than fall back to the crash-prone
+        // function-pointer path.
+        old?.close();
+        return;
+      }
+      _dartApiInitialised = true;
+    }
+
+    final port = ReceivePort('minigpu_ffi.log');
+    port.listen((dynamic message) {
+      // Wire format: [int32 level, Uint8List utf8Bytes]. Bytes rather than a
+      // string because Dawn/driver lines may carry non-UTF-8 (Latin-1)
+      // sequences; allowMalformed keeps those from throwing.
+      if (message is! List || message.length != 2) return;
+      callback(
+        message[0] as int,
+        const Utf8Decoder(
+          allowMalformed: true,
+        ).convert(message[1] as Uint8List),
+      );
     });
-    ffi.mgpuSetLogCallback(nc.nativeFunction);
-    _logCallable = nc;
+    _logPort = port;
+    log_port.mgpuSetLogPort(port.sendPort.nativePort);
+    old?.close();
   }
 
   Pointer<ffi.MGPUExternalVideoBuffer> _allocExternalVideoBuffer(
@@ -257,20 +346,19 @@ final class FfiVideoTexture implements PlatformVideoTexture {
     PlatformSharedOutputTexture dst,
   ) async {
     if (dst is! FfiSharedOutputTexture) return false;
-    final completer = Completer<bool>();
-    final nc = NativeCallable<Void Function(Int)>.listener((int ok) {
-      if (!completer.isCompleted) completer.complete(ok != 0);
-    });
-    try {
-      ffi.mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+    return GpuCompletion.runInt(
+      (port, token) => mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
         _self,
         dst._self,
-        nc.nativeFunction,
-      );
-      return await completer.future;
-    } finally {
-      nc.close();
-    }
+        port,
+        token,
+      ),
+      (callback) => ffi.mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+        _self,
+        dst._self,
+        callback,
+      ),
+    );
   }
 
   @override
@@ -312,21 +400,24 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
   }
 
   @override
+  // `async` is load-bearing for compatibility, not style: without it a bad
+  // `src` would throw SYNCHRONOUSLY out of a method whose callers may only
+  // have a `.catchError` on the returned future.
   Future<bool> copyFromBufferAsync(PlatformBuffer src) async {
-    final completer = Completer<bool>();
-    final nc = NativeCallable<Void Function(Int)>.listener((int ok) {
-      if (!completer.isCompleted) completer.complete(ok != 0);
-    });
-    try {
-      ffi.mgpuCopyBufferToSharedOutputTextureAsync(
-        (src as FfiBuffer)._self,
+    // THE ZERO-COPY PRESENT PATH — one of these per presented frame. It used
+    // to build and close a NativeCallable every time, i.e. it re-armed the
+    // "callback invoked after it has been deleted" abort 30-60 times a second.
+    final self = (src as FfiBuffer)._self;
+    return GpuCompletion.runInt(
+      (port, token) => mgpuCopyBufferToSharedOutputTextureAsyncToPort(
+        self,
         _self,
-        nc.nativeFunction,
-      );
-      return await completer.future;
-    } finally {
-      nc.close();
-    }
+        port,
+        token,
+      ),
+      (callback) =>
+          ffi.mgpuCopyBufferToSharedOutputTextureAsync(self, _self, callback),
+    );
   }
 
   @override
@@ -351,6 +442,62 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
     if (_destroyed) return;
     _destroyed = true;
     ffi.mgpuDestroySharedOutputTexture(_self);
+  }
+}
+
+/// An independent native context bound to a specific adapter (multi-GPU).
+/// Created via [MinigpuFfi.createSecondaryPlatform]; owns its MGPU instance
+/// (device, queue, WebGPU thread).  Buffers/shaders created here route every
+/// later operation through that instance automatically — only creation and
+/// context lifecycle need handle-aware calls.
+class FfiSecondaryPlatform extends MinigpuPlatform {
+  FfiSecondaryPlatform(this._handle);
+
+  final Pointer<ffi.MGPUContextHandle> _handle;
+  bool _destroyed = false;
+
+  @override
+  Future<void> initializeContext() async {
+    await GpuCompletion.run(
+      (port, token) =>
+          mgpuContextInitializeAsyncToPort(_handle, port, token),
+      (callback) => ffi.mgpuContextInitializeAsync(_handle, callback),
+    );
+  }
+
+  @override
+  Future<void> destroyContext() async {
+    if (_destroyed) return;
+    _destroyed = true;
+    ffi.mgpuDestroyContextHandle(_handle);
+  }
+
+  @override
+  PlatformComputeShader createComputeShader() {
+    final self = ffi.mgpuContextCreateComputeShader(_handle);
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiComputeShader(self);
+  }
+
+  @override
+  PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
+    final self =
+        ffi.mgpuContextCreateBuffer(_handle, bufferSize, dataType.index);
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiBuffer(self);
+  }
+
+  @override
+  String? get selectedAdapterName {
+    const cap = 256;
+    final buf = malloc.allocate<Char>(cap);
+    try {
+      final len = ffi.mgpuContextGetAdapterName(_handle, buf, cap);
+      if (len <= 0) return null;
+      return MinigpuFfi._decodeCString(buf);
+    } finally {
+      malloc.free(buf);
+    }
   }
 }
 
@@ -383,28 +530,29 @@ final class FfiComputeShader implements PlatformComputeShader {
   }
 
   @override
+  void setBufferFire(int tag, PlatformBuffer buffer) {
+    ffi.mgpuSetBufferFire(_self, tag, (buffer as FfiBuffer)._self);
+  }
+
+  @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
-    final completer = Completer<void>();
-
-    void nativeCallback() {
-      completer.complete();
-    }
-
-    final nativeCallable = NativeCallable<Void Function()>.listener(
-      nativeCallback,
+    // Awaited dispatches are the densest source of completions in a codec
+    // frame (5-10 per frame), so this is where the per-call NativeCallable hurt
+    // most: the C layer cannot cancel an enqueued dispatch, and a trampoline
+    // closed while one is still queued aborts the process.
+    await GpuCompletion.run(
+      (port, token) =>
+          mgpuDispatchAsyncToPort(_self, groupsX, groupsY, groupsZ, port, token),
+      (callback) =>
+          ffi.mgpuDispatchAsync(_self, groupsX, groupsY, groupsZ, callback),
     );
-    try {
-      ffi.mgpuDispatchAsync(
-        _self,
-        groupsX,
-        groupsY,
-        groupsZ,
-        nativeCallable.nativeFunction,
-      );
-      await completer.future;
-    } finally {
-      nativeCallable.close();
-    }
+  }
+
+  @override
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    // mgpuDispatch enqueues the pass on the WebGPU thread and returns
+    // immediately — no completer/NativeCallable round trip per dispatch.
+    ffi.mgpuDispatch(_self, groupsX, groupsY, groupsZ);
   }
 
   @override
@@ -423,21 +571,39 @@ final class FfiBuffer implements PlatformBuffer {
   // The read/write hot path used to `malloc` a scratch buffer and allocate a
   // `NativeCallable.listener` on *every* call. For a 30/60 fps feed that is
   // thousands of allocations per second. We instead keep one growable scratch
-  // (per direction) and one reusable listener, freeing them in [destroy].
+  // (per direction), freed in [destroy], and take the completion callback from
+  // the process-wide never-closed pool in minigpu_ffi_completion.dart.
   //
   // Dart's event loop is single-threaded, so re-entrancy can only happen
   // across an `await`. The `_readInFlight` / `_writeInFlight` guards detect
   // that rare case (e.g. two concurrent reads on the same buffer) and fall
-  // back to a temporary local allocation so the pooled state is never aliased.
+  // back to a temporary local allocation so the pooled SCRATCH is never
+  // aliased. The callback no longer needs that guard — every operation gets
+  // its own slot.
   Pointer<NativeType>? _readScratch;
   int _readScratchBytes = 0;
   bool _readInFlight = false;
-  NativeCallable<Void Function()>? _readCallable;
-  Completer<void>? _readCompleter;
 
   Pointer<NativeType>? _writeScratch;
   int _writeScratchBytes = 0;
   bool _writeInFlight = false;
+
+  /// Pool scratch only for SMALL transfers.  The pool exists for per-frame
+  /// streaming buffers (thousands of small writes/sec); pooling large
+  /// transfers instead PINS a native allocation the size of the transfer for
+  /// the buffer's whole lifetime — with thousands of live weight buffers
+  /// (e.g. 40 GB of model experts) that leaked tens of GB of host RAM.
+  /// Large transfers malloc/free per call.
+  static const int _maxPooledScratchBytes = 1 << 20;
+
+  // NOTE: the raw-upload path deliberately has NO scratch of its own.
+  //
+  // It used to keep an isolate-wide 32 MiB staging buffer and memcpy each
+  // payload into it before the FFI call, because a Dart list has no address an
+  // ordinary native call can take. `TypedData.address` in a leaf call removes
+  // that constraint, so [writeRawBytes] now passes the caller's own store: no
+  // scratch to grow, no pinned host allocation, and one whole frame-sized
+  // memcpy per frame less on the streaming path.
 
   bool _destroyed = false;
 
@@ -450,10 +616,85 @@ final class FfiBuffer implements PlatformBuffer {
     return _readScratch!;
   }
 
-  NativeCallable<Void Function()> _ensureReadCallable() {
-    return _readCallable ??= NativeCallable<Void Function()>.listener(() {
-      _readCompleter?.complete();
-    });
+  /// Maps a [BufferDataType] onto the C `MGPUElementType` code.
+  ///
+  /// NOT `dataType.index`: the Dart and C++ `BufferDataType` enums are ordered
+  /// differently, so an index means different things on the two sides of the
+  /// boundary. This mapping is explicit for that reason.
+  static int _elementTypeCode(BufferDataType dataType) {
+    switch (dataType) {
+      case BufferDataType.int8:
+        return MgpuElementType.i8;
+      case BufferDataType.uint8:
+        return MgpuElementType.u8;
+      case BufferDataType.int16:
+        return MgpuElementType.i16;
+      case BufferDataType.uint16:
+        return MgpuElementType.u16;
+      case BufferDataType.int32:
+        return MgpuElementType.i32;
+      case BufferDataType.uint32:
+        return MgpuElementType.u32;
+      case BufferDataType.int64:
+        return MgpuElementType.i64;
+      case BufferDataType.uint64:
+        return MgpuElementType.u64;
+      case BufferDataType.float32:
+        return MgpuElementType.f32;
+      case BufferDataType.float64:
+        return MgpuElementType.f64;
+      case BufferDataType.float16:
+        throw UnimplementedError(
+          'BufferDataType.float16 read is not implemented yet.',
+        );
+    }
+  }
+
+  /// Fallback issue path: one typed native call per element type, used only
+  /// when completions cannot be delivered by port.
+  void _issueTypedRead(
+    BufferDataType dataType,
+    Pointer<NativeType> nativePtr,
+    int elementsToRead,
+    int elementOffset,
+    Pointer<NativeFunction<Void Function()>> callback,
+  ) {
+    switch (dataType) {
+      case BufferDataType.int8:
+        ffi.mgpuReadAsyncInt8(_self, nativePtr.cast<Int8>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.uint8:
+        ffi.mgpuReadAsyncUint8(_self, nativePtr.cast<Uint8>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.int16:
+        ffi.mgpuReadAsyncInt16(_self, nativePtr.cast<Int16>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.uint16:
+        ffi.mgpuReadAsyncUint16(_self, nativePtr.cast<Uint16>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.int32:
+        ffi.mgpuReadAsyncInt32(_self, nativePtr.cast<Int32>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.uint32:
+        ffi.mgpuReadAsyncUint32(_self, nativePtr.cast<Uint32>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.int64:
+        ffi.mgpuReadAsyncInt64(_self, nativePtr.cast<Int64>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.uint64:
+        ffi.mgpuReadAsyncUint64(_self, nativePtr.cast<Uint64>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.float32:
+        ffi.mgpuReadAsyncFloat(_self, nativePtr.cast<Float>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.float64:
+        ffi.mgpuReadAsyncDouble(_self, nativePtr.cast<Double>(), elementsToRead,
+            elementOffset, callback);
+      case BufferDataType.float16:
+        throw UnimplementedError(
+          'BufferDataType.float16 read is not implemented yet.',
+        );
+    }
   }
 
   Pointer<NativeType> _ensureWriteScratch(int bytes) {
@@ -554,42 +795,59 @@ final class FfiBuffer implements PlatformBuffer {
     // Allocate temporary native memory based on the number of elements to read
     final int bytesToAllocate = elementsToRead * elementSize;
 
-    // Use the pooled scratch + listener on the common (non-reentrant) path;
-    // fall back to a private local allocation if a read is already in flight.
-    final bool usePool = !_readInFlight && !_destroyed;
-    final Completer<void> completer = Completer<void>();
+    // Reject what the native side has no reader for BEFORE issuing anything —
+    // the read is started once, above the copy-out switch.
+    if (dataType == BufferDataType.float16) {
+      throw UnimplementedError(
+        'BufferDataType.float16 read is not implemented yet.',
+      );
+    }
+
+    // Use the pooled scratch on the common (non-reentrant) path; fall back to
+    // a private local allocation if a read is already in flight or the
+    // transfer is too large to pin (see _maxPooledScratchBytes).
+    final bool usePool = !_readInFlight &&
+        !_destroyed &&
+        bytesToAllocate <= _maxPooledScratchBytes;
     final Pointer<NativeType> nativePtr;
-    final NativeCallable<Void Function()> nativeCallable;
     final bool ownsLocal;
     if (usePool) {
       ownsLocal = false;
       _readInFlight = true;
-      _readCompleter = completer;
       nativePtr = _ensureReadScratch(bytesToAllocate);
-      nativeCallable = _ensureReadCallable();
     } else {
       ownsLocal = true;
       nativePtr = malloc.allocate<NativeType>(bytesToAllocate);
-      // Tear-off `completer.complete` has an optional parameter, so it does
-      // not satisfy `Void Function()` — wrap in a zero-arg closure.
-      nativeCallable = NativeCallable<Void Function()>.listener(
-        () => completer.complete(),
-      );
     }
 
     try {
-      // Switch to call the proper native function, passing ELEMENT counts/offsets
+      // ONE issue + ONE await for every element type. The port entry point
+      // takes the element type as an argument, so the ten typed native calls
+      // collapse into one; the fallback keeps the typed form. What remains in
+      // the switch below is only the copy-out into [outputData].
+      await GpuCompletion.run(
+        (port, token) => mgpuReadAsyncToPort(
+          _self,
+          nativePtr.cast<Void>(),
+          elementsToRead,
+          elementOffset,
+          _elementTypeCode(dataType),
+          port,
+          token,
+        ),
+        (callback) => _issueTypedRead(
+          dataType,
+          nativePtr,
+          elementsToRead,
+          elementOffset,
+          callback,
+        ),
+      );
+
+      // Copy the landed bytes into the caller's typed buffer.
       switch (dataType) {
         case BufferDataType.int8:
           {
-            ffi.mgpuReadAsyncInt8(
-              _self,
-              nativePtr.cast<Int8>(),
-              elementsToRead,
-              elementOffset,
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Int8>().asTypedList(
               elementsToRead,
             );
@@ -608,14 +866,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int16:
           {
-            ffi.mgpuReadAsyncInt16(
-              _self,
-              nativePtr.cast<Int16>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Int16>().asTypedList(
               elementsToRead,
             );
@@ -635,14 +885,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int32:
           {
-            ffi.mgpuReadAsyncInt32(
-              _self,
-              nativePtr.cast<Int32>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Int32>().asTypedList(
               elementsToRead,
             );
@@ -662,14 +904,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.int64:
           {
-            ffi.mgpuReadAsyncInt64(
-              _self,
-              nativePtr.cast<Int64>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Int64>().asTypedList(
               elementsToRead,
             );
@@ -689,14 +923,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint8:
           {
-            ffi.mgpuReadAsyncUint8(
-              _self,
-              nativePtr.cast<Uint8>(),
-              elementsToRead, // ELEMENT count
-              elementOffset, // ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Uint8>().asTypedList(
               elementsToRead,
             );
@@ -712,14 +938,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint16:
           {
-            ffi.mgpuReadAsyncUint16(
-              _self,
-              nativePtr.cast<Uint16>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Uint16>().asTypedList(
               elementsToRead,
             );
@@ -739,14 +957,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint32:
           {
-            ffi.mgpuReadAsyncUint32(
-              _self,
-              nativePtr.cast<Uint32>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Uint32>().asTypedList(
               elementsToRead,
             );
@@ -766,14 +976,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.uint64:
           {
-            ffi.mgpuReadAsyncUint64(
-              _self,
-              nativePtr.cast<Uint64>(),
-              elementsToRead, // ELEMENT count
-              elementOffset, // ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<int> data = nativePtr.cast<Uint64>().asTypedList(
               elementsToRead,
             );
@@ -792,19 +994,9 @@ final class FfiBuffer implements PlatformBuffer {
           }
           break;
         case BufferDataType.float16:
-          throw UnimplementedError(
-            'BufferDataType.float16 read is not implemented yet.',
-          );
+          break; // rejected above, before the read was issued
         case BufferDataType.float32:
           {
-            ffi.mgpuReadAsyncFloat(
-              _self,
-              nativePtr.cast<Float>(),
-              elementsToRead,
-              elementOffset,
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<double> data = nativePtr.cast<Float>().asTypedList(
               elementsToRead,
             );
@@ -824,14 +1016,6 @@ final class FfiBuffer implements PlatformBuffer {
           break;
         case BufferDataType.float64:
           {
-            ffi.mgpuReadAsyncDouble(
-              _self,
-              nativePtr.cast<Double>(),
-              elementsToRead, // Pass ELEMENT count
-              elementOffset, // Pass ELEMENT offset
-              nativeCallable.nativeFunction,
-            );
-            await completer.future;
             final List<double> data = nativePtr.cast<Double>().asTypedList(
               elementsToRead,
             );
@@ -853,10 +1037,8 @@ final class FfiBuffer implements PlatformBuffer {
     } finally {
       if (ownsLocal) {
         malloc.free(nativePtr);
-        nativeCallable.close();
       } else {
         _readInFlight = false;
-        _readCompleter = null;
       }
     }
   }
@@ -930,7 +1112,9 @@ final class FfiBuffer implements PlatformBuffer {
         ? ((byteSize + 3) & ~3)
         : byteSize;
 
-    final bool usePool = !_writeInFlight && !_destroyed;
+    final bool usePool = !_writeInFlight &&
+        !_destroyed &&
+        scratchBytes <= _maxPooledScratchBytes;
     final Pointer<NativeType> nativePtr;
     final bool ownsLocal;
     if (usePool) {
@@ -1056,6 +1240,46 @@ final class FfiBuffer implements PlatformBuffer {
     }
   }
 
+  /// Chunked raw upload: hands [bytes]'s own backing store to
+  /// `mgpuWriteBufferAt` a chunk (32 MiB) at a time, so a multi-GB weight
+  /// upload never makes Dawn's staging ring hold more than one chunk.
+  ///
+  /// NO HOST COPY. `TypedData.address` in a leaf call gives C the list's real
+  /// address, so the bytes go straight from the caller's list into
+  /// `wgpuQueueWriteBuffer`. This path used to memcpy the whole payload into a
+  /// native scratch first, purely to obtain a stable pointer — at 4K that was a
+  /// 33 MB host copy per frame, about half of the whole upload stage, on top of
+  /// the copy `wgpuQueueWriteBuffer` makes into its own staging ring.
+  ///
+  /// See [ffi.mgpuWriteBufferAtLeaf] for why a leaf call is safe here.
+  @override
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) async {
+    if (bytes.length % 4 != 0 || dstByteOffset % 4 != 0) {
+      throw ArgumentError('writeRawBytes needs 4-byte-aligned length/offset');
+    }
+    if (bytes.isEmpty) return;
+    const chunkBytes = 32 << 20;
+    // Fast path: one chunk, so the list itself is the argument and no view
+    // object is built at all. This is the per-frame streaming shape (a 4K RGBA
+    // frame is 33.2 MB, under the 33.55 MB chunk).
+    if (bytes.length <= chunkBytes) {
+      ffi.mgpuWriteBufferAtLeaf(_self, bytes.address, bytes.length,
+          dstByteOffset);
+      return;
+    }
+    var off = 0;
+    while (off < bytes.length) {
+      final n = (bytes.length - off) < chunkBytes
+          ? (bytes.length - off)
+          : chunkBytes;
+      // A view, not a copy: `sublistView` aliases the same store and `.address`
+      // resolves through its offsetInBytes.
+      final view = Uint8List.sublistView(bytes, off, off + n);
+      ffi.mgpuWriteBufferAtLeaf(_self, view.address, n, dstByteOffset + off);
+      off += n;
+    }
+  }
+
   @override
   void destroy() {
     if (_destroyed) return;
@@ -1068,8 +1292,11 @@ final class FfiBuffer implements PlatformBuffer {
       malloc.free(_writeScratch!);
       _writeScratch = null;
     }
-    _readCallable?.close();
-    _readCallable = null;
+    // NO CALLBACK TEARDOWN HERE. destroy() used to close this buffer's pooled
+    // read listener, which is a process abort if a read is still in flight —
+    // the C layer cannot be told to forget a pointer it has already been
+    // handed. Completion slots are pooled and never closed; see
+    // minigpu_ffi_completion.dart.
     ffi.mgpuDestroyBuffer(_self);
   }
 }

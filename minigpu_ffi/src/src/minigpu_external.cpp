@@ -10,7 +10,9 @@
 #include "../include/minigpu_external.h"
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
+#include "../include/dart_port.h"
 #include "../include/log.h"
+#include "../include/wait_prof.h"
 
 // webgpu.h is pulled in through buffer.h / minigpu.h
 #include "webgpu.h"
@@ -54,6 +56,8 @@
 #include <cstring>
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
+#include <thread>
 #include <atomic>
 #include <mutex>
 #include <unordered_set>
@@ -78,13 +82,90 @@ extern "C" mgpu::MGPU minigpu;
  *      lost), the callback would never fire and the whole process would
  *      deadlock forever.
  *
- * drain_dawn_events_with_timeout() yields 1 ms between polls and bails
+ * drain_dawn_events_with_timeout() waits for a Dawn callback and bails
  * out with a logged warning after a configurable deadline so a hung GPU
  * surfaces as a recoverable encode error instead of a frozen app.
  * pump_dawn_events_nonblocking() is for the async encode path where we
  * just need to give Dawn a chance to fire pending callbacks without
  * actually waiting for anything.
+ *
+ * ── "1 ms" WAS REALLY ~15.6 ms, AND IT WAS THE WHOLE PRESENT COST ─────────
+ * The previous body was `while (fut.wait_for(milliseconds(1)) != ready)`.
+ * That looks like a 1 ms poll. It is not. NOTHING ELSE notifies the future:
+ * the promise is set from a Dawn callback that only runs inside the
+ * wgpuInstanceProcessEvents() call *further down this same loop body*, so
+ * wait_for can never be woken early — it always burns its FULL timeout, and
+ * on Windows a 1 ms condition-variable timeout is rounded up to the system
+ * timer quantum, ~15.6 ms unless some process in the session has raised the
+ * resolution. Every call therefore cost one whole tick.
+ *
+ * Measured (RTX 4090, gs420 decode present): GPU decode + shared-texture
+ * present p50 = 15.69 ms at 1280x720 AND 15.69 ms at 3840x2160 — bit-for-bit
+ * the same number at 9x the pixels, while the same decode WITHOUT the present
+ * costs 3.14 / 12.61 ms. A cost that is invariant in the work is not the work;
+ * it is a clock tick. Buffer::readDirect already learned this exact lesson
+ * (see the hot-poll comment in buffer.cpp) — the present path never got it.
+ *
+ * Fix: check the future with a ZERO timeout (never sleeps) and hand the wait
+ * a bounded yield-spin. Real GPU completions land in microseconds-to-a-few-ms,
+ * so they now return as soon as the callback fires. Only a wait that outlives
+ * the spin budget (a cold shader compile, a wedged driver) degrades to the old
+ * coarse sleep — which is exactly the case the 2-problem note above wanted to
+ * stop pegging a core for. Set MGPU_DRAIN_SPIN_MS=0 to restore the pre-fix
+ * behaviour exactly (A/B escape); the default budget is 8 ms.
  * ====================================================================== */
+
+// Bounded yield-spin budget, in milliseconds, before falling back to coarse
+// sleeping. Env-overridable so the fix can be priced (0 == old behaviour).
+//
+// The override is parsed STRICTLY, and that is the whole point: this used to be
+// `std::atoi`, which returns 0 for any non-numeric string. `MGPU_DRAIN_SPIN_MS`
+// set to "on", "true", "default" or a typo therefore selected budget 0 — the
+// pathological pre-fix path, a ~15.6 ms timer quantum on EVERY GPU wait — with
+// no diagnostic whatsoever. A knob whose failure mode is "silently 6x slower"
+// is a trap; only a fully-consumed, in-range, non-negative integer is honoured
+// now, anything else warns and keeps the default, and an explicit 0 says so out
+// loud because it is a measurement mode, not a setting.
+static int drain_spin_budget_ms() {
+    static int cached = -1;
+    if (cached < 0) {
+        constexpr int kDefaultBudgetMs = 8;
+        constexpr long kMaxBudgetMs    = 1000;  // beyond this it is a hang, not a spin
+        cached = kDefaultBudgetMs;
+        const char* s = std::getenv("MGPU_DRAIN_SPIN_MS");
+        if (s && s[0]) {
+            char* end = nullptr;
+            const long v = std::strtol(s, &end, 10);
+            if (end && *end == '\0' && v >= 0 && v <= kMaxBudgetMs) {
+                cached = static_cast<int>(v);
+                if (cached == 0) {
+                    LOG_ERROR("[minigpu_external] MGPU_DRAIN_SPIN_MS=0 — the event "
+                              "drain is reverted to its PRE-FIX behaviour and every "
+                              "GPU wait will cost a ~15.6 ms timer quantum. This is "
+                              "an A/B measurement mode; never ship with it set.");
+                }
+            } else {
+                LOG_ERROR("[minigpu_external] MGPU_DRAIN_SPIN_MS=\"%s\" is not an "
+                          "integer in [0, %ld] — ignoring it and using the default "
+                          "%d ms. (It previously parsed as 0, silently restoring the "
+                          "pre-fix timer-quantum stall.)",
+                          s, kMaxBudgetMs, kDefaultBudgetMs);
+            }
+        }
+    }
+    return cached;
+}
+
+static inline void drain_yield() {
+#ifdef _WIN32
+    // Sleep(0) yields the remainder of the timeslice to any ready thread of
+    // equal priority and returns immediately otherwise — no timer quantum
+    // involved. Same primitive Buffer::readDirect's hot-poll settled on.
+    Sleep(0);
+#else
+    std::this_thread::yield();
+#endif
+}
 
 template <typename FutureT>
 static bool drain_dawn_events_with_timeout(
@@ -92,14 +173,30 @@ static bool drain_dawn_events_with_timeout(
         const char*          op,
         int                  timeout_ms = 5000) {
     using namespace std::chrono;
-    const auto deadline = steady_clock::now() + milliseconds(timeout_ms);
-    while (fut.wait_for(milliseconds(1)) != std::future_status::ready) {
+    mgpu::WaitScope wpDrain(mgpu::WP_DRAIN);
+    const auto start    = steady_clock::now();
+    const auto deadline = start + milliseconds(timeout_ms);
+    const auto spinEnd  = start + milliseconds(drain_spin_budget_ms());
+    for (;;) {
+        ++wpDrain.iters;
+        // Fire any Dawn callbacks that are ready; this is what sets the promise.
         wgpuInstanceProcessEvents(minigpu.getInstance());
-        if (steady_clock::now() >= deadline) {
+        // Zero-timeout probe: never sleeps, so a callback that just fired is
+        // observed immediately instead of after a full timer tick.
+        if (fut.wait_for(milliseconds(0)) == std::future_status::ready) break;
+        const auto now = steady_clock::now();
+        if (now >= deadline) {
             LOG_ERROR("[minigpu_external] %s: GPU work did not complete "
                       "within %d ms; treating as driver hang and bailing out.",
                       op, timeout_ms);
             return false;
+        }
+        if (now < spinEnd) {
+            drain_yield();          // hot path: microseconds of latency
+        } else {
+            // Long wait (cold pipeline compile / driver trouble): stop burning
+            // the core. This sleep is coarse and that is now deliberate.
+            fut.wait_for(milliseconds(1));
         }
     }
     // One final drain so callbacks chained after our promise also fire.
@@ -109,6 +206,27 @@ static bool drain_dawn_events_with_timeout(
 
 static inline void pump_dawn_events_nonblocking() {
     wgpuInstanceProcessEvents(minigpu.getInstance());
+}
+
+// Introspection (also the freshness marker for a rebuilt artifact): which
+// drain policy is compiled/configured into THIS binary.
+EXPORT int mgpuDrainSpinBudgetMs(void) { return drain_spin_budget_ms(); }
+
+// TEST-ONLY ESCAPE. MGPU_PRESENT_NO_WAIT=1 removes the shared-texture
+// present's completion wait, reproducing the pre-ghost-fix producer/consumer
+// race on purpose. See the call site for why it exists.
+static bool present_wait_disabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* s = std::getenv("MGPU_PRESENT_NO_WAIT");
+        cached = (s && s[0] && s[0] != '0') ? 1 : 0;
+        if (cached) {
+            LOG_WARN("[minigpu_external] MGPU_PRESENT_NO_WAIT=1: shared-texture "
+                     "present will NOT wait for its copy to complete. This is a "
+                     "test-only broken mode (torn/stale frames are expected).");
+        }
+    }
+    return cached != 0;
 }
 
 /* =========================================================================
@@ -332,6 +450,49 @@ static MGPUVideoTexture* import_cpu(const MGPUExternalVideoBuffer* buf) {
  * ====================================================================== */
 
 #ifndef __EMSCRIPTEN__
+// Populate tex->num_planes + tex->views[] from a single imported Dawn
+// `texture`. NV12 is multi-planar: a shader can't bind an all-aspect view of
+// it, so we create one view per plane (Y = R8 via Plane0, UV = RG8 via Plane1)
+// — matching what mgpuVideoTextureToRGBA / setOnShader expect (views[0]=Y,
+// views[1]=UV). Every other format is a single all-aspect view of
+// [fallbackFormat]. Shared across all import tiers (shared-handle, Tier A
+// same-adapter, Tier B cross-adapter) so they agree on plane layout.
+static void build_video_texture_views(MGPUVideoTexture* tex,
+                                      WGPUTexture texture,
+                                      MGPUExternalPixelFormat fmt,
+                                      WGPUTextureFormat fallbackFormat) {
+    const bool isNv12 =
+        (fmt == MGPU_EXTERNAL_PIXEL_FORMAT_NV12 ||
+         fmt == MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES);
+    if (isNv12) {
+        tex->num_planes = 2;
+        WGPUTextureViewDescriptor yv{};
+        yv.format          = WGPUTextureFormat_R8Unorm;
+        yv.dimension       = WGPUTextureViewDimension_2D;
+        yv.baseMipLevel    = 0; yv.mipLevelCount   = 1;
+        yv.baseArrayLayer  = 0; yv.arrayLayerCount = 1;
+        yv.aspect          = WGPUTextureAspect_Plane0Only;
+        tex->views[0] = wgpuTextureCreateView(texture, &yv);
+
+        WGPUTextureViewDescriptor uvv{};
+        uvv.format          = WGPUTextureFormat_RG8Unorm;
+        uvv.dimension       = WGPUTextureViewDimension_2D;
+        uvv.baseMipLevel    = 0; uvv.mipLevelCount   = 1;
+        uvv.baseArrayLayer  = 0; uvv.arrayLayerCount = 1;
+        uvv.aspect          = WGPUTextureAspect_Plane1Only;
+        tex->views[1] = wgpuTextureCreateView(texture, &uvv);
+    } else {
+        tex->num_planes = 1;
+        WGPUTextureViewDescriptor vd{};
+        vd.format          = fallbackFormat;
+        vd.dimension       = WGPUTextureViewDimension_2D;
+        vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
+        vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
+        vd.aspect          = WGPUTextureAspect_All;
+        tex->views[0] = wgpuTextureCreateView(texture, &vd);
+    }
+}
+
 static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
                                        const MGPUExternalVideoBuffer* buf) {
     if (!mem) return nullptr;
@@ -364,19 +525,11 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1; // SharedTextureMemory wraps a single opaque texture
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->shared_mem   = mem;
     tex->planes[0]    = texture;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = props.format;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(texture, &vd);
+    build_video_texture_views(tex, texture, buf->pixel_format, props.format);
     return tex;
 }
 #endif // !__EMSCRIPTEN__
@@ -929,19 +1082,11 @@ static MGPUVideoTexture* import_d3d11_d3d12_bridge(const MGPUExternalVideoBuffer
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1;
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->shared_mem   = info->dawnCrossMem; // caller (via mgpuDestroyVideoTexture) will EndAccess + Release
     tex->planes[0]    = wTex;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = props.format;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(wTex, &vd);
+    build_video_texture_views(tex, wTex, buf->pixel_format, props.format);
     return tex;
 }
 
@@ -1201,18 +1346,10 @@ static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
-    tex->num_planes   = 1;
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
     tex->planes[0]    = wTex;
-
-    WGPUTextureViewDescriptor vd{};
-    vd.format          = wfmt;
-    vd.dimension       = WGPUTextureViewDimension_2D;
-    vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
-    vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
-    vd.aspect          = WGPUTextureAspect_All;
-    tex->views[0] = wgpuTextureCreateView(wTex, &vd);
+    build_video_texture_views(tex, wTex, buf->pixel_format, wfmt);
     return tex;
 }
 
@@ -1862,6 +1999,14 @@ static bool ensure_copy_pipeline_f32(MGPUSharedOutputTexture* tex,
 // AVHWDeviceContext device. Caching is required so that the texture and
 // the encoder live on the *same* ID3D11Device — that's what lets us skip
 // OpenSharedResource1 entirely (no cross-device sharing).
+// THREADING: ID3D11DeviceContext is NOT free-threaded, and the lazy creation
+// below was a bare double-check with no lock — two isolates racing it each
+// created a device and the second ComPtr assignment RELEASED the first while
+// the first caller was still holding the raw pointer it had just been handed.
+// g_d3d11_mutex serializes both the creation and every immediate-context use
+// in this file. (SetMultithreadProtected on the device covers D3D's own
+// internal state, not the ComPtr slots themselves.)
+static std::mutex                                  g_d3d11_mutex;
 static Microsoft::WRL::ComPtr<ID3D11Device>        g_d3d11_device;
 static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_d3d11_context;
 
@@ -1882,7 +2027,8 @@ static void boost_d3d11_device_gpu_priority(ID3D11Device* dev) {
     }
 }
 
-static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
+// Caller MUST hold g_d3d11_mutex.
+static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter_locked() {
     if (g_d3d11_device) return g_d3d11_device.Get();
 
     WGPUDevice device = get_device();
@@ -1977,6 +2123,11 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
         (unsigned long)luid.HighPart, (unsigned long)luid.LowPart,
         static_cast<unsigned>(featureLevel));
     return g_d3d11_device.Get();
+}
+
+static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
+    std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+    return get_or_create_d3d11_device_on_dawn_adapter_locked();
 }
 
 static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
@@ -2281,6 +2432,7 @@ EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
+    minigpu.flushBatch(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
@@ -2385,6 +2537,7 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
+    minigpu.flushBatch(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
@@ -2406,7 +2559,14 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
     // the caller). Cost: a sub-millisecond-to-few-ms producer stall per frame;
     // a keyed-mutex / double-buffer would remove even that, but this is the
     // certain fix that does not depend on the consumer honoring a fence.
-    {
+    //
+    // MGPU_PRESENT_NO_WAIT=1 SKIPS this wait. It is a DELIBERATELY BROKEN mode
+    // and exists only as the positive control for the present-correctness gate
+    // (tool/gs420_present_gate.dart in livetensor_crosscoder): an oracle that
+    // has never been shown to fail is not an oracle. Under it the consumer read
+    // must start reporting stale/torn surfaces; if it does not, the gate is
+    // measuring nothing. Never set it in production.
+    if (!present_wait_disabled()) {
         std::promise<void> presentDone;
         auto presentFut = presentDone.get_future();
         WGPUQueueWorkDoneCallbackInfo cbInfo{};
@@ -2465,6 +2625,41 @@ EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsync(
 #else
     (void)src; (void)dst;
     if (callback) callback(0);
+#endif
+}
+
+/// Port-delivered completions for the two blits above. Identical work; the
+/// result travels as an int64 on a Dart port instead of through a function
+/// pointer the caller cannot safely retire. See dart_port.h.
+EXPORT void mgpuCopyBufferToSharedOutputTextureAsyncToPort(
+        MGPUBuffer*                buf,
+        MGPUSharedOutputTexture*   dst,
+        int64_t                    port,
+        int64_t                    token) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([buf, dst, port, token]() {
+        const int r = mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        mgpu::completionPost(port, token, r != 0);
+    });
+#else
+    (void)buf; (void)dst;
+    mgpu::completionPost(port, token, false);
+#endif
+}
+
+EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
+        MGPUVideoTexture*          src,
+        MGPUSharedOutputTexture*   dst,
+        int64_t                    port,
+        int64_t                    token) {
+#ifdef _WIN32
+    minigpu.getWebGPUThread().enqueueAsync([src, dst, port, token]() {
+        const int r = mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        mgpu::completionPost(port, token, r != 0);
+    });
+#else
+    (void)src; (void)dst;
+    mgpu::completionPost(port, token, false);
 #endif
 }
 
@@ -2540,6 +2735,7 @@ EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
+    minigpu.flushBatch(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
@@ -2561,7 +2757,11 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixel(
         MGPUSharedOutputTexture* tex) {
 #ifdef _WIN32
     if (!tex || !tex->d3d11_texture) return 0xDEAD0001u;
-    ID3D11Device* dev = get_or_create_d3d11_device_on_dawn_adapter();
+    // Held across the whole read: the immediate context is not free-threaded,
+    // and CopySubresourceRegion/Map/Unmap here must not interleave with
+    // another thread's use of the same context.
+    std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+    ID3D11Device* dev = get_or_create_d3d11_device_on_dawn_adapter_locked();
     if (!dev || !g_d3d11_context) return 0xDEAD0002u;
 
     Microsoft::WRL::ComPtr<IDXGIKeyedMutex> km;
@@ -2658,6 +2858,7 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
     wgpuCommandEncoderCopyTextureToBuffer(enc, &srcInfo, &dstInfo, &ext);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
+    minigpu.flushBatch(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
 
@@ -2711,6 +2912,186 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
 #else
     (void)tex;
     return 0xDEAD1006u;
+#endif
+}
+
+/* =========================================================================
+ * CONSUMER-SIDE VERIFICATION READ
+ *
+ * mgpuSharedOutputTextureDebugReadFirstPixel() reads through
+ * g_d3d11_device, which on this build IS Dawn's own ID3D11Device — the
+ * PRODUCER. Its immediate context serialises against Dawn's submissions, so
+ * it can never observe a half-written present. That makes it useless as a
+ * tearing oracle: it is structurally blind to the exact bug the present's
+ * OnSubmittedWorkDone wait exists to prevent.
+ *
+ * This function instead opens the texture by its legacy DXGI shared handle on
+ * an INDEPENDENT ID3D11Device (same adapter, separate device) and reads the
+ * whole surface — precisely how Flutter's compositor sees it. Nothing
+ * synchronises that device against the producer except whatever the present
+ * path itself guarantees, so:
+ *   - if the present returned before its copy completed, this read lands on a
+ *     surface that is partly frame N and partly frame N-1 and the checksum
+ *     matches NEITHER frame's recon  => TORN (the race is caught),
+ *   - if the copy had not started, it matches frame N-1's recon => STALE,
+ *   - if it matches frame N's recon, the pixels the consumer can see are the
+ *     pixels the decoder produced, at the instant the host would publish them.
+ * Call it IMMEDIATELY after the decode returns: any wait inserted before the
+ * read hands the producer free time and hides the race.
+ *
+ * FNV-1a is computed over RGBA-ordered bytes (the surface is BGRA8) so the
+ * result is directly comparable to a checksum of the decoder's RGBA recon.
+ * Returns 0 on failure.
+ * ====================================================================== */
+#ifdef _WIN32
+// Same threading story as g_d3d11_*: unlocked lazy creation plus an immediate
+// context that is not free-threaded. Lock order is ALWAYS
+// g_consumer_mutex -> g_d3d11_mutex (never the reverse).
+static std::mutex                                  g_consumer_mutex;
+static Microsoft::WRL::ComPtr<ID3D11Device>        g_consumer_device;
+static Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_consumer_context;
+
+// Caller MUST hold g_consumer_mutex.
+static ID3D11Device* get_or_create_independent_consumer_device_locked() {
+    if (g_consumer_device) return g_consumer_device.Get();
+    ID3D11Device* producer = get_or_create_d3d11_device_on_dawn_adapter();
+    if (!producer) return nullptr;
+
+    // Same adapter as the producer, but a brand-new device.
+    Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
+    if (FAILED(producer->QueryInterface(IID_PPV_ARGS(&dxgiDev))) || !dxgiDev)
+        return nullptr;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDev->GetAdapter(&adapter)) || !adapter) return nullptr;
+
+    D3D_FEATURE_LEVEL got{};
+    HRESULT hr = D3D11CreateDevice(
+        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &g_consumer_device, &got, &g_consumer_context);
+    if (FAILED(hr) || !g_consumer_device) {
+        LOG_ERROR("[minigpu_external] consumer D3D11CreateDevice failed: 0x%08lX",
+                  (unsigned long)hr);
+        g_consumer_device.Reset();
+        g_consumer_context.Reset();
+        return nullptr;
+    }
+    return g_consumer_device.Get();
+}
+
+struct ConsumerSurface {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> opened;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
+    uint32_t w = 0, h = 0;
+};
+static std::unordered_map<void*, ConsumerSurface> g_consumer_surfaces; // g_consumer_mutex
+#endif
+
+// Drops the cached D3D11 devices when the context that produced them is torn
+// down. On the D3D11 backend g_d3d11_device IS Dawn's own device, so keeping
+// it across a destroy/re-init leaves a cache aliasing a dead device: the next
+// create_shared_output_texture() compares it against the NEW Dawn device,
+// concludes "not the same device", takes the cross-device NT-handle path on a
+// device that no longer exists, and returns null. That is the second symptom
+// of the process-global-context problem (seen in a serialized whole-package
+// run, where the first suite's teardown poisoned every later suite).
+// extern "C++": this sits inside the file's big extern "C" block, but it is a
+// C++ function declared in buffer.h.
+extern "C++" {
+namespace mgpu {
+void externalOnContextDestroyed(const void* context) {
+#ifdef _WIN32
+    // Only the process-global context builds these caches; a secondary
+    // Minigpu.forAdapter context must not clear them.
+    if (context != static_cast<const void*>(&::minigpu)) return;
+    {
+        std::lock_guard<std::mutex> lk(g_consumer_mutex);
+        g_consumer_surfaces.clear();
+        g_consumer_context.Reset();
+        g_consumer_device.Reset();
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_d3d11_mutex);
+        g_d3d11_context.Reset();
+        g_d3d11_device.Reset();
+    }
+#else
+    (void)context;
+#endif
+}
+} // namespace mgpu
+} // extern "C++"
+
+EXPORT uint32_t mgpuDebugConsumerChecksumSharedHandle(void*    sharedHandle,
+                                                      uint32_t width,
+                                                      uint32_t height) {
+#ifdef _WIN32
+    if (!sharedHandle || width == 0 || height == 0) return 0;
+    // Held across the whole read: g_consumer_context is an immediate context
+    // (not free-threaded) and g_consumer_surfaces is a plain unordered_map.
+    std::lock_guard<std::mutex> lk(g_consumer_mutex);
+    ID3D11Device* dev = get_or_create_independent_consumer_device_locked();
+    if (!dev || !g_consumer_context) return 0;
+
+    ConsumerSurface& cs = g_consumer_surfaces[sharedHandle];
+    if (!cs.opened || cs.w != width || cs.h != height) {
+        cs = ConsumerSurface{};
+        // Legacy D3D11_RESOURCE_MISC_SHARED handle => OpenSharedResource
+        // (NOT OpenSharedResource1, which is for NT handles).
+        HRESULT hr = dev->OpenSharedResource(
+            reinterpret_cast<HANDLE>(sharedHandle),
+            __uuidof(ID3D11Texture2D),
+            reinterpret_cast<void**>(cs.opened.GetAddressOf()));
+        if (FAILED(hr) || !cs.opened) {
+            LOG_ERROR("[minigpu_external] consumer OpenSharedResource failed: "
+                      "0x%08lX", (unsigned long)hr);
+            g_consumer_surfaces.erase(sharedHandle);
+            return 0;
+        }
+        D3D11_TEXTURE2D_DESC sd{};
+        sd.Width          = width;
+        sd.Height         = height;
+        sd.MipLevels      = 1;
+        sd.ArraySize      = 1;
+        sd.Format         = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.Usage          = D3D11_USAGE_STAGING;
+        sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        hr = dev->CreateTexture2D(&sd, nullptr, &cs.staging);
+        if (FAILED(hr) || !cs.staging) {
+            g_consumer_surfaces.erase(sharedHandle);
+            return 0;
+        }
+        cs.w = width;
+        cs.h = height;
+    }
+
+    // No AcquireSync: the surface is legacy MISC_SHARED and carries no keyed
+    // mutex. That is the point — this read is deliberately unsynchronised
+    // against the producer.
+    g_consumer_context->CopyResource(cs.staging.Get(), cs.opened.Get());
+
+    D3D11_MAPPED_SUBRESOURCE m{};
+    HRESULT hr = g_consumer_context->Map(cs.staging.Get(), 0,
+                                         D3D11_MAP_READ, 0, &m);
+    if (FAILED(hr) || !m.pData) return 0;
+
+    uint32_t hash = 0x811c9dc5u;
+    const uint8_t* base = static_cast<const uint8_t*>(m.pData);
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* row = base + (size_t)y * m.RowPitch;
+        for (uint32_t x = 0; x < width; ++x) {
+            const uint8_t* p = row + (size_t)x * 4; // B,G,R,A
+            const uint8_t rgba[4] = {p[2], p[1], p[0], p[3]};
+            for (int i = 0; i < 4; ++i) {
+                hash = (hash ^ rgba[i]) * 0x01000193u;
+            }
+        }
+    }
+    g_consumer_context->Unmap(cs.staging.Get(), 0);
+    return hash;
+#else
+    (void)sharedHandle; (void)width; (void)height;
+    return 0;
 #endif
 }
 

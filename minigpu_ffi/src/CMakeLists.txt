@@ -81,6 +81,24 @@ target_sources(${MAIN_LIB} PRIVATE ${MAIN_SOURCES})
 target_include_directories(${MAIN_LIB} PUBLIC ${MAIN_INCLUDES})
 target_compile_definitions(${MAIN_LIB} PUBLIC DART_SHARED_LIB)
 
+# ── Dart dynamic-linking API (native builds only) ──────────────────────────
+# third_party/dart_dl is a verbatim copy of the Dart SDK's include/ plus
+# dart_api_dl.c. It lets mgpu::Logger deliver log lines to a Dart NATIVE PORT
+# instead of an MGPULogCallback function pointer. The log registry is
+# PROCESS-GLOBAL: a Dart NativeCallable registered there outlives the isolate
+# that created it, and the VM aborts the whole process the moment a Dawn
+# worker thread logs afterwards. A stale port id is inert.
+#
+# Not built for web — a wasm module has no Dart VM to post to, and the glob
+# above only picks up .cpp so dart_api_dl.c is listed explicitly.
+if(NOT EMSCRIPTEN)
+    target_sources(${MAIN_LIB} PRIVATE
+        "${MAIN_PATH}/third_party/dart_dl/dart_api_dl.c")
+    target_include_directories(${MAIN_LIB} PRIVATE
+        "${MAIN_PATH}/third_party/dart_dl")
+    target_compile_definitions(${MAIN_LIB} PRIVATE MINIGPU_HAVE_DART_DL)
+endif()
+
 # ── Optional: fold EXTRA sources into the main target. Generic hook used to
 # build single-blob wasm modules that link client codecs against minigpu
 # in-module (e.g. the livetensor crosscoder, GSPLATS420_C_GPU_DESIGN.md §9).
@@ -107,12 +125,53 @@ if(EMSCRIPTEN)
     # Include generated include directory before system includes
     include_directories(BEFORE "${DAWN_BUILD_DIR}/gen/src/emdawnwebgpu/include/")
 
+    # Resolve the emdawnwebgpu Emscripten port file.
+    #
+    # This must come from Dawn's ASSEMBLED package, not from Dawn's source tree:
+    # the port file checks for generated headers copied in beside it and refuses
+    # to run otherwise ("emdawnwebgpu.port.py must sit in a built
+    # emdawnwebgpu_pkg"). Dawn's `emdawnwebgpu_pkg` custom target performs that
+    # assembly into ${CMAKE_BINARY_DIR}/emdawnwebgpu_pkg, so the path below is
+    # only populated after that target runs — hence the add_dependencies() and
+    # deliberately NO EXISTS check on it (a clean tree has not built it yet).
+    #
+    # Older Dawn instead shipped a self-contained, version-stamped
+    # `emdawnwebgpu-v<stamp>.remoteport.py` that fetched a released package, and
+    # this file used to hardcode that name. Bumping DAWN_COMMIT therefore broke
+    # the web build outright, and em++ only said "not a valid port path" ~370
+    # targets in, long after Dawn itself had compiled. Both layouts now resolve.
+    set(MGPU_EMDAWNWEBGPU_PORT
+        "${CMAKE_BINARY_DIR}/emdawnwebgpu_pkg/emdawnwebgpu.port.py")
+    if(NOT EXISTS "${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu.port.py")
+        # No in-tree port to assemble from: fall back to a stamped remote port,
+        # which is standalone-usable, or stop with something readable.
+        file(GLOB _mgpu_port_candidates
+             "${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v*.remoteport.py")
+        if(_mgpu_port_candidates)
+            list(GET _mgpu_port_candidates 0 MGPU_EMDAWNWEBGPU_PORT)
+        else()
+            message(FATAL_ERROR
+                "emdawnwebgpu port file not found under "
+                "${DAWN_DIR}/src/emdawnwebgpu/pkg\n"
+                "Expected emdawnwebgpu.port.py, or a generated "
+                "emdawnwebgpu-v*.remoteport.py.\n"
+                "The Dawn checkout is probably at a commit whose layout differs "
+                "— check DAWN_COMMIT in cmake/dawn.cmake.")
+        endif()
+    endif()
+    message(STATUS "emdawnwebgpu port -> ${MGPU_EMDAWNWEBGPU_PORT}")
+
     # Create a helper library for WebGPU (from Dawn)
     add_library(webgpu_web "${DAWN_DIR}/third_party/emdawnwebgpu/pkg/webgpu/src/webgpu.cpp")
+    # The port directory is assembled by this target; without the edge, ninja is
+    # free to compile webgpu_web first and --use-port points at nothing.
+    if(TARGET emdawnwebgpu_pkg)
+        add_dependencies(webgpu_web emdawnwebgpu_pkg)
+    endif()
     # Must pass --use-port at compile time so Emscripten installs the emdawnwebgpu
     # port headers before the sysroot webgpu.h (which is an older incompatible version).
     target_compile_options(webgpu_web PRIVATE
-        "--use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py:shared_memory=true"
+        "--use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true"
     )
 
     set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
@@ -179,7 +238,7 @@ if(EMSCRIPTEN)
         ${MGPU_ASYNCIFY_INDIRECT_FLAG} \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
-        --use-port=${DAWN_DIR}/src/emdawnwebgpu/pkg/emdawnwebgpu-v20250818.200250.remoteport.py:shared_memory=true \
+        --use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
     ")
 else()

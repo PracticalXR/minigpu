@@ -8,6 +8,7 @@ import 'gpu_tensor_base.dart';
 extension TensorData<T extends TypedData> on Tensor<T> {
   /// Creates a new tensor by slicing the flattened tensor data.
   /// [start] is the starting flat index and [end] is the ending flat index (exclusive).
+  /// GPU-side copy — no readback.
   Future<Tensor<T>> sliceLinear({required int start, required int end}) async {
     if (start < 0 || end > size || start >= end) {
       throw Exception(
@@ -15,15 +16,29 @@ extension TensorData<T extends TypedData> on Tensor<T> {
       );
     }
     int newSize = end - start;
-    // Read the tensor data then slice it using getTypedDataSublist.
-    T fullData = await getData();
-    final T slicedData = getTypedDataSublist<T>(fullData, start, end);
-    // Create a new tensor with 1D shape.
-    return await Tensor.create<T>(
+    final result = await Tensor.create<T>(
       [newSize],
-      data: slicedData,
+      gpu: gpu,
       dataType: dataType,
     );
+    final wgslType = getWGSLType(dataType);
+    final shaderCode =
+        '''
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
+  if (i >= ${newSize}u) { return; }
+  output[i] = input[i + ${start}u];
+}
+''';
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', buffer);
+    shader.setBuffer('output', result.buffer);
+    await shader.dispatchLinear(newSize);
+    return result;
   }
 
   /// Slices the tensor based on multi-dimensional indices.
@@ -44,8 +59,6 @@ extension TensorData<T extends TypedData> on Tensor<T> {
       strides[i] = strides[i + 1] * shape[i + 1];
     }
 
-    // Compute flat offset.
-    int flatOffset = 0;
     for (int i = 0; i < shape.length; i++) {
       if (startIndices[i] < 0 ||
           endIndices[i] > shape[i] ||
@@ -54,7 +67,6 @@ extension TensorData<T extends TypedData> on Tensor<T> {
           "Invalid slice indices for dimension $i: start=${startIndices[i]}, end=${endIndices[i]}, shape=${shape[i]}.",
         );
       }
-      flatOffset += startIndices[i] * strides[i];
     }
 
     // Compute new shape and total elements.
@@ -66,18 +78,55 @@ extension TensorData<T extends TypedData> on Tensor<T> {
       numElems *= dimSize;
     }
 
-    // Read the entire tensor data then extract the slice.
-    T fullData = await getData();
-    final T slicedData = getTypedDataSublist(
-      fullData,
-      flatOffset,
-      flatOffset + numElems,
-    );
-    return await Tensor.create<T>(
+    // GPU-side strided gather — previously this read the ENTIRE tensor back
+    // to the CPU and re-uploaded the slice.  Note the old flat-sublist logic
+    // was also wrong for inner-dimension slices (non-contiguous regions);
+    // the gather indexes per-dimension so any hyper-rectangle is correct.
+    final rank = shape.length;
+    final result = await Tensor.create<T>(
       newShape,
-      data: slicedData,
+      gpu: gpu,
       dataType: dataType,
     );
+
+    // Output strides (row-major over newShape).
+    List<int> outStrides = List.filled(rank, 1);
+    for (int i = rank - 2; i >= 0; i--) {
+      outStrides[i] = outStrides[i + 1] * newShape[i + 1];
+    }
+
+    String u32Array(List<int> arr) =>
+        'array<u32, $rank>(${arr.map((x) => '${x}u').join(', ')})';
+    final wgslType = getWGSLType(dataType);
+    final shaderCode =
+        '''
+const rank: u32 = ${rank}u;
+const outStrides: array<u32, $rank> = ${u32Array(outStrides)};
+const inStrides: array<u32, $rank> = ${u32Array(strides)};
+const starts: array<u32, $rank> = ${u32Array(startIndices)};
+
+@group(0) @binding(0) var<storage, read_write> input: array<$wgslType>;
+@group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
+  if (i >= ${numElems}u) { return; }
+  var rem: u32 = i;
+  var inIndex: u32 = 0u;
+  for (var d: u32 = 0u; d < rank; d = d + 1u) {
+    let coord: u32 = rem / outStrides[d];
+    rem = rem % outStrides[d];
+    inIndex = inIndex + (coord + starts[d]) * inStrides[d];
+  }
+  output[i] = input[inIndex];
+}
+''';
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', buffer);
+    shader.setBuffer('output', result.buffer);
+    await shader.dispatchLinear(numElems);
+    return result;
   }
 
   /// Returns the value of the tensor element at the given [indices].
@@ -104,9 +153,21 @@ extension TensorData<T extends TypedData> on Tensor<T> {
       flatIndex += indices[i] * strides[i];
     }
 
-    T data = await getData();
-    // Use our helper to retrieve the element.
-    return getTypedDataElement(data, flatIndex).toDouble();
+    // Single-element readback — previously this read the ENTIRE tensor.
+    final TypedData out = switch (dataType) {
+      BufferDataType.int8 => Int8List(1),
+      BufferDataType.uint8 => Uint8List(1),
+      BufferDataType.int16 => Int16List(1),
+      BufferDataType.uint16 || BufferDataType.float16 => Uint16List(1),
+      BufferDataType.int32 => Int32List(1),
+      BufferDataType.uint32 => Uint32List(1),
+      BufferDataType.int64 => Int64List(1),
+      BufferDataType.uint64 => Uint64List(1),
+      BufferDataType.float32 => Float32List(1),
+      BufferDataType.float64 => Float64List(1),
+    };
+    await buffer.read(out, 1, readOffset: flatIndex, dataType: dataType);
+    return getTypedDataElement(out, 0).toDouble();
   }
 
   /// Sets the value of the tensor element at the given [indices] to [value].
@@ -174,6 +235,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   /// Reshapes the tensor into a new shape without changing the underlying data.
+  ///
+  /// Returns a non-owning view (see [Tensor.view]).  The previous
+  /// `Tensor.fromBuffer` implementation attached a SECOND finalizer to the
+  /// shared buffer, destroying it under whichever tensor outlived the other.
   Tensor<T> reshape(List<int> newShape) {
     int newSize = newShape.reduce((a, b) => a * b);
     if (newSize != size) {
@@ -181,8 +246,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         "New shape $newShape does not match total number of elements $size",
       );
     }
-    // Use the generic fromBuffer constructor.
-    return Tensor.fromBuffer(buffer, newShape, gpu: gpu, dataType: dataType);
+    return Tensor<T>.view(this, newShape);
   }
 
   /// Simple resize that creates a new tensor with the output shape
@@ -191,15 +255,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     final targetSize = targetShape.reduce((a, b) => a * b);
     final currentSize = size;
 
-    // Create new tensor filled with zeros
+    // Create new tensor — WebGPU zero-initializes it, no fill needed.
     final result = await Tensor.create<T>(
       targetShape,
       gpu: gpu,
       dataType: dataType,
     );
-
-    // Fill with zeros first
-    await result.fill(0.0);
 
     // If current tensor is larger, we'll only copy what fits
     // If output is larger, extra elements stay zero
@@ -222,8 +283,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> data: array<$wgslType>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let i: u32 = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = global_id.x + global_id.y * (nwg.x * 256u);
   if (i >= ${size}u) { return; }
   
   data[i] = $wgslValue;
@@ -235,8 +296,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       shader.loadKernelString(shaderCode);
       shader.setBuffer('data', buffer);
 
-      final workgroups = (size + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
+      await shader.dispatchLinear(size);
     } finally {
       shader.destroy();
     }
@@ -268,7 +328,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   /// Fast GPU-based full tensor copy
   Future<void> _copyAllData(Tensor<T> input, Tensor<T> output) async {
-    if (input.size != input.size) {
+    if (input.size != output.size) {
       throw Exception('Tensors must have same size for copying');
     }
 
@@ -280,25 +340,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let i: u32 = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = global_id.x + global_id.y * (nwg.x * 256u);
   if (i >= ${input.size}u) { return; }
   
   output[i] = input[i];
 }
 ''';
 
-    final shader = gpu.createComputeShader();
-    try {
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('input', input.buffer);
-      shader.setBuffer('output', output.buffer);
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', output.buffer);
 
-      final workgroups = (input.size + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-    } finally {
-      shader.destroy();
-    }
+    await shader.dispatchLinear(input.size);
   }
 
   /// Fast GPU-based element copy
@@ -315,25 +369,19 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let i: u32 = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = global_id.x + global_id.y * (nwg.x * 256u);
   if (i >= ${count}u) { return; }
   
   output[i] = input[i];
 }
 ''';
 
-    final shader = gpu.createComputeShader();
-    try {
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('input', input.buffer);
-      shader.setBuffer('output', output.buffer);
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', output.buffer);
 
-      final workgroups = (count + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-    } finally {
-      shader.destroy();
-    }
+    await shader.dispatchLinear(count);
   }
 
   /// Simplified reshape - just changes the shape view without changing data
@@ -346,9 +394,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         'Use resize() if you want to change the tensor size.',
       );
     }
-
-    // Just create a new view of the same buffer
-    return Tensor.fromBuffer(buffer, newShape, gpu: gpu, dataType: dataType);
+    return Tensor<T>.view(this, newShape);
   }
 
   /// Pad tensor to output shape by adding zeros
@@ -376,14 +422,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
   /// GPU-based padding implementation
   Future<Tensor<T>> padTensorGPU(List<int> targetShape) async {
+    // Fresh tensor is zero-initialized by WebGPU; only the data copy needed.
     final result = await Tensor.create<T>(
       targetShape,
       gpu: gpu,
       dataType: dataType,
     );
-
-    // Fill with zeros
-    await result.fill(0.0);
 
     // Copy existing data to the "top-left" corner
     await copyWithPadding(this, result);
@@ -422,8 +466,8 @@ const rank : u32 = ${rank}u;
 @group(0) @binding(1) var<storage, read_write> output: array<$wgslType>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let source_index: u32 = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let source_index: u32 = global_id.x + global_id.y * (nwg.x * 256u);
   if (source_index >= ${input.size}u) { return; }
   
   // Convert flat index to multi-dimensional indices
@@ -445,17 +489,11 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 }
 ''';
 
-    final shader = gpu.createComputeShader();
-    try {
-      shader.loadKernelString(shaderCode);
-      shader.setBuffer('input', input.buffer);
-      shader.setBuffer('output', output.buffer);
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('input', input.buffer);
+    shader.setBuffer('output', output.buffer);
 
-      final workgroups = (input.size + 255) ~/ 256;
-      await shader.dispatch(workgroups, 1, 1);
-    } finally {
-      shader.destroy();
-    }
+    await shader.dispatchLinear(input.size);
   }
 
   bool _shapesEqual(List<int> a, List<int> b) {
@@ -519,12 +557,12 @@ const outFactors : array<u32, $rank> = array<u32, $rank>(${formatArray(outFactor
 const inputStrides : array<u32, $rank> = array<u32, $rank>(${formatArray(inputStrides)});
 const invPermutation : array<u32, $rank> = array<u32, $rank>(${formatArray(invPermutation)});
 
-@group(0) @binding(0) var<storage, read_write> input: array<${getWGSLType(dataType)};
-@group(0) @binding(1) var<storage, read_write> output: array<${getWGSLType(dataType)};
+@group(0) @binding(0) var<storage, read_write> input: array<${getWGSLType(dataType)}>;
+@group(0) @binding(1) var<storage, read_write> output: array<${getWGSLType(dataType)}>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-  let i: u32 = global_id.x;
+fn main(@builtin(global_invocation_id) global_id: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = global_id.x + global_id.y * (nwg.x * 256u);
   if(i >= outSize) { return; }
   var remainder: u32 = i;
   var outIndices: array<u32, rank>;
@@ -546,13 +584,10 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
       gpu: gpu,
       dataType: dataType,
     );
-    final ComputeShader shader = gpu.createComputeShader();
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer("input", buffer);
     shader.setBuffer("output", result.buffer);
-    int wgCount = (outSize + 255) ~/ 256;
-    await shader.dispatch(wgCount, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(outSize);
 
     return result;
   }

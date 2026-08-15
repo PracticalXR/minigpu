@@ -1,6 +1,18 @@
 import 'dart:typed_data';
 import 'package:minigpu/minigpu.dart';
+import 'package:minigpu_ffi/minigpu_ffi_bindings.dart' as ffi;
 import 'package:test/test.dart';
+
+/// True when another isolate in THIS process is also attached to the
+/// process-global minigpu context — i.e. another suite of the same
+/// `dart test` run is producing log lines right now.
+bool _sharedProcess() {
+  try {
+    return ffi.mgpuContextRefCount() > 1;
+  } catch (_) {
+    return false; // binary predates the export
+  }
+}
 
 late Minigpu minigpu;
 void main() {
@@ -170,6 +182,19 @@ fn main(@builtin(global_invocation_id) GlobalInvocationID: vec3<u32>) {
     );
 
     test('no callback messages at level=quiet after install', () async {
+      // The log callback AND the log level are PROCESS-global with
+      // last-writer-wins semantics, and the native context outlives any one
+      // isolate. In a whole-package `dart test` run another suite's isolate
+      // sets the level back to INFO and its Dawn chatter lands in `received`
+      // here — the -1 this test installs is simply not in force any more.
+      // Only assert the quiet contract when this suite owns the process.
+      if (_sharedProcess()) {
+        markTestSkipped(
+          'another isolate is attached to the process-global context; the '
+          'log level is process-global and last-writer-wins',
+        );
+        return;
+      }
       await minigpu.destroy();
 
       final received = <String>[];

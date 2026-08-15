@@ -84,3 +84,73 @@ class _WebGpuBufferPreviewSource extends PreviewSource {
     'format': 'rgba32float',
   };
 }
+
+/// A present source built from RAW HANDLES, for producers that publish their
+/// surface as integers rather than as a [SharedOutputTexture].
+///
+/// The extension above is the right entry point whenever the texture OBJECT is
+/// in hand — it also picks the correct source kind on web, which this cannot.
+/// But a producer that hands out `{sharedHandle, texturePtr, width, height}`
+/// across an API boundary leaves the consumer with nothing to call it on, and
+/// the consumer then hand-rolls a PreviewSource. This is that class, written
+/// once.
+///
+/// [sharedHandle] is the DXGI shared HANDLE the compositor opens on its own
+/// device; [texturePtr] is the raw `ID3D11Texture2D*`, used by same-device
+/// consumers. Windows only — on other platforms present the texture object.
+class RawSharedTexturePreviewSource extends PreviewSource {
+  const RawSharedTexturePreviewSource({
+    required this.sharedHandle,
+    required this.texturePtr,
+    required this.width,
+    required this.height,
+  });
+
+  final int sharedHandle;
+  final int texturePtr;
+  final int width;
+  final int height;
+
+  @override
+  PreviewSourceKind get kind => PreviewSourceKind.nativeSharedTexture;
+
+  @override
+  Size get size => Size(width.toDouble(), height.toDouble());
+
+  @override
+  Map<String, Object?> toChannelMessage() => {
+        'handle': texturePtr,
+        'sharedHandle': sharedHandle,
+        'width': width,
+        'height': height,
+        'pixelFormat': 'rgba8',
+      };
+}
+
+/// Web/storage-buffer flavour of [RawSharedTexturePreviewSource]: a WGPUBuffer
+/// integer handle of packed RGBA8.
+class RawGpuBufferPreviewSource extends PreviewSource {
+  const RawGpuBufferPreviewSource({
+    required this.bufferHandle,
+    required this.width,
+    required this.height,
+  });
+
+  final int bufferHandle;
+  final int width;
+  final int height;
+
+  @override
+  PreviewSourceKind get kind => PreviewSourceKind.webGpuTexture;
+
+  @override
+  Size get size => Size(width.toDouble(), height.toDouble());
+
+  @override
+  Map<String, Object?> toChannelMessage() => {
+        'bufferHandle': bufferHandle,
+        'width': width,
+        'height': height,
+        'format': 'rgba8',
+      };
+}

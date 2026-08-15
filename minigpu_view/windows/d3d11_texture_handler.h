@@ -65,25 +65,47 @@ class D3D11TextureHandler {
   int64_t texture_id() const { return texture_id_; }
 
  private:
-  // Called by the Flutter engine on the raster thread when it needs the
-  // current GPU-side descriptor to compose the next frame.
-  const FlutterDesktopGpuSurfaceDescriptor* CopyDescriptor(size_t width,
-                                                           size_t height);
+  // EVERYTHING THE RASTER THREAD TOUCHES, with a lifetime independent of the
+  // handler.
+  //
+  // `TextureRegistrar::UnregisterTexture` is ASYNCHRONOUS — the engine keeps
+  // using the registered TextureVariant, and calling its surface callback,
+  // until the unregistration is actually processed on the raster thread. A
+  // handler that unregisters and then dies takes this state with it, so the
+  // next raster-thread callback locks a destroyed mutex, writes a descriptor
+  // into freed heap and hands the engine a dangling pointer. That corruption
+  // does not announce itself: it surfaces later, anywhere, as whatever else
+  // was living in that heap block — including the Dart VM aborting with
+  // "Callback invoked after it has been deleted" on a completely innocent
+  // FFI callback.
+  //
+  // So the callback captures a shared_ptr to this, never `this`, and the
+  // handler's destructor keeps both it and the variant alive until the engine
+  // confirms the unregistration.
+  struct SurfaceState {
+    // Protects the swap of the frame between Dart-thread Update() calls and
+    // raster-thread CopyDescriptor() calls.
+    std::mutex mutex;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    // For the shared-handle path: the legacy DXGI share HANDLE that Flutter's
+    // ANGLE will OpenSharedResource() on its own device.
+    void* shared_handle = nullptr;
+    int width = 0;
+    int height = 0;
+    FlutterDesktopGpuSurfaceDescriptor descriptor{};
+
+    // Called by the Flutter engine on the raster thread when it needs the
+    // current GPU-side descriptor to compose the next frame.
+    const FlutterDesktopGpuSurfaceDescriptor* CopyDescriptor();
+  };
+
+  // Registers `variant_` and wires the surface callback to `state_`.
+  bool RegisterWithEngine(FlutterDesktopGpuSurfaceType type);
 
   flutter::TextureRegistrar* registrar_ = nullptr;
-  std::unique_ptr<flutter::TextureVariant> variant_;
+  std::shared_ptr<flutter::TextureVariant> variant_;
+  std::shared_ptr<SurfaceState> state_ = std::make_shared<SurfaceState>();
   int64_t texture_id_ = -1;
-
-  // Protects the swap of current_texture_ between Dart-thread Update()
-  // calls and raster-thread CopyDescriptor() calls.
-  std::mutex mutex_;
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> current_texture_;
-  // For the shared-handle path: the legacy DXGI share HANDLE that
-  // Flutter's ANGLE will OpenSharedResource() on its own device.
-  void* shared_handle_ = nullptr;
-  int width_ = 0;
-  int height_ = 0;
-  FlutterDesktopGpuSurfaceDescriptor descriptor_{};
 };
 
 }  // namespace minigpu_view

@@ -5,8 +5,15 @@
 /// the underlying `ID3D11Texture2D*` is forwarded directly to the
 /// Windows plugin; no CPU readback occurs.
 ///
-/// CPU buffers are NOT wrapped by this adapter — they return null.
-/// Keep the existing `ui.decodeImageFromPixels` path for those.
+/// CPU buffers are NOT wrapped by this adapter — they return null, because a
+/// PreviewSource must reference a GPU resource and a host buffer is not one.
+///
+/// THAT IS NOT A REASON TO DECODE AN IMAGE. Use `MiniAVBuffer.asGpuFrame()`
+/// with a `GpuPane`: host planes (NV12, I420, YUY2, BGRA) are uploaded and
+/// unpacked by a compute shader, which is the same display path as everything
+/// else. Converting them per-pixel on the isolate that builds the UI is
+/// O(pixels) inside the capture callback and stalls the app before it looks
+/// slow.
 library;
 
 import 'dart:ui' show Size;

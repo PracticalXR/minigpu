@@ -3,3 +3,5 @@ dependency_overrides:
     path: ../minigpu_platform_interface
   minigpu:
     path: ../minigpu
+  minigpu_web:
+    path: ../minigpu_web

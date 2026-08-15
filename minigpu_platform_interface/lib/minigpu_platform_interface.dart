@@ -120,6 +120,30 @@ int getBufferSizeForType(BufferDataType type, int count) {
   }
 }
 
+/// A hardware GPU adapter as reported by the OS (DXGI on Windows): its
+/// device name, total dedicated VRAM, and current dedicated-VRAM usage
+/// (-1 when the usage query is unavailable).
+class GpuAdapterInfo {
+  const GpuAdapterInfo({
+    required this.name,
+    required this.totalVramBytes,
+    required this.usedVramBytes,
+  });
+
+  final String name;
+  final int totalVramBytes;
+  final int usedVramBytes;
+
+  /// Free dedicated VRAM, or total when usage is unknown.
+  int get freeVramBytes =>
+      usedVramBytes >= 0 ? totalVramBytes - usedVramBytes : totalVramBytes;
+
+  @override
+  String toString() =>
+      "GpuAdapterInfo('$name', ${totalVramBytes >> 20} MB total, "
+      '${usedVramBytes >= 0 ? '${usedVramBytes >> 20} MB used' : 'usage n/a'})';
+}
+
 abstract class MinigpuPlatform {
   MinigpuPlatform();
 
@@ -155,6 +179,10 @@ abstract class MinigpuPlatform {
   /// Returns dedicated VRAM usage in bytes for the primary GPU.
   /// Returns -1 on platforms where the query is unavailable.
   int queryVramBytes() => -1;
+
+  /// Enumerates hardware adapters with their dedicated-VRAM totals and
+  /// current usage.  Empty on platforms without adapter enumeration (web).
+  List<GpuAdapterInfo> listAdapters() => const [];
 
   // ---------------------------------------------------------------------------
   // Video texture interop (optional — returns null if unsupported)
@@ -199,6 +227,42 @@ abstract class MinigpuPlatform {
   /// Name of the adapter Dawn actually selected, or `null` when the context
   /// is not initialized / the platform does not expose it.
   String? get selectedAdapterName => null;
+
+  /// Yield-spin budget (ms) the LOADED native binary implements before the
+  /// event drain degrades to coarse sleeping, or `null` where it can't be
+  /// asked (web, or a binary predating the export).
+  ///
+  /// Purpose is runtime provenance: a build WITHOUT the drain fix burns a full
+  /// Windows timer quantum (~15.6 ms) on every GPU wait, which shows up as a
+  /// present cost that is identical at 720p and 4K. A caller on a latency path
+  /// can assert this is > 0 instead of trusting that it linked a fresh
+  /// artifact.
+  int? get drainSpinBudgetMs => null;
+
+  /// BLOCKS until every GPU task already queued has run.
+  ///
+  /// The native side runs dispatches, readbacks and blits on its own worker
+  /// thread, so `destroy()` on a buffer or texture can free a resource that a
+  /// still-queued task is about to touch. Draining first makes the teardown
+  /// ordered rather than hopeful.
+  ///
+  /// It is SYNCHRONOUS on purpose: the place that needs it most is a hook that
+  /// cannot await — Flutter's [State.reassemble] during hot reload, where the
+  /// app has to stop and release GPU resources before the framework rebuilds
+  /// on top of them. Cost is bounded by the work already queued, so drain
+  /// after you have stopped producing, never per frame.
+  ///
+  /// No-op on platforms with no worker thread (web) and on a binary predating
+  /// the export.
+  void drainWorkQueue() {}
+
+  /// Creates an INDEPENDENT platform context bound to the adapter whose name
+  /// contains [adapterFilter] (case-insensitive substring, e.g. "3090") —
+  /// its own device, queue, and task FIFO.  Buffers and shaders created from
+  /// the returned platform live on that adapter and must not be mixed with
+  /// another context's resources in a single dispatch.  Returns null on
+  /// platforms without multi-adapter support (web).
+  MinigpuPlatform? createSecondaryPlatform(String adapterFilter) => null;
 }
 
 // ---------------------------------------------------------------------------
@@ -370,7 +434,28 @@ abstract class PlatformComputeShader {
   void loadKernelString(String kernelString);
   bool hasKernel();
   void setBuffer(int tag, PlatformBuffer buffer);
+
+  /// Ordered bind: the binding update joins the same FIFO as dispatches and
+  /// buffer reads/writes, so bind→fire→rebind→fire sequences on one shader
+  /// are race-free even with [dispatchFire].  Backends whose task execution
+  /// is inherently in-order (single-threaded web) may alias [setBuffer].
+  void setBufferFire(int tag, PlatformBuffer buffer) => setBuffer(tag, buffer);
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ);
+
+  /// Fire-and-forget dispatch: enqueues the compute pass and returns without
+  /// waiting for queue submission.  Ordering is still guaranteed — dispatches,
+  /// writes and reads execute in call order — so a subsequent awaited
+  /// [PlatformBuffer.read] acts as the synchronization point for any number
+  /// of fired dispatches.
+  ///
+  /// SAFETY: the shader's bindings are snapshotted when the dispatch actually
+  /// runs, not when this returns. Never call [setBuffer] on a shader with a
+  /// fired-but-unsynchronized dispatch outstanding; give each call site its
+  /// own shader instance with stable bindings instead.
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    dispatch(groupsX, groupsY, groupsZ);
+  }
+
   void destroy();
 }
 
@@ -388,6 +473,22 @@ abstract class PlatformBuffer {
     int size, {
     BufferDataType dataType = BufferDataType.float32,
   });
+
+  /// Raw byte upload of [bytes] at [dstByteOffset], intended for LARGE
+  /// transfers: implementations should stream in bounded chunks so neither
+  /// host scratch nor driver staging ever holds the full payload (a whole
+  /// multi-GB write can otherwise spike/pin host RAM).  [dstByteOffset] and
+  /// the byte length must be multiples of 4.  Default falls back to [write]
+  /// when the offset is 0.
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) {
+    if (dstByteOffset != 0) {
+      throw UnsupportedError('offset writeRawBytes not supported here');
+    }
+    final words = Uint32List(bytes.length ~/ 4);
+    words.buffer.asUint8List().setRange(0, bytes.length, bytes);
+    return write(words, words.length, dataType: BufferDataType.uint32);
+  }
+
   void destroy();
 }
 

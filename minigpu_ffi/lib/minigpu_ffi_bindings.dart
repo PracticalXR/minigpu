@@ -294,6 +294,12 @@ external void mgpuInitializeContextAsync(MGPUCallback callback);
 @ffi.Native<ffi.Void Function()>()
 external void mgpuDestroyContext();
 
+/// Explicit attaches currently outstanding on the process-global context
+/// (0 when it is torn down). Diagnostics/tests only — lazy internal
+/// re-initialization does not count.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuContextRefCount();
+
 /// Install a native log callback. [callback] receives (int level, Pointer<Char> message)
 /// where level: 0=DEBUG 1=INFO 2=WARN 3=ERROR. Pass a null pointer to revert to stderr.
 @ffi.Native<
@@ -354,6 +360,267 @@ external void mgpuSetBuffer(
   ffi.Pointer<MGPUComputeShader> shader,
   int tag,
   ffi.Pointer<MGPUBuffer> buffer,
+);
+
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Pointer<MGPUBuffer>,
+  )
+>()
+external void mgpuSetBufferFire(
+  ffi.Pointer<MGPUComputeShader> shader,
+  int tag,
+  ffi.Pointer<MGPUBuffer> buffer,
+);
+
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Void>,
+    ffi.Size,
+    ffi.Size,
+  )
+>()
+external void mgpuWriteBufferAt(
+  ffi.Pointer<MGPUBuffer> buffer,
+  ffi.Pointer<ffi.Void> inputData,
+  int byteSize,
+  int dstByteOffset,
+);
+
+/// The same C symbol as [mgpuWriteBufferAt], bound as a LEAF call taking
+/// `Pointer<Uint8>`.
+///
+/// WHY A SECOND BINDING: `TypedData.address` is only accepted as a direct
+/// argument to a leaf native call, and it is the only way to hand a Dart list's
+/// backing store to C without copying it first. Raw uploads are the streaming
+/// path — one whole frame per call — so that copy was a full frame-sized host
+/// memcpy per frame that bought nothing but a stable pointer. Measured at 4K
+/// (33.2 MB/frame): the staging copy was ~1.8 ms of a ~3.7 ms upload stage,
+/// i.e. HALF the stage, spent duplicating bytes that `wgpuQueueWriteBuffer`
+/// immediately copies again into its own staging ring.
+///
+/// LEAF IS SAFE HERE, and the reasoning matters because leaf calls block the
+/// isolate from reaching a GC safepoint for their whole duration:
+///   * the callee never re-enters Dart (no callbacks, no port posts), which is
+///     the hard requirement;
+///   * it is bounded work — a memcpy of at most one 32 MiB chunk;
+///   * it takes the device mutex, but no minigpu path holds that mutex across a
+///     GPU wait any more (see the read path's note on releasing it across the
+///     map), so the worst case is another thread's queue write, not a fence.
+/// The Dart-side memcpy it replaces was itself an uninterruptible intrinsic of
+/// the same length, so the safepoint exposure is not new — it is the same
+/// duration, minus one copy.
+@ffi.Native<
+  ffi.Void Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Size,
+    ffi.Size,
+  )
+>(symbol: 'mgpuWriteBufferAt', isLeaf: true)
+external void mgpuWriteBufferAtLeaf(
+  ffi.Pointer<MGPUBuffer> buffer,
+  ffi.Pointer<ffi.Uint8> inputData,
+  int byteSize,
+  int dstByteOffset,
+);
+
+/// BATCHED STAGING UPLOADS (see minigpu.h for the full contract).
+///
+/// Every `mgpuWrite*` takes the device mutex and flushes the pending compute
+/// batch — one `wgpuQueueSubmit` per range. Ranges staged between
+/// [mgpuBeginUploads] and [mgpuEndUploads] are copied into a host arena and
+/// then emitted as ONE queue write into a persistent staging buffer plus N
+/// `copyBufferToBuffer` commands recorded into the batch already being built:
+/// one mutex acquire, zero submits, same ordering.
+///
+/// With no scope open (or for a range whose offset/size is not 4-byte
+/// aligned) [mgpuStageWrite] performs the ordinary inline write, so a caller
+/// may route every push through it unconditionally.
+///
+/// One scope per context at a time, begun and ended on the same thread;
+/// nested pairs are reference-counted. A scope MUST NOT span a dispatch that
+/// reads what it stages — the copies are recorded at End.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuBeginUploads();
+
+/// Stages one range. 1 = batched, 0 = performed inline, -1 = bad arguments.
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Size,
+    ffi.Pointer<ffi.Void>,
+    ffi.Size,
+  )
+>()
+external int mgpuStageWrite(
+  ffi.Pointer<MGPUBuffer> buffer,
+  int dstByteOffset,
+  ffi.Pointer<ffi.Void> inputData,
+  int byteSize,
+);
+
+/// Optional hint: pre-grows the host arena so it does not realloc mid-scope.
+@ffi.Native<ffi.Void Function(ffi.Size)>()
+external void mgpuStageReserve(int byteSize);
+
+/// Closes one nesting level; emits at depth 0. Returns the copies emitted.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuEndUploads();
+
+/// 1 when this build has the batched staging path.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuUploadsSupported();
+
+/// Emission attribution, accumulated only under `MGPU_UPLOAD_PROF=1`.
+/// Needs n >= 10 — see minigpu.h for the slot meanings.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Int64>, ffi.Int)>()
+external int mgpuUploadStats(ffi.Pointer<ffi.Int64> out, int n);
+
+/// BATCHED READBACKS (see minigpu.h for the full contract).
+///
+/// `mgpuReadSync*` exists only per buffer, and every call takes the device
+/// mutex, flushes the pending batch with its own submit, and blocks for GPU
+/// completion. Measured on an RTX 4090: eight reads of 2.72 MB total cost
+/// 2.60 ms with every dispatch SKIPPED — the bytes are not the bill, the
+/// ~0.2 ms per CALL is. (Note the asymmetry with uploads, which measured
+/// byte-bound and call-count-free.)
+///
+/// Ranges staged between [mgpuBeginReadbacks] and [mgpuEndReadbacks] are
+/// recorded as `copyBufferToBuffer` into the encoder the compute batch is
+/// already building, targeting ONE persistent readback buffer: N reads become
+/// one submit + one fence + one map.
+///
+/// Offsets and sizes are RAW BYTES (the mirror of [mgpuWriteBufferAt], not of
+/// [mgpuReadSyncUint8] — no per-type unpacking).
+///
+/// UNLIKE the upload twin, a staged read's destination is not filled until
+/// [mgpuEndReadbacks] returns: keep it alive and do not inspect it before
+/// then. And because the copies are recorded at End, every staged read
+/// observes its source as of End — a scope must not span a dispatch that
+/// overwrites something already staged.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuBeginReadbacks();
+
+/// Stages one raw byte range. 1 = batched (filled at End), 0 = performed
+/// inline (already filled), -1 = bad arguments.
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Size,
+    ffi.Pointer<ffi.Void>,
+    ffi.Size,
+  )
+>()
+external int mgpuStageRead(
+  ffi.Pointer<MGPUBuffer> buffer,
+  int srcByteOffset,
+  ffi.Pointer<ffi.Void> dst,
+  int byteSize,
+);
+
+/// Optional hint: pre-grows the persistent readback allocation.
+@ffi.Native<ffi.Void Function(ffi.Size)>()
+external void mgpuReadbackReserve(int byteSize);
+
+/// Closes one nesting level; resolves at depth 0. Returns the reads filled.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuEndReadbacks();
+
+/// 1 when this build has the batched readback path.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuReadbacksSupported();
+
+/// Resolve attribution, accumulated only under `MGPU_READBACK_PROF=1`.
+/// Needs n >= 12 — see minigpu.h for the slot meanings.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Int64>, ffi.Int)>()
+external int mgpuReadbackStats(ffi.Pointer<ffi.Int64> out, int n);
+
+/// Yield-spin budget (ms) the LOADED BINARY implements before the event drain
+/// degrades to coarse sleeping.
+///
+/// This exists to answer one question at runtime: **am I running the drain fix,
+/// or a stale artifact?** Before that fix every GPU wait burned a full Windows
+/// timer quantum (~15.6 ms), because the drain waited on a future nothing could
+/// notify early. A build without it returns 0 here and silently costs a tick per
+/// wait — the shared-texture present measured p50 15.69 ms at both 720p and 4K,
+/// a cost invariant in the work, which is the tell that it is a clock tick and
+/// not the work.
+///
+/// > 0 means the fix is present (default 8; `MGPU_DRAIN_SPIN_MS` tunes it, and
+/// `0` deliberately restores the pre-fix behaviour for A/B).
+@ffi.Native<ffi.Int Function()>()
+external int mgpuDrainSpinBudgetMs();
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Int64>,
+    ffi.Pointer<ffi.Int64>,
+    ffi.Int,
+  )
+>()
+external int mgpuEnumAdapters(
+  ffi.Pointer<ffi.Char> namesOut,
+  ffi.Pointer<ffi.Int64> totalOut,
+  ffi.Pointer<ffi.Int64> usedOut,
+  int cap,
+);
+
+// ── Multi-GPU context handles ──────────────────────────────────────────────
+
+final class MGPUContextHandle extends ffi.Opaque {}
+
+@ffi.Native<ffi.Pointer<MGPUContextHandle> Function(ffi.Pointer<ffi.Char>)>()
+external ffi.Pointer<MGPUContextHandle> mgpuCreateContextHandle(
+  ffi.Pointer<ffi.Char> adapterFilter,
+);
+
+@ffi.Native<
+  ffi.Void Function(ffi.Pointer<MGPUContextHandle>, MGPUCallback)
+>()
+external void mgpuContextInitializeAsync(
+  ffi.Pointer<MGPUContextHandle> handle,
+  MGPUCallback callback,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUContextHandle>)>()
+external void mgpuDestroyContextHandle(ffi.Pointer<MGPUContextHandle> handle);
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Int,
+  )
+>()
+external int mgpuContextGetAdapterName(
+  ffi.Pointer<MGPUContextHandle> handle,
+  ffi.Pointer<ffi.Char> out,
+  int cap,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUBuffer> Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Int,
+    ffi.Int,
+  )
+>()
+external ffi.Pointer<MGPUBuffer> mgpuContextCreateBuffer(
+  ffi.Pointer<MGPUContextHandle> handle,
+  int bufferSize,
+  int dataType,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUComputeShader> Function(ffi.Pointer<MGPUContextHandle>)
+>()
+external ffi.Pointer<MGPUComputeShader> mgpuContextCreateComputeShader(
+  ffi.Pointer<MGPUContextHandle> handle,
 );
 
 @ffi.Native<

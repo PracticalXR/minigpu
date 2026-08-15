@@ -47,6 +47,11 @@ public:
   bool hasKernel() const;
 
   void setBuffer(int tag, const Buffer &buffer);
+  // Ordered variant: enqueues the binding update on the WebGPU thread so it
+  // executes in FIFO order with dispatch/read/write tasks.  Required when
+  // rebinding a shader between fire-and-forget dispatches (a plain setBuffer
+  // mutates immediately and would race the still-queued earlier dispatch).
+  void setBufferQueued(int tag, const Buffer &buffer);
   // Extended binding setters for video texture interop
   void setTextureView(int slot, WGPUTextureView view);
   void setStorageBuffer(int slot, WGPUBuffer buf, size_t size, size_t offset);
@@ -55,6 +60,15 @@ public:
   void dispatch(int groupsX, int groupsY, int groupsZ);
   void dispatchAsync(int groupsX, int groupsY, int groupsZ,
                      std::function<void()> callback = nullptr);
+
+  // Queues `delete this` on the WebGPU FIFO instead of deleting inline.
+  //
+  // Binds are queued (see setBufferQueued) and capture `this` to mutate the
+  // binding tables when they run, so an INLINE delete would free the object out
+  // from under a pending bind. Buffers do not have this problem — a queued bind
+  // captures only the raw WGPUBuffer handle by value — which is why
+  // mgpuDestroyBuffer can delete immediately and this cannot.
+  void destroyQueued();
 
 private:
   MGPU &mgpu;

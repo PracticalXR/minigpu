@@ -1,5 +1,6 @@
 #include "../include/compute_shader.h"
 #include "../include/buffer.h"
+#include "../include/log.h"
 #include "../include/mutex.h"
 #include <fstream>
 #include <sstream>
@@ -48,6 +49,20 @@ ComputeShader::~ComputeShader() {
 
 void ComputeShader::cleanup() {
   // defer to destructor
+}
+
+void ComputeShader::destroyQueued() {
+  ComputeShader *self = this;
+  try {
+    // Lands after any bind/dispatch already queued against this shader. The
+    // destructor itself enqueues its handle-release task from inside this one;
+    // that re-entrant enqueue is safe because the worker pops a task under
+    // queueMutex and then runs it with the lock released.
+    mgpu.getWebGPUThread().enqueueAsync([self]() { delete self; });
+  } catch (...) {
+    // GPU thread already shut down: nothing can still be queued against us.
+    delete self;
+  }
 }
 
 void ComputeShader::loadKernelString(const std::string &kernelString) {
@@ -101,6 +116,32 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
                                buffer.bufferData.buffer,
                                buffer.bufferData.size, 0, nullptr};
   bindingsDirty = true;
+}
+
+void ComputeShader::setBufferQueued(int tag, const Buffer &buffer) {
+  // Capture the raw handle + size by value: the Buffer object itself may be
+  // gone by the time the task runs, but buffer destruction is enqueued on
+  // the same FIFO, so a handle captured before a queued destroy stays valid
+  // for this task and any dispatch queued before that destroy.
+  WGPUBuffer handle = buffer.bufferData.buffer;
+  size_t size = buffer.bufferData.size;
+  if (tag < 0 || handle == nullptr) {
+    return;
+  }
+  mgpu.getWebGPUThread().enqueueAsync([this, tag, handle, size]() {
+    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+    if (tag >= static_cast<int>(buffers.size())) {
+      buffers.resize(tag + 1);
+    }
+    if (buffers[tag].buffer == handle) {
+      return; // No change
+    }
+    buffers[tag] = BufferBinding{handle, size, 0};
+    if (tag >= static_cast<int>(bindings.size())) bindings.resize(tag + 1);
+    bindings[tag] =
+        BindingEntry{BindingKind::kStorageBuffer, handle, size, 0, nullptr};
+    bindingsDirty = true;
+  });
 }
 
 void ComputeShader::setTextureView(int slot, WGPUTextureView view) {
@@ -354,56 +395,64 @@ bool ComputeShader::updatePipelineIfNeeded() {
   return true;
 }
 
+// Batch cap: bounds encoder memory and keeps a single submission far under
+// the Windows TDR budget while still amortizing submit cost across hundreds
+// of dispatches.
+static constexpr int kMaxBatchedDispatches = 512;
+
 void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
-  // async dispatch, returns immediately
+  // Fire-and-forget: records into the context's shared batch pass (one
+  // encoder + one submit per flush point instead of per dispatch).  WebGPU
+  // guarantees sequential memory effects between dispatches in a pass, and
+  // reads/writes/teardown flush the batch, so semantics match the previous
+  // submit-per-dispatch behavior.
   auto dispatchTask = [this, groupsX, groupsY, groupsZ]() {
     // Ensure consistency with concurrent setBuffer/loadKernelString calls.
     mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+      LOG_ERROR("dispatch skipped: no kernel loaded or bad workgroup counts "
+                "(%d,%d,%d)",
+                groupsX, groupsY, groupsZ);
       return;
     }
 
     if (!updatePipelineIfNeeded()) {
+      LOG_ERROR("dispatch skipped: pipeline/bind group creation failed "
+                "(output buffers were NOT written)");
       return;
     }
 
     if (!computePipeline || !bindGroup) {
+      LOG_ERROR("dispatch skipped: pipeline or bind group missing "
+                "(output buffers were NOT written)");
       return;
     }
 
-    WGPUCommandEncoder commandEncoder =
-        wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
-
-    if (!commandEncoder) {
-      return;
+    if (!mgpu.batchEncoder) {
+      mgpu.batchEncoder =
+          wgpuDeviceCreateCommandEncoder(mgpu.getDevice(), nullptr);
+      if (!mgpu.batchEncoder) {
+        return;
+      }
+    }
+    if (!mgpu.batchPass) {
+      mgpu.batchPass =
+          wgpuCommandEncoderBeginComputePass(mgpu.batchEncoder, nullptr);
+      if (!mgpu.batchPass) {
+        return;
+      }
     }
 
-    WGPUComputePassEncoder computePassEncoder =
-        wgpuCommandEncoderBeginComputePass(commandEncoder, nullptr);
-
-    if (!computePassEncoder) {
-      wgpuCommandEncoderRelease(commandEncoder);
-      return;
-    }
-
-    wgpuComputePassEncoderSetPipeline(computePassEncoder, computePipeline);
-    wgpuComputePassEncoderSetBindGroup(computePassEncoder, 0, bindGroup, 0,
+    wgpuComputePassEncoderSetPipeline(mgpu.batchPass, computePipeline);
+    wgpuComputePassEncoderSetBindGroup(mgpu.batchPass, 0, bindGroup, 0,
                                        nullptr);
     wgpuComputePassEncoderDispatchWorkgroups(
-        computePassEncoder, static_cast<uint32_t>(groupsX),
+        mgpu.batchPass, static_cast<uint32_t>(groupsX),
         static_cast<uint32_t>(groupsY), static_cast<uint32_t>(groupsZ));
 
-    wgpuComputePassEncoderEnd(computePassEncoder);
-    wgpuComputePassEncoderRelease(computePassEncoder);
-
-    WGPUCommandBuffer commandBuffer =
-        wgpuCommandEncoderFinish(commandEncoder, nullptr);
-    wgpuCommandEncoderRelease(commandEncoder);
-
-    if (commandBuffer) {
-      wgpuQueueSubmit(mgpu.getQueue(), 1, &commandBuffer);
-      wgpuCommandBufferRelease(commandBuffer);
+    if (++mgpu.batchCount >= kMaxBatchedDispatches) {
+      mgpu.flushBatchLocked();
     }
   };
 
@@ -418,10 +467,18 @@ void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
       // Scope the lock so the callback is invoked after it is released.
       // This prevents a deadlock if the callback itself makes GPU calls.
       mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+      // Awaited dispatches submit immediately — flush any batched
+      // fire-and-forget work first to preserve execution order.
+      mgpu.flushBatchLocked();
 
       if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+        LOG_ERROR("dispatchAsync skipped: no kernel loaded or bad workgroup "
+                  "counts (%d,%d,%d)",
+                  groupsX, groupsY, groupsZ);
         // ok stays false
       } else if (!updatePipelineIfNeeded()) {
+        LOG_ERROR("dispatchAsync skipped: pipeline/bind group creation failed "
+                  "(output buffers were NOT written)");
         // ok stays false
       } else {
         WGPUCommandEncoder commandEncoder =

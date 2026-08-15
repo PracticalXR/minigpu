@@ -1,3 +1,27 @@
+## 1.6.1
+
+- released 08/13/26 - MR
+
+## Unreleased
+
+- Docs corrected: `MinigpuBinding` was described as preventing stale
+  `NativeCallable` invocations during hot reload. It never could — `reassemble`
+  is synchronous, so it can stop new work but cannot wait for work already
+  handed to the GPU worker thread, and isolate teardown deletes callbacks
+  regardless of what Dart does. That bug is fixed in minigpu_ffi, which now
+  delivers completions on a Dart native port. This widget is a teardown
+  ORDERING aid: it runs your registered GPU disposal at the one moment
+  (hot reload) when nothing else does. No functional change.
+
+## 1.6.0
+
+- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
+  in this package.
+
+## 1.5.9
+
+- Version lockstep with minigpu 1.5.9; no API change.
+
 ## 1.5.8
 
 ## 1.5.7

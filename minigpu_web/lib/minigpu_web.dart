@@ -109,8 +109,22 @@ class WebComputeShader implements PlatformComputeShader {
   }
 
   @override
+  void setBufferFire(int tag, PlatformBuffer buffer) {
+    // Single-threaded wasm executes GPU tasks in call order, so the plain
+    // bind already has FIFO semantics.
+    setBuffer(tag, buffer);
+  }
+
+  @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
     await wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
+  }
+
+  @override
+  void dispatchFire(int groupsX, int groupsY, int groupsZ) {
+    // queue.submit is synchronous in JS WebGPU; the returned promise only
+    // covers call plumbing, so dropping it preserves submission order.
+    wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
   }
 
   @override
@@ -135,6 +149,35 @@ class WebBuffer implements PlatformBuffer {
   final wasm.MGPUBuffer _buffer;
 
   WebBuffer(this._buffer);
+
+  @override
+  Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) {
+    if (dstByteOffset != 0) {
+      throw UnsupportedError('offset writeRawBytes not supported on web');
+    }
+    if (bytes.length % 4 != 0) {
+      throw ArgumentError('writeRawBytes needs a 4-byte-aligned length');
+    }
+    // A VIEW over the caller's bytes, not a fresh list. This used to allocate a
+    // `Uint32List` the size of the payload and memcpy into it on EVERY call —
+    // on the streaming path that is a whole-frame allocation plus a whole-frame
+    // copy per frame (33 MB at 4K), which is both the copy itself and a
+    // per-frame garbage source large enough to show up as a frame-time spike.
+    // A 4-byte-aligned view aliases the same store and costs nothing.
+    //
+    // The fallback is for the case a view cannot describe: a list whose
+    // offsetInBytes is not 4-aligned (only possible for a caller-made view over
+    // an odd offset). Then, and only then, a copy is unavoidable.
+    final Uint32List words;
+    if (bytes.offsetInBytes % 4 == 0) {
+      words = bytes.buffer
+          .asUint32List(bytes.offsetInBytes, bytes.lengthInBytes ~/ 4);
+    } else {
+      words = Uint32List(bytes.length ~/ 4);
+      words.buffer.asUint8List().setRange(0, bytes.length, bytes);
+    }
+    return write(words, words.length, dataType: BufferDataType.uint32);
+  }
 
   @override
   Future<void> read(

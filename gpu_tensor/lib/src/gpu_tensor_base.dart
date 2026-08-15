@@ -50,6 +50,12 @@ class Tensor<T extends TypedData> {
 
   ComputeShader? activeShader;
 
+  /// For buffer views (see [Tensor.view]): strong reference to the tensor
+  /// that owns [buffer], so the owner cannot be garbage-collected (and its
+  /// finalizer cannot destroy the shared buffer) while this view is
+  /// reachable.
+  Tensor? _viewParent;
+
   // Private constructor.
   Tensor._(
     this.shape, {
@@ -67,32 +73,10 @@ class Tensor<T extends TypedData> {
         );
       }
       buffer.write(data, size, dataType: dataType);
-    } else {
-      // Initialize with zeros.
-      if (T == TypedData) {
-        buffer.write(Float32List(size), size, dataType: dataType);
-      } else if (T == Int8List) {
-        buffer.write(Int8List(size), size, dataType: dataType);
-      } else if (T == Int16List) {
-        buffer.write(Int16List(size), size, dataType: dataType);
-      } else if (T == Int32List) {
-        buffer.write(Int32List(size), size, dataType: dataType);
-      } else if (T == Int64List) {
-        buffer.write(Int64List(size), size, dataType: dataType);
-      } else if (T == Uint8List) {
-        buffer.write(Uint8List(size), size, dataType: dataType);
-      } else if (T == Uint16List) {
-        buffer.write(Uint16List(size), size, dataType: dataType);
-      } else if (T == Uint32List) {
-        buffer.write(Uint32List(size), size, dataType: dataType);
-      } else if (T == Float32List) {
-        buffer.write(Float32List(size), size, dataType: dataType);
-      } else if (T == Float64List) {
-        buffer.write(Float64List(size), size, dataType: dataType);
-      } else {
-        throw Exception("Unsupported TypedData type: ${T.toString()}");
-      }
     }
+    // No data: WebGPU zero-initializes buffer contents, so the previous
+    // CPU-side zero upload was a redundant full-tensor PCIe transfer paid by
+    // EVERY op-result allocation.  Skip it.
   }
 
   /// Asynchronous factory to create a tensor.
@@ -181,10 +165,17 @@ class Tensor<T extends TypedData> {
   }
 
   /// Destroys the tensor's GPU buffer.
+  ///
+  /// For views (see [Tensor.view]) this releases the parent reference but
+  /// does NOT destroy the shared buffer — the owning tensor does that.
   void destroy() {
-    _bufferFinalizer.detach(this);
     activeShader?.destroy();
     activeShader = null;
+    if (_viewParent != null) {
+      _viewParent = null;
+      return;
+    }
+    _bufferFinalizer.detach(this);
     buffer.destroy();
   }
 
@@ -213,6 +204,29 @@ class Tensor<T extends TypedData> {
   }) : gpu = gpu ?? DefaultMinigpu.instance,
        size = shape.reduce((a, b) => a * b);
 
+  /// Creates a non-owning view over [parent]'s buffer with a new [shape].
+  ///
+  /// The view attaches NO finalizer (attaching a second finalizer to a shared
+  /// buffer — what `Tensor.fromBuffer` does — leads to double-destroy).
+  /// Instead it retains [parent], so the buffer cannot be finalized while the
+  /// view is reachable.  Explicitly calling `parent.destroy()` still
+  /// invalidates the view — the caller owns that ordering.
+  Tensor.view(Tensor parent, this.shape)
+    : buffer = parent.buffer,
+      gpu = parent.gpu,
+      dataType = parent.dataType,
+      size = shape.reduce((a, b) => a * b),
+      _viewParent = parent {
+    if (size != parent.size) {
+      throw Exception(
+        "View shape $shape (size $size) does not match parent size ${parent.size}",
+      );
+    }
+  }
+
+  /// Whether this tensor is a non-owning view over another tensor's buffer.
+  bool get isView => _viewParent != null;
+
   /// Creates a tensor filled with zeros using GPU shader.
   static Future<Tensor<T>> zeros<T extends TypedData>(
     List<int> shape, {
@@ -227,33 +241,8 @@ class Tensor<T extends TypedData> {
 
     final effectiveType = _inferDataTypeFor<T>(dataType);
 
-    // Use private constructor with explicit generic type
-    final tensor = Tensor<T>._(shape, gpu: gpu, dataType: effectiveType);
-    final size = tensor.size;
-
-    final shaderTemplate = '''
-@group(0) @binding(0) var<storage, read_write> output: array<f32>;
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
-  if (i < \${size}u) {
-    output[i] = \${zeroValue};
-  }
-}
-''';
-
-    final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, effectiveType, {
-      'size': size,
-      'zeroValue': getZeroValue(effectiveType),
-    });
-    shader.loadKernelString(shaderCode);
-    shader.setBuffer('output', tensor.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
-
-    return tensor;
+    // WebGPU zero-initializes buffer contents — a fresh tensor IS zeros.
+    return Tensor<T>._(shape, gpu: gpu, dataType: effectiveType);
   }
 
   /// Creates a tensor filled with random values using GPU shader with CPU-generated seed.
@@ -280,37 +269,42 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     final shaderTemplate = '''
 @group(0) @binding(0) var<storage, read_write> output: array<f32>;
 
-// Simple LCG random number generator
-fn rand(state: ptr<function, u32>) -> f32 {
-  *state = (*state * 1664525u + 1013904223u);
-  return f32(*state) / 4294967296.0;
+// PCG-style stateless hash: adjacent (seed, i) pairs decorrelate fully,
+// unlike the previous single-step LCG on seed+i.
+fn pcg_hash(input: u32) -> u32 {
+  var state: u32 = input * 747796405u + 2891336453u;
+  let word: u32 = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
 }
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < \${size}u) {
-    var rng_state: u32 = \${seed}u + i;
-    let random_val = rand(&rng_state);
+    let random_val = f32(pcg_hash(\${seed}u ^ (i * 0x9E3779B9u))) / 4294967296.0;
     let scaled_val = \${min} + random_val * \${range};
     output[i] = \${castValue};
   }
 }
 ''';
 
+    // Seed is baked into the source, so a per-call shader (not the cache) is
+    // correct here — caching would fill the cache with dead seed variants.
     final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, effectiveType, {
       'size': size,
-      'seed': actualSeed,
+      'seed': actualSeed & 0xFFFFFFFF,
       'min': min,
       'range': max - min,
       'castValue': getCastExpression('scaled_val', effectiveType),
     });
-    shader.loadKernelString(shaderCode);
-    shader.setBuffer('output', tensor.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    try {
+      shader.loadKernelString(shaderCode);
+      shader.setBuffer('output', tensor.buffer);
+      await shader.dispatchLinear(size);
+    } finally {
+      shader.destroy();
+    }
 
     return tensor;
   }
@@ -386,25 +380,22 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> output: array<f32>;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < \${size}u) {
     \${conversionCode}
   }
 }
 ''';
 
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, effectiveType, {
       'size': size,
       'conversionCode': getByteConversionCode(effectiveType),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('input_bytes', byteBuffer);
     shader.setBuffer('output', tensor.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     byteBuffer.destroy();
 
     return tensor;

@@ -74,6 +74,18 @@ else()
   # Re-write to cache so it persists across re-runs.
   set(DAWN_DIR "${DAWN_DIR}" CACHE INTERNAL "Dawn source directory" FORCE)
 endif()
+
+# Normalize to forward slashes. A native Windows path reaches us intact from
+# `-DDAWN_DIR=C:\dawn` (the Dart hook) or `set MINIGPU_DAWN_DIR=D:\my_dawn`, and
+# every use in THIS file is fine with it — but FetchContent writes SOURCE_DIR /
+# BINARY_DIR verbatim into the sub-build CMakeLists it generates, and there
+# `C:\dawn` is parsed as a string with an invalid character escape `\d`, so
+# configure dies with "Invalid character escape" pointing at a generated file the
+# user cannot edit. Only a machine with no prebuilt Dawn hits it: when
+# ENABLE_DAWN_FIND locates an existing build, the FetchContent branch below never
+# runs, which is why this stayed invisible on developer machines.
+file(TO_CMAKE_PATH "${DAWN_DIR}" DAWN_DIR)
+set(DAWN_DIR "${DAWN_DIR}" CACHE INTERNAL "Dawn source directory" FORCE)
 message(STATUS "Dawn: source root -> ${DAWN_DIR}")
 
 # For Emscripten builds (if desired)

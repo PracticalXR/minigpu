@@ -1,0 +1,71 @@
+# Emscripten (wasm) build of minigpu_ffi over emdawnwebgpu — the web C++ gate.
+#
+# This compiles the minigpu web C++ against Dawn's emdawnwebgpu port, mirroring
+# `make build_weblib`. It is the heavy counterpart to dart-ci.yml's flutter
+# build web (which only dart2js-compiles the Dart web path against the committed
+# prebuilt wasm).
+#
+# Dawn on the web path lives in the package-nested minigpu_ffi/src/external/dawn
+# and dawn.cmake fetches it to the PINNED commit + builds emdawnwebgpu at
+# configure time. We cache that tree keyed on the pinned commit so only the
+# first run pays the cold Dawn-web build. Needs Emscripten 4.0.10+ (the version
+# the emdawnwebgpu port in dawn.cmake targets).
+name: web-build
+
+on:
+  push:
+    paths:
+      - "minigpu_ffi/**"
+      - "minigpu_web/**"
+      - ".github/workflows/web-build.yml"
+  pull_request:
+    paths:
+      - "minigpu_ffi/**"
+      - "minigpu_web/**"
+      - ".github/workflows/web-build.yml"
+  workflow_dispatch:
+
+jobs:
+  emscripten:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      # No submodule init: nothing here is a submodule. Dawn is fetched by
+      # dawn.cmake at configure time, into a gitignored external/ directory.
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (Dawn-web build is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Resolve Dawn commit
+        id: dawn
+        run: |
+          commit=$(grep -oE '[0-9a-f]{40}' minigpu_ffi/src/cmake/dawn.cmake | head -1)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Dawn commit: $commit"
+
+      # Cache the package-nested Dawn tree (source at pinned commit + build_web
+      # with the generated emdawnwebgpu headers/objects).
+      - name: Cache Dawn (web)
+        uses: actions/cache@v4
+        with:
+          path: minigpu_ffi/src/external/dawn
+          key: dawn-web-${{ steps.dawn.outputs.commit }}
+
+      - name: Setup Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 4.0.10
+
+      - name: emcmake build (wasm lib via emdawnwebgpu)
+        working-directory: minigpu_ffi/src
+        run: |
+          mkdir -p build_web
+          cd build_web
+          # Matches `make build_weblib`. emcmake injects the Emscripten
+          # toolchain; the explicit toolchain flag mirrors the Makefile.
+          emcmake cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
+          cmake --build .

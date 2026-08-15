@@ -18,6 +18,15 @@ void main(List<String> args) async {
       sourceDir.absolute.uri,
       logger,
     );
+    // EVERY C/C++ SOURCE IS A BUILD DEPENDENCY. Without this the hooks runner
+    // has no reason to re-run the hook when src/ changes, so it serves the
+    // PREVIOUSLY built DLL and edits appear to do nothing — a silent failure
+    // that costs hours, because the Dart side compiles fine and the old binary
+    // behaves exactly as it always did. (Symptom to recognise: a newly added
+    // export is missing from the DLL while the rest of the library works.
+    // Verify a NEW SYMBOL, never the mtime.)
+    _addSourceDependencies(sourceDir.absolute.uri, output);
+
     await runBuild(input, output, sourceDir.absolute.uri);
 
     final minigpuLib = await output.findAndAddCodeAssets(
@@ -105,6 +114,29 @@ void main(List<String> args) async {
 
 const name = 'mingpu_ffi.dart';
 
+/// Registers every buildable source under [srcDir] as a hook dependency, so an
+/// edit to the C/C++ actually rebuilds the library.
+///
+/// Skips the two directories that are outputs rather than inputs — a vendored
+/// Dawn tree and any in-tree `build_*` output — because walking them costs far
+/// more than the whole build and their contents change as a RESULT of building.
+void _addSourceDependencies(Uri srcDir, BuildOutputBuilder output) {
+  const buildable = {
+    '.c', '.cc', '.cpp', '.h', '.hpp', '.inc', '.m', '.mm', '.txt', '.cmake',
+  };
+  final dir = Directory.fromUri(srcDir);
+  if (!dir.existsSync()) return;
+  for (final entity in dir.listSync(recursive: true, followLinks: false)) {
+    if (entity is! File) continue;
+    final path = p.normalize(entity.path);
+    final rel = p.relative(path, from: dir.path);
+    final first = p.split(rel).first;
+    if (first == 'external' || first.startsWith('build_')) continue;
+    if (!buildable.contains(p.extension(path).toLowerCase())) continue;
+    output.dependencies.add(entity.uri);
+  }
+}
+
 Future<void> runBuild(
   BuildInput input,
   BuildOutputBuilder output,
@@ -153,11 +185,16 @@ Future<void> runBuild(
         'ENABLE_ARC': 'OFF',
       if (input.config.code.targetOS == OS.iOS && cmakeArch != null)
         'CMAKE_OSX_ARCHITECTURES': cmakeArch,
-      // Always pass the system Dawn root so dawn.cmake never falls back to
+      // Always pass the resolved Dawn root so dawn.cmake never falls back to
       // the pub-cache-nested path.  cmake receives this as -DDAWN_DIR=…
       // before any in-file set() calls, guaranteeing the correct directory
       // even when the cmake subprocess inherits a minimal environment.
-      if (_systemDawnRoot() case final dawnRoot?) 'DAWN_DIR': dawnRoot,
+      //
+      // Because this define is unconditional, it also OUTRANKS dawn.cmake's own
+      // MINIGPU_DAWN_DIR branch (that branch only runs when DAWN_DIR is
+      // undefined). So the env var has to be honoured HERE or it has no effect
+      // at all on a Flutter/dart build — see [_dawnRootForCmake].
+      if (_dawnRootForCmake() case final dawnRoot?) 'DAWN_DIR': dawnRoot,
     },
   );
   await builder.run(
@@ -209,6 +246,27 @@ List<Uri> _dawnSearchDirs(BuildInput input, Uri srcDir) {
   dirs.add(srcDir.resolve('external/dawn/$buildSubdir'));
 
   return dirs;
+}
+
+/// The Dawn root handed to cmake as `-DDAWN_DIR=…`.
+///
+/// `MINIGPU_DAWN_DIR` wins over the platform central path, matching
+/// [_dawnSearchDirs] and the priority documented in `src/cmake/dawn.cmake`.
+/// Without this, setting the env var changed only where the hook LOOKED for a
+/// prebuilt `webgpu_dawn` DLL, while cmake was still told `%SYSTEMDRIVE%\dawn`
+/// and would clone/build Dawn there — the env var looked ignored.
+///
+/// Returned with forward slashes: cmake accepts them on Windows, and a native
+/// backslash path breaks FetchContent's generated sub-build (see the
+/// `TO_CMAKE_PATH` note in `src/cmake/dawn.cmake`). Belt and braces — the cmake
+/// side normalizes too, so an older/newer pairing of hook and cmake is safe
+/// either way.
+String? _dawnRootForCmake() {
+  final envOverride = Platform.environment['MINIGPU_DAWN_DIR'];
+  final root = (envOverride != null && envOverride.isNotEmpty)
+      ? envOverride
+      : _systemDawnRoot();
+  return root?.replaceAll(r'\', '/');
 }
 
 /// Returns the platform-specific root directory for the shared Dawn builds,

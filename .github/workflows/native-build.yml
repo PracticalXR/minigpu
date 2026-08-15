@@ -1,0 +1,88 @@
+# Cross-platform native build of minigpu_ffi over Dawn (desktop).
+#
+# Purpose: catch platform-gate / CMake / Dawn-integration regressions in the
+# native C++ (minigpu_ffi/src) on every push. No runtime tests — headless
+# runners have no GPU adapter; behavioural coverage is local / self-hosted.
+#
+# Dawn is the cost driver: dawn.cmake looks for a prebuilt webgpu_dawn in the
+# platform's central root (C:\dawn on Windows, ~/dawn on Unix — the short
+# Windows path avoids the 260-char MAX_PATH limit Dawn's deep tree can exceed);
+# if absent it clones + builds Dawn from a PINNED commit at configure time. We
+# actions/cache that root keyed on the pinned commit, so only the first run per
+# platform pays the (~45-90 min) cold Dawn build; later runs restore it and
+# compile just minigpu (~minutes). Bumping DAWN_COMMIT in dawn.cmake naturally
+# rotates the cache key → one clean rebuild.
+name: native-build
+
+on:
+  push:
+    paths:
+      - "minigpu_ffi/**"
+      - ".github/workflows/native-build.yml"
+  pull_request:
+    paths:
+      - "minigpu_ffi/**"
+      - ".github/workflows/native-build.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # First cold Dawn build can be long; cached runs are quick.
+    timeout-minutes: 150
+    steps:
+      # No submodule init: nothing here is a submodule. Dawn comes from the
+      # central root below, fetched by dawn.cmake into a gitignored external/.
+      - uses: actions/checkout@v4
+
+      - name: Free disk space (Linux — Dawn build is large)
+        if: runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install Dawn build deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Dawn builds headless here (GLFW/GL off). Python drives Dawn's own
+          # dependency fetch; the X11/mesa headers cover Tint/Dawn's optional
+          # backends. Trim if a cold build proves any unnecessary.
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config python3 \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+            libxi-dev libxext-dev mesa-common-dev
+
+      - name: Resolve Dawn commit + central root
+        id: dawn
+        shell: bash
+        run: |
+          commit=$(grep -oE '[0-9a-f]{40}' minigpu_ffi/src/cmake/dawn.cmake | head -1)
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "root=C:/dawn" >> "$GITHUB_OUTPUT"
+          else
+            echo "root=$HOME/dawn" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Dawn commit: $commit"
+
+      # Cache the whole Dawn root: source (pinned checkout) + arch build dir with
+      # libwebgpu_dawn + generated headers. Exact key only — a commit bump forces
+      # a clean rebuild rather than restoring a mismatched Dawn.
+      - name: Cache Dawn
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.dawn.outputs.root }}
+          key: dawn-${{ runner.os }}-${{ runner.arch }}-${{ steps.dawn.outputs.commit }}
+
+      - name: Configure
+        shell: bash
+        run: cmake -S minigpu_ffi/src -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release --parallel

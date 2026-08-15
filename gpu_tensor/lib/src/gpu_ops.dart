@@ -1,14 +1,129 @@
 import 'dart:typed_data';
 
 import 'package:gpu_tensor/src/gpu_helpers.dart';
-import 'package:minigpu/minigpu.dart';
 import 'gpu_tensor_base.dart';
 
 extension TensorOperator<T extends TypedData> on Tensor<T> {
-  /// Elementwise addition. Assumes both tensors have the same shape.
+  bool _shapeEquals(List<int> a, List<int> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// NumPy broadcast shape of [a] and [b], or null if incompatible.
+  List<int>? _broadcastShape(List<int> a, List<int> b) {
+    final rank = a.length > b.length ? a.length : b.length;
+    final out = List<int>.filled(rank, 1);
+    for (int i = 0; i < rank; i++) {
+      final ad = i < rank - a.length ? 1 : a[i - (rank - a.length)];
+      final bd = i < rank - b.length ? 1 : b[i - (rank - b.length)];
+      if (ad != bd && ad != 1 && bd != 1) return null;
+      out[i] = ad > bd ? ad : bd;
+    }
+    return out;
+  }
+
+  /// Decides how a binary elementwise op should run against [other]:
+  /// - null: same-shape (or legacy same-size) flat fast path.
+  /// - non-null: broadcast kernel with the returned output shape.
+  /// Throws when the shapes are neither broadcastable nor size-equal.
+  List<int>? _broadcastPlan(Tensor<T> other, String opName) {
+    if (_shapeEquals(shape, other.shape)) return null;
+    final out = _broadcastShape(shape, other.shape);
+    if (out != null) return out;
+    // Legacy behavior: equal SIZE with un-broadcastable shapes ran flat
+    // elementwise (e.g. [8] + [2, 4]); preserved for compatibility.
+    if (other.size == size) return null;
+    throw Exception(
+      "Tensor shapes $shape and ${other.shape} are not broadcast-compatible for $opName",
+    );
+  }
+
+  /// Stride-0 broadcast gather: each input's stride is 0 along dimensions of
+  /// extent 1, so a single index computation serves both broadcast and
+  /// non-broadcast dims with no divergence.
+  Future<Tensor<T>> _broadcastBinary(
+    Tensor<T> other,
+    String op,
+    List<int> outShape,
+  ) async {
+    final rank = outShape.length;
+    List<int> padShape(List<int> s) => [
+      ...List.filled(rank - s.length, 1),
+      ...s,
+    ];
+    final aShape = padShape(shape);
+    final bShape = padShape(other.shape);
+
+    List<int> inputStrides(List<int> s) {
+      final st = List<int>.filled(rank, 0);
+      int acc = 1;
+      for (int i = rank - 1; i >= 0; i--) {
+        st[i] = s[i] == 1 ? 0 : acc;
+        acc *= s[i];
+      }
+      return st;
+    }
+
+    final aStrides = inputStrides(aShape);
+    final bStrides = inputStrides(bShape);
+    final outStrides = List<int>.filled(rank, 1);
+    for (int i = rank - 2; i >= 0; i--) {
+      outStrides[i] = outStrides[i + 1] * outShape[i + 1];
+    }
+    final outSize = outShape.reduce((a, b) => a * b);
+
+    final result = await Tensor.create<T>(
+      outShape,
+      gpu: gpu,
+      dataType: dataType,
+    );
+
+    String u32Array(List<int> arr) =>
+        'array<u32, $rank>(${arr.map((x) => '${x}u').join(', ')})';
+    final shaderTemplate =
+        '''
+const RANK: u32 = ${rank}u;
+const outStrides: array<u32, $rank> = ${u32Array(outStrides)};
+const aStrides: array<u32, $rank> = ${u32Array(aStrides)};
+const bStrides: array<u32, $rank> = ${u32Array(bStrides)};
+
+@group(0) @binding(0) var<storage, read_write> A: array<f32>;
+@group(0) @binding(1) var<storage, read_write> B: array<f32>;
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
+  if (i >= ${outSize}u) { return; }
+  var rem: u32 = i;
+  var aIdx: u32 = 0u;
+  var bIdx: u32 = 0u;
+  for (var d: u32 = 0u; d < RANK; d = d + 1u) {
+    let coord: u32 = rem / outStrides[d];
+    rem = rem % outStrides[d];
+    aIdx = aIdx + coord * aStrides[d];
+    bIdx = bIdx + coord * bStrides[d];
+  }
+  C[i] = A[aIdx] $op B[bIdx];
+}
+''';
+    final shaderCode = prepareShader(shaderTemplate, dataType, {});
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('A', buffer);
+    shader.setBuffer('B', other.buffer);
+    shader.setBuffer('C', result.buffer);
+    await shader.dispatchLinear(outSize);
+    return result;
+  }
+
+  /// Elementwise addition with NumPy-style broadcasting.
   Future<Tensor<T>> add(Tensor<T> other) async {
-    if (other.size != size) {
-      throw Exception("Tensor sizes do not match for elementwise addition");
+    final broadcast = _broadcastPlan(other, 'elementwise addition');
+    if (broadcast != null) {
+      return _broadcastBinary(other, '+', broadcast);
     }
     Tensor<T> result = await Tensor.create<T>(
       shape,
@@ -21,31 +136,29 @@ extension TensorOperator<T extends TypedData> on Tensor<T> {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = A[i] + B[i];
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
-  /// Elementwise subtraction.
+  /// Elementwise subtraction with NumPy-style broadcasting.
   Future<Tensor<T>> subtract(Tensor<T> other) async {
-    if (other.size != size) {
-      throw Exception("Tensor sizes do not match for elementwise subtraction");
+    final broadcast = _broadcastPlan(other, 'elementwise subtraction');
+    if (broadcast != null) {
+      return _broadcastBinary(other, '-', broadcast);
     }
     Tensor<T> result = await Tensor.create<T>(
       shape,
@@ -58,24 +171,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = A[i] - B[i];
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -138,31 +248,32 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       );
     }
 
-    Tensor<T> result = await Tensor.create<T>(shape);
+    Tensor<T> result = await Tensor.create<T>(
+      shape,
+      gpu: gpu,
+      dataType: dataType,
+    );
     final shaderTemplate =
         '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = max(A[i], B[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -174,31 +285,32 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       );
     }
 
-    Tensor<T> result = await Tensor.create<T>(shape);
+    Tensor<T> result = await Tensor.create<T>(
+      shape,
+      gpu: gpu,
+      dataType: dataType,
+    );
     final shaderTemplate =
         '''
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = min(A[i], B[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -221,55 +333,10 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
     }
 
-    Tensor<T> result = await Tensor.create<T>(shape);
-
-    // Create shader with dynamic number of input buffers
-    final inputBindings = StringBuffer();
-    final inputAccumulation = StringBuffer();
-
-    for (int i = 0; i < tensors.length; i++) {
-      inputBindings.writeln(
-        '@group(0) @binding($i) var<storage, read_write> input_$i: array<f32>;',
-      );
-      if (i == 0) {
-        inputAccumulation.write('input_$i[i]');
-      } else {
-        inputAccumulation.write(' + input_$i[i]');
-      }
-    }
-
-    final outputBinding =
-        '@group(0) @binding(${tensors.length}) var<storage, read_write> output: array<f32>;';
-
-    final shaderTemplate =
-        '''
-$inputBindings
-$outputBinding
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
-  if (i < ${size}u) {
-    output[i] = ($inputAccumulation) / ${tensors.length}.0;
-  }
-}
-''';
-
-    final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
-      'size': size.toString(),
-    });
-    shader.loadKernelString(shaderCode);
-
-    // Set all input buffers
-    for (int i = 0; i < tensors.length; i++) {
-      shader.setBuffer('input_$i', tensors[i].buffer);
-    }
-    shader.setBuffer('output', result.buffer);
-
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
-    return result;
+    return _weightedSum(
+      tensors,
+      List<double>.filled(tensors.length, 1.0 / tensors.length),
+    );
   }
 
   /// Weighted average of multiple tensors
@@ -302,64 +369,81 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
       }
     }
 
-    Tensor<T> result = await Tensor.create<T>(shape);
+    return _weightedSum(tensors, normalizedWeights);
+  }
 
-    // Create shader with dynamic number of input buffers and weights
-    final inputBindings = StringBuffer();
-    final weightedSum = StringBuffer();
+  /// output = sum_i tensors[i] * weights[i], chunked so no single dispatch
+  /// binds more than 8 storage buffers (WebGPU's default
+  /// maxStorageBuffersPerShaderStage) — one unchunked shader with N+1
+  /// bindings fails pipeline creation for N > ~7.
+  Future<Tensor<T>> _weightedSum(
+    List<Tensor<T>> tensors,
+    List<double> weights,
+  ) async {
+    Tensor<T> result = await Tensor.create<T>(
+      shape,
+      gpu: gpu,
+      dataType: dataType,
+    );
 
-    for (int i = 0; i < tensors.length; i++) {
-      inputBindings.writeln(
-        '@group(0) @binding($i) var<storage, read_write> input_$i: array<f32>;',
-      );
-      final weight = normalizedWeights[i].toString();
-      if (i == 0) {
+    const int maxInputsPerPass = 7; // + 1 output binding = 8 total
+
+    for (int start = 0; start < tensors.length; start += maxInputsPerPass) {
+      final end = (start + maxInputsPerPass < tensors.length)
+          ? start + maxInputsPerPass
+          : tensors.length;
+      final chunkLen = end - start;
+      final accumulate = start > 0;
+
+      final inputBindings = StringBuffer();
+      final weightedSum = StringBuffer();
+      for (int i = 0; i < chunkLen; i++) {
+        inputBindings.writeln(
+          '@group(0) @binding($i) var<storage, read_write> input_$i: array<f32>;',
+        );
+        final weight = weights[start + i].toString();
+        if (i > 0) weightedSum.write(' + ');
         weightedSum.write('input_$i[i] * $weight');
-      } else {
-        weightedSum.write(' + input_$i[i] * $weight');
       }
-    }
+      final outputBinding =
+          '@group(0) @binding($chunkLen) var<storage, read_write> output: array<f32>;';
+      final outputExpr = accumulate
+          ? 'output[i] = output[i] + ($weightedSum);'
+          : 'output[i] = $weightedSum;';
 
-    final outputBinding =
-        '@group(0) @binding(${tensors.length}) var<storage, read_write> output: array<f32>;';
-
-    final shaderTemplate =
-        '''
+      final shaderTemplate =
+          '''
 $inputBindings
 $outputBinding
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
-    output[i] = $weightedSum;
+    $outputExpr
   }
 }
 ''';
 
-    final ComputeShader shader = gpu.createComputeShader();
-    final shaderCode = prepareShader(shaderTemplate, dataType, {
-      'size': size.toString(),
-    });
-    shader.loadKernelString(shaderCode);
-
-    // Set all input buffers
-    for (int i = 0; i < tensors.length; i++) {
-      shader.setBuffer('input_$i', tensors[i].buffer);
+      final shaderCode = prepareShader(shaderTemplate, dataType, {
+        'size': size.toString(),
+      });
+      final shader = gpu.cachedShader(shaderCode);
+      for (int i = 0; i < chunkLen; i++) {
+        shader.setBuffer('input_$i', tensors[start + i].buffer);
+      }
+      shader.setBuffer('output', result.buffer);
+      await shader.dispatchLinear(size);
     }
-    shader.setBuffer('output', result.buffer);
 
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
     return result;
   }
 
-  /// Elementwise multiplication (Hadamard product).
+  /// Elementwise multiplication (Hadamard product) with NumPy-style
+  /// broadcasting.
   Future<Tensor<T>> multiply(Tensor<T> other) async {
-    if (other.size != size) {
-      throw Exception(
-        "Tensor sizes do not match for elementwise multiplication",
-      );
+    final broadcast = _broadcastPlan(other, 'elementwise multiplication');
+    if (broadcast != null) {
+      return _broadcastBinary(other, '*', broadcast);
     }
     Tensor<T> result = await Tensor.create<T>(
       shape,
@@ -372,30 +456,26 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = A[i] * B[i];
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
   /// Adds a scalar value to every element in the tensor.
   Future<Tensor<T>> addScalar(double scalar) async {
-    print('Adding scalar ENTRY');
     Tensor<T> result = await Tensor.create<T>(
       shape,
       gpu: gpu,
@@ -406,29 +486,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = A[i] + ${scalar}f;
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    print('Adding scalar to tensor: $scalar, shader code: \n$shaderCode');
-    shader.loadKernelString(shaderCode);
-    print('Shader loaded, setting buffers');
-    print('Buffer A: ${size} bytes isValid: ${buffer.isValid} ');
-    print('Buffer B: ${result.size} bytes isValid: ${result.buffer.isValid}');
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    print('Buffers set, dispatching shader');
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    print('Shader dispatched, destroying shader');
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -444,23 +515,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = A[i] - $scalar;
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -476,32 +544,29 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = A[i] * $scalar;
   }
 }
 ''';
 
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    print('Multiplying tensor by scalar: $scalar, shader code: $shaderCode');
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
-  /// Elementwise division (A / B).
+  /// Elementwise division (A / B) with NumPy-style broadcasting.
   Future<Tensor<T>> divide(Tensor<T> other) async {
-    if (other.size != size) {
-      throw Exception("Tensor sizes do not match for elementwise division");
+    final broadcast = _broadcastPlan(other, 'elementwise division');
+    if (broadcast != null) {
+      return _broadcastBinary(other, '/', broadcast);
     }
     Tensor<T> result = await Tensor.create<T>(
       shape,
@@ -514,24 +579,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = A[i] / B[i];
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -547,23 +609,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = A[i] / $scalar;
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -579,23 +638,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = pow(A[i], $exponent);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -611,23 +667,20 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = log(A[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -643,23 +696,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = exp(A[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -675,29 +725,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = sqrt(A[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
   /// Computes the modulus (remainder) of each element by [divisor].
   Future<Tensor<T>> modScalar(double divisor) async {
-    String divisorLiteral = divisor.toStringAsFixed(1);
+    // Exact literal — toStringAsFixed(1) truncated the divisor (0.25 -> 0.3).
+    String divisorLiteral = divisor.toString().contains('.')
+        ? divisor.toString()
+        : '$divisor.0';
     Tensor<T> result = await Tensor.create<T>(
       shape,
       gpu: gpu,
@@ -708,23 +758,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = A[i] % $divisorLiteral;
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -744,24 +791,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = A[i] % B[i];
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -781,24 +825,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = select(0.0, 1.0, A[i] > B[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -818,24 +859,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = select(0.0, 1.0, A[i] < B[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -855,71 +893,71 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @group(0) @binding(2) var<storage, read_write> C: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     C[i] = select(0.0, 1.0, A[i] == B[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', other.buffer);
     shader.setBuffer('C', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
+    return result;
+  }
+
+  /// Shared kernel for the fused elementwise comparisons below.  Previously
+  /// notEqualTo/greaterThanOrEqual/lessThanOrEqual were composed from THREE
+  /// dispatches (compare, ones, subtract) and leaked the intermediate zeros
+  /// tensor.  One dispatch, no intermediates.
+  Future<Tensor<T>> _compare(Tensor<T> other, String wgslCondition) async {
+    if (other.size != size) {
+      throw Exception("Tensor sizes do not match for elementwise comparison");
+    }
+    Tensor<T> result = await Tensor.create<T>(
+      shape,
+      gpu: gpu,
+      dataType: dataType,
+    );
+    final shaderTemplate =
+        '''
+@group(0) @binding(0) var<storage, read_write> A: array<f32>;
+@group(0) @binding(1) var<storage, read_write> B: array<f32>;
+@group(0) @binding(2) var<storage, read_write> C: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
+  if (i < ${size}u) {
+    C[i] = select(0.0, 1.0, $wgslCondition);
+  }
+}
+''';
+    final shaderCode = prepareShader(shaderTemplate, dataType, {
+      'size': size.toString(),
+    });
+    final shader = gpu.cachedShader(shaderCode);
+    shader.setBuffer('A', buffer);
+    shader.setBuffer('B', other.buffer);
+    shader.setBuffer('C', result.buffer);
+    await shader.dispatchLinear(size);
     return result;
   }
 
   /// Performs elementwise "not equal" comparison.
-  Future<Tensor<T>> notEqualTo(Tensor<T> other) async {
-    Tensor<T> eq = await equalTo(other);
-    Tensor<T> ones = await Tensor.create<T>(
-      shape,
-      gpu: gpu,
-      dataType: dataType,
-    );
-    ones = await ones.addScalar(1.0);
-    Tensor<T> result = await ones.subtract(eq);
-    eq.destroy();
-    ones.destroy();
-    return result;
-  }
+  Future<Tensor<T>> notEqualTo(Tensor<T> other) => _compare(other, 'A[i] != B[i]');
 
-  /// Greater than or equal (A >= B) is equivalent to NOT(A < B).
-  Future<Tensor<T>> greaterThanOrEqual(Tensor<T> other) async {
-    Tensor<T> lt = await lessThan(other);
-    Tensor<T> ones = await Tensor.create<T>(
-      shape,
-      gpu: gpu,
-      dataType: dataType,
-    );
-    ones = await ones.addScalar(1.0);
-    Tensor<T> result = await ones.subtract(lt);
-    lt.destroy();
-    ones.destroy();
-    return result;
-  }
+  /// Greater than or equal (A >= B).
+  Future<Tensor<T>> greaterThanOrEqual(Tensor<T> other) =>
+      _compare(other, 'A[i] >= B[i]');
 
-  /// Less than or equal (A <= B) is equivalent to NOT(A > B).
-  Future<Tensor<T>> lessThanOrEqual(Tensor<T> other) async {
-    Tensor<T> gt = await greaterThan(other);
-    Tensor<T> ones = await Tensor.create<T>(
-      shape,
-      gpu: gpu,
-      dataType: dataType,
-    );
-    ones = await ones.addScalar(1.0);
-    Tensor<T> result = await ones.subtract(gt);
-    gt.destroy();
-    ones.destroy();
-    return result;
-  }
+  /// Less than or equal (A <= B).
+  Future<Tensor<T>> lessThanOrEqual(Tensor<T> other) =>
+      _compare(other, 'A[i] <= B[i]');
 
   /// Computes the absolute value of each element.
   Future<Tensor<T>> abs() async {
@@ -933,24 +971,21 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read_write> A: array<f32>;
 @group(0) @binding(1) var<storage, read_write> B: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {
+  let i: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (i < ${size}u) {
     B[i] = abs(A[i]);
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'size': size.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
 
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (size + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(size);
     return result;
   }
 
@@ -983,8 +1018,8 @@ const inner: u32 = ${inner}u;
 const totalOut: u32 = ${totalOut}u;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let idx: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let idx: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (idx < totalOut) {
     let outer: u32 = idx / inner;
     let r: u32 = idx % inner;
@@ -997,19 +1032,16 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'd': d.toString(),
       'inner': inner.toString(),
       'totalOut': totalOut.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
 
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (totalOut + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(totalOut);
     return result;
   }
 
@@ -1051,8 +1083,8 @@ const inner: u32 = ${inner}u;
 const totalOut: u32 = ${totalOut}u;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let idx: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let idx: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (idx < totalOut) {
     let outer: u32 = idx / inner;
     let r: u32 = idx % inner;
@@ -1065,18 +1097,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'd': d.toString(),
       'inner': inner.toString(),
       'totalOut': totalOut.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (totalOut + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(totalOut);
     return result;
   }
 
@@ -1109,8 +1138,8 @@ const inner: u32 = ${inner}u;
 const totalOut: u32 = ${totalOut}u;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let idx: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let idx: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (idx < totalOut) {
     let outer: u32 = idx / inner;
     let r: u32 = idx % inner;
@@ -1123,18 +1152,15 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'd': d.toString(),
       'inner': inner.toString(),
       'totalOut': totalOut.toString(),
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (totalOut + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(totalOut);
     return result;
   }
 
@@ -1167,8 +1193,8 @@ const inner: u32 = ${inner}u;
 const totalOut: u32 = ${totalOut}u;
 
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let idx: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+  let idx: u32 = gid.x + gid.y * (nwg.x * 256u);
   if (idx < totalOut) {
     let outer: u32 = idx / inner;
     let r: u32 = idx % inner;
@@ -1186,16 +1212,13 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
   }
 }
 ''';
-    final ComputeShader shader = gpu.createComputeShader();
     final shaderCode = prepareShader(shaderTemplate, dataType, {
       'shape': shape,
     });
-    shader.loadKernelString(shaderCode);
+    final shader = gpu.cachedShader(shaderCode);
     shader.setBuffer('A', buffer);
     shader.setBuffer('B', result.buffer);
-    int workgroups = (totalOut + 255) ~/ 256;
-    await shader.dispatch(workgroups, 1, 1);
-    shader.destroy();
+    await shader.dispatchLinear(totalOut);
     return result;
   }
 }

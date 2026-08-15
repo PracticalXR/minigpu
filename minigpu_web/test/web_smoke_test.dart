@@ -213,7 +213,11 @@ class _FakeShader implements PlatformComputeShader {
   @override
   void setBuffer(int tag, PlatformBuffer b) {}
   @override
+  void setBufferFire(int tag, PlatformBuffer b) {}
+  @override
   Future<void> dispatch(int x, int y, int z) async {}
+  @override
+  void dispatchFire(int x, int y, int z) {}
   @override
   void destroy() {}
 }

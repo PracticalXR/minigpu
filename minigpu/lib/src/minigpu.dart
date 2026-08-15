@@ -5,23 +5,46 @@ import 'package:minigpu/src/video_texture.dart';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
 /// Controls the initialization and destruction of the minigpu context.
+///
+/// There is ONE process-global native context, so this wrapper is a
+/// per-isolate SINGLETON: every `Minigpu()` returns the same instance.
+///
+/// Historically each construction was a fresh object that attached a
+/// Finalizer calling `destroyContext()` — so any temporary wrapper (e.g.
+/// `Minigpu().isInitialized` in a test setUp) would, whenever the GC ran,
+/// DESTROY THE DEVICE out from under every live buffer and shader in the
+/// process.  The context would auto-reinitialize, but resources created
+/// before the loss were invalid on the new device, and dispatches using
+/// them were silently dropped (zero outputs, no Dart-visible error) — the
+/// source of "identical inputs produce different outputs" flakes.  The
+/// context is now destroyed ONLY by explicit [destroy] / [destroySync].
 final class Minigpu {
-  Minigpu() {
-    _finalizer.attach(this, _platform);
+  factory Minigpu() => _instance;
+  Minigpu._() : _platform = MinigpuPlatform.instance;
+
+  /// Creates an INDEPENDENT context on the adapter whose name contains
+  /// [adapterFilter] (case-insensitive substring, e.g. `'3090'`) — its own
+  /// device, queue, and task FIFO.  NOT the singleton: call [init] before
+  /// use and [destroy] when done.  Buffers/shaders from different [Minigpu]
+  /// instances must never be mixed in one dispatch.  Throws
+  /// [UnsupportedError] on platforms without multi-adapter support (web).
+  factory Minigpu.forAdapter(String adapterFilter) {
+    final platform =
+        MinigpuPlatform.instance.createSecondaryPlatform(adapterFilter);
+    if (platform == null) {
+      throw UnsupportedError(
+          'Multi-adapter contexts are not supported on this platform');
+    }
+    return Minigpu._withPlatform(platform);
   }
 
-  static final _finalizer = Finalizer<MinigpuPlatform>(
-    (platform) => platform.destroyContext(),
-  );
-  static final _shaderFinalizer = Finalizer<PlatformComputeShader>(
-    (shader) => shader.destroy(),
-  );
-  static final _bufferFinalizer = Finalizer<Buffer>(
-    (buffer) => buffer.destroy(),
-  );
+  Minigpu._withPlatform(this._platform);
 
-  final _platform = MinigpuPlatform.instance;
+  static final Minigpu _instance = Minigpu._();
+
+  final MinigpuPlatform _platform;
   bool isInitialized = false;
+  Future<void>? _initializing;
 
   // Internal shader cache: code hash -> shader
   // Live allocation counters — incremented on createBuffer/createComputeShader
@@ -55,11 +78,22 @@ final class Minigpu {
   int get liveShaderCount => _liveShaderCount;
 
   /// Initializes the minigpu context.
-  Future<void> init() async {
-    if (isInitialized) throw MinigpuAlreadyInitError();
-
-    await _platform.initializeContext();
-    isInitialized = true;
+  ///
+  /// Idempotent and concurrency-safe: with a singleton wrapper, several
+  /// libraries commonly race `if (!gpu.isInitialized) await gpu.init()` at
+  /// startup (tests + Tensor.create's DefaultMinigpu).  A second native
+  /// init used to tear the live context down; now late callers simply await
+  /// the in-flight initialization.
+  Future<void> init() {
+    if (isInitialized) return Future.value();
+    return _initializing ??= () async {
+      try {
+        await _platform.initializeContext();
+        isInitialized = true;
+      } finally {
+        _initializing = null;
+      }
+    }();
   }
 
   /// Destroys the minigpu context.
@@ -110,6 +144,60 @@ final class Minigpu {
   /// is not initialized / the platform does not expose it.
   static String? get selectedAdapterName =>
       MinigpuPlatform.instance.selectedAdapterName;
+
+  /// Yield-spin budget (ms) the LOADED native binary implements before the
+  /// event drain degrades to coarse sleeping — `null` when it can't be asked
+  /// (web, or a binary predating the export), which for a native build means
+  /// the drain fix is NOT in it.
+  ///
+  /// Latency-sensitive callers (screen recording, live present) should assert
+  /// this is > 0 at startup. Without the fix every GPU wait rounds up to the
+  /// Windows timer quantum (~15.6 ms): the shared-texture present measured p50
+  /// 15.69 ms at BOTH 720p and 4K, and a cost that doesn't move with 9× the
+  /// pixels is a clock tick, not work. Loading a stale native artifact is a
+  /// mistake this repo has made more than once, and it is silent — this is how
+  /// you catch it in-process rather than in a profile.
+  static int? get drainSpinBudgetMs =>
+      MinigpuPlatform.instance.drainSpinBudgetMs;
+
+  /// BLOCKS until every GPU task already queued has run.
+  ///
+  /// Dispatches, readbacks and shared-texture blits execute on a native worker
+  /// thread, so destroying a buffer or texture can free a resource a queued
+  /// task is about to touch. Draining first makes teardown ordered instead of
+  /// hopeful.
+  ///
+  /// SYNCHRONOUS on purpose — the caller that needs it most is one that cannot
+  /// await. In Flutter, [State.reassemble] runs on hot reload and is the only
+  /// hook you get before the framework rebuilds the tree on top of your GPU
+  /// resources; it is synchronous, so `await stop()` is not available there.
+  /// The shape that works:
+  ///
+  /// ```dart
+  /// @override
+  /// void reassemble() {
+  ///   super.reassemble();
+  ///   stopProducingFrames();   // nothing new may be queued
+  ///   Minigpu.drainWorkQueue(); // everything queued has now finished
+  ///   releaseGpuResources();    // safe: nothing is still pointing at them
+  /// }
+  /// ```
+  ///
+  /// Drain AFTER you have stopped producing — draining while a loop is still
+  /// submitting just waits for a queue that keeps refilling. Never per frame.
+  /// No-op on web and on a native binary predating the export.
+  static void drainWorkQueue() => MinigpuPlatform.instance.drainWorkQueue();
+
+  /// Name of the adapter THIS instance selected — meaningful for
+  /// [Minigpu.forAdapter] contexts, where the process-global
+  /// [selectedAdapterName] refers to the default context.
+  String? get adapterName => _platform.selectedAdapterName;
+
+  /// Enumerates hardware adapters with total/used dedicated VRAM (empty on
+  /// platforms without adapter enumeration).  Static: this queries the OS,
+  /// not any particular context.
+  static List<GpuAdapterInfo> listAdapters() =>
+      MinigpuPlatform.instance.listAdapters();
 
   /// Synchronous variant of [destroy] intended for use in Flutter hot-restart
   /// teardown hooks where `await` is not available (e.g. inside
