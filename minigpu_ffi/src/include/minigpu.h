@@ -132,6 +132,113 @@ EXPORT int mgpuPreferDisplayAdapter(int enable);
 /// context is not initialized.
 EXPORT int mgpuGetSelectedAdapterName(char* out, int cap);
 
+/// --- Persistent shader cache ---------------------------------------------
+/// Compiling WGSL to a backend shader is expensive — on the D3D11 backend it
+/// runs through FXC, whose optimiser cost grows superlinearly with kernel
+/// size, and large compute kernels can spend tens of seconds there. Dawn can
+/// cache the compiled result, but only if the embedder supplies somewhere to
+/// put it. minigpu installs a disk-backed provider by DEFAULT, which turns
+/// that into a once-per-machine cost instead of a once-per-process one.
+///
+/// Nothing here can fail device creation. Every error — unwritable directory,
+/// disk full, corrupt entry, antivirus lock, a race with another process —
+/// degrades to "compile it" and continues. A cache that can break startup is
+/// worse than no cache.
+///
+/// All setters are PRE-INIT and PROCESS-GLOBAL, exactly like
+/// mgpuPreferDisplayAdapter: the value is always stored, and the return says
+/// whether it can still affect the current context (0 = stored before init,
+/// 1 = a context is already live so it applies to the next init).
+///
+/// ENVIRONMENT OVERRIDES, which OUTRANK every setter below:
+///   MGPU_SHADER_CACHE=0|off|false|no   turn caching off entirely
+///   MGPU_SHADER_CACHE_DIR=<path>       store blobs somewhere else
+/// The point of an env var is to change a binary you cannot edit — to answer
+/// "is the cache the problem?" without a code change and a rebuild — so a
+/// caller that hard-codes a setting must not be able to defeat it. Same
+/// precedence rule as MGPU_ADAPTER_NAME over mgpuPreferDisplayAdapter.
+
+/// Bring-your-own load. Called TWICE per lookup: first with value=NULL and
+/// valueCap=0 — return the entry's total size, or 0 for a miss — then with a
+/// buffer of that size, where the return is the number of bytes written.
+/// Returning a different size on the second call is treated as a miss.
+/// Synchronous, and may be called from an internal Dawn thread.
+typedef size_t (*MGPUShaderCacheLoadFn)(const void* key, size_t keyLen,
+                                        void* value, size_t valueCap,
+                                        void* user);
+/// Bring-your-own store. Best effort — a failure must cost a recompile on the
+/// next launch and nothing else.
+typedef void (*MGPUShaderCacheStoreFn)(const void* key, size_t keyLen,
+                                       const void* value, size_t valueLen,
+                                       void* user);
+
+/// Master switch. Default 1 (on). Passing 0 makes every lookup a miss and
+/// drops every store — the behaviour before this feature existed.
+EXPORT int mgpuShaderCacheSetEnabled(int enabled);
+
+/// Redirect the DEFAULT provider's directory (UTF-8). Pass NULL/"" to go back
+/// to the per-platform default:
+///   Windows  %LOCALAPPDATA%\minigpu\shadercache\v1\
+///   macOS    ~/Library/Caches/minigpu/shadercache/v1/
+///   Linux    $XDG_CACHE_HOME/minigpu/shadercache/v1/ (else ~/.cache/...)
+///   iOS      <app>/Library/Caches/minigpu/shadercache/v1/
+///   Android  NONE — an app-private cache dir cannot be discovered from C++,
+///            so the cache stays off until a host supplies one here.
+EXPORT int mgpuShaderCacheSetDirectory(const char* utf8Path);
+
+/// Size cap for the default provider, in bytes (default 256 MiB). Eviction is
+/// LRU by last-write time and runs after a store that pushes the total over.
+/// 0 disables eviction entirely.
+EXPORT int mgpuShaderCacheSetCapBytes(unsigned long long bytes);
+
+/// Extra text folded into the cache key. Every entry written under a different
+/// value is unreachable, so this is both an app-level cache-bust control and
+/// the way to keep separate key namespaces in one directory.
+EXPORT int mgpuShaderCacheSetExtraKey(const char* utf8);
+
+/// Replace the storage provider entirely. Pass (NULL, NULL, NULL) to restore
+/// the built-in disk provider.
+///
+/// NOT CALLABLE FROM DART. The load callback is synchronous and can arrive on
+/// a Dawn-internal thread; entering a Dart isolate from a foreign thread
+/// requires NativeCallable.listener, which is asynchronous and therefore
+/// cannot return a blob to a blocked native caller. A Dart-side cache would
+/// have to PRE-POPULATE the store before device creation, never serve it live.
+EXPORT int mgpuShaderCacheSetProvider(MGPUShaderCacheLoadFn load,
+                                      MGPUShaderCacheStoreFn store,
+                                      void* user);
+
+/// Deletes every entry in the cache directory. Returns the number of files
+/// removed (0 when the cache is inactive). Best effort: files another process
+/// holds open are skipped.
+EXPORT int mgpuShaderCacheClear(void);
+
+/// Counters for the life of the process. [loadMs]/[storeMs] are time spent
+/// inside the cache itself; [pipelineCreateMs] is total time in compute
+/// pipeline creation, which is what the cache exists to shrink — compare it
+/// cold vs warm.
+typedef struct MGPUShaderCacheStats {
+  unsigned long long hits;
+  unsigned long long misses;
+  unsigned long long stores;
+  unsigned long long storeFailures;
+  unsigned long long evictions;
+  unsigned long long bytesOnDisk;
+  unsigned long long entryCount;
+  unsigned long long loadMs;
+  unsigned long long storeMs;
+  unsigned long long pipelineCreateMs;
+  unsigned int enabled;
+  unsigned int usingDefaultProvider;
+} MGPUShaderCacheStats;
+
+EXPORT void mgpuGetShaderCacheStats(MGPUShaderCacheStats* out);
+
+/// Copies the resolved cache directory into [out] as NUL-terminated UTF-8.
+/// Returns the full length, or 0 when no directory is in use (disabled, a
+/// custom provider is installed, or resolution failed).
+EXPORT int mgpuGetShaderCacheDirectory(char* out, int cap);
+
 /// Attach to the PROCESS-GLOBAL context, initializing it on the first attach.
 /// Safe to call concurrently from any number of threads/isolates: callers that
 /// arrive while an initialization is in flight wait for it and then share the

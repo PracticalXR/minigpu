@@ -1,14 +1,21 @@
 # minigpu_platform_interface CHANGELOG
 
-## 1.6.1
+## 1.7.0
 
-- released 08/13/26 - MR
-
-## Unreleased
+- Add the persistent shader cache surface: `configureShaderCache(...)`,
+  `shaderCacheStats`, `shaderCacheDirectory`, `clearShaderCache()`, and the
+  `ShaderCacheStats` value type. Every method has a default implementation
+  (no-op / null / 0), so existing platform implementations need no change —
+  web inherits the defaults, which is correct: without Dawn there is no
+  compiled shader to cache.
 
 - Add `MinigpuPlatform.drainWorkQueue()` — blocks until every GPU task already
   queued on the native worker thread has run. Default implementation is a no-op,
   so existing platform implementations (web) need no change.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 

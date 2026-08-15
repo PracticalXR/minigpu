@@ -263,6 +263,89 @@ abstract class MinigpuPlatform {
   /// another context's resources in a single dispatch.  Returns null on
   /// platforms without multi-adapter support (web).
   MinigpuPlatform? createSecondaryPlatform(String adapterFilter) => null;
+
+  /// Configures the persistent shader cache. Returns `true` when the change
+  /// was stored before any context was initialized (so it affects the next
+  /// device), `false` when a context is already live or the platform has no
+  /// shader cache. See [Minigpu.configureShaderCache] for the full contract.
+  bool configureShaderCache({
+    bool? enabled,
+    String? directory,
+    int? maxBytes,
+    String? extraKey,
+  }) => false;
+
+  /// Cache counters for this process, or `null` where there is no cache.
+  ShaderCacheStats? get shaderCacheStats => null;
+
+  /// Directory the cache is using, or `null` when it is not using one.
+  String? get shaderCacheDirectory => null;
+
+  /// Deletes every cached entry; returns how many files were removed.
+  int clearShaderCache() => 0;
+}
+
+/// Snapshot of persistent shader cache counters.
+///
+/// Absolute milliseconds on a loaded machine are noisy — treat [hits] /
+/// [misses] and the RATIO of cold to warm [pipelineCreateMs] as the signal,
+/// not any single timing.
+final class ShaderCacheStats {
+  const ShaderCacheStats({
+    required this.hits,
+    required this.misses,
+    required this.stores,
+    required this.storeFailures,
+    required this.evictions,
+    required this.bytesOnDisk,
+    required this.entryCount,
+    required this.loadMs,
+    required this.storeMs,
+    required this.pipelineCreateMs,
+    required this.enabled,
+    required this.usingDefaultProvider,
+  });
+
+  /// Lookups served from the cache.
+  final int hits;
+
+  /// Lookups that had to compile. Includes entries rejected as corrupt or as
+  /// belonging to a different key — a rejected entry is always a miss, never a
+  /// wrong pipeline.
+  final int misses;
+
+  /// Compiled blobs written to storage.
+  final int stores;
+
+  /// Writes that failed (unwritable directory, disk full, lost rename race).
+  /// Costs a recompile next launch and nothing else.
+  final int storeFailures;
+
+  /// Entries deleted to stay under the size cap.
+  final int evictions;
+
+  final int bytesOnDisk;
+  final int entryCount;
+
+  /// Time spent inside the cache itself.
+  final int loadMs;
+  final int storeMs;
+
+  /// Total time in compute pipeline creation — the cost the cache exists to
+  /// remove. Compare a cold launch against a warm one.
+  final int pipelineCreateMs;
+
+  final bool enabled;
+
+  /// False when a custom native provider is installed.
+  final bool usingDefaultProvider;
+
+  @override
+  String toString() =>
+      'ShaderCacheStats(hits: $hits, misses: $misses, stores: $stores, '
+      'storeFailures: $storeFailures, evictions: $evictions, '
+      'entries: $entryCount, bytes: $bytesOnDisk, '
+      'pipelineCreateMs: $pipelineCreateMs, enabled: $enabled)';
 }
 
 // ---------------------------------------------------------------------------

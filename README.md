@@ -56,7 +56,7 @@ dart pub get
 
 ### Flutter apps: use `minigpu_flutter` instead
 
-If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that fires registered teardown callbacks during hot reload — preventing stale `NativeCallable` invocations when the Dart isolate is rebuilt mid-dispatch.
+If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that runs your registered GPU teardown at hot reload — the one moment a long-lived context has no other disposal hook.
 
 ```yaml
 dependencies:
@@ -215,6 +215,93 @@ elements beyond `elementCount` in `dst` are untouched.
 The copy uses a cached WGSL compute shader bound via `setBufferAtSlot`; the
 shader is created on the first `copyBuffer` call and reused for all subsequent
 ones on the same `Minigpu` instance.
+
+## Persistent Shader Cache
+
+Turning WGSL into a backend shader is the most expensive thing a minigpu
+process does at startup. On Windows/D3D11 it goes through FXC, whose optimiser
+cost grows superlinearly with kernel size, so a large compute kernel can spend
+**tens of seconds** compiling — every launch.
+
+minigpu caches compiled shaders on disk **by default**. You do not have to call
+anything: the first launch pays compilation and writes the result, and every
+later launch on that machine reads it back. Nothing below is required to get
+the benefit — it exists to change where and whether caching happens.
+
+```dart
+// Optional. All of this must run BEFORE the first init().
+Minigpu.configureShaderCache(
+  directory: '/path/to/cache',   // '' restores the platform default
+  maxBytes: 512 * 1024 * 1024,   // default 256 MiB, LRU eviction
+);
+
+final gpu = Minigpu();
+await gpu.init();
+// ... create shaders and dispatch ...
+
+final stats = Minigpu.shaderCacheStats;
+print('${stats?.hits} hits, ${stats?.misses} misses, '
+      '${stats?.pipelineCreateMs} ms in pipeline creation');
+```
+
+Default location per platform:
+
+| Platform | Directory |
+|---|---|
+| Windows | `%LOCALAPPDATA%\minigpu\shadercache\v1\` |
+| macOS | `~/Library/Caches/minigpu/shadercache/v1/` |
+| Linux | `$XDG_CACHE_HOME/minigpu/shadercache/v1/` (else `~/.cache/…`) |
+| iOS | `<app>/Library/Caches/minigpu/shadercache/v1/` |
+| Android | **none** — pass one to `configureShaderCache` |
+| Web | not applicable (no Dawn, nothing to cache) |
+
+An OS purging the cache directory is expected and supported: it costs one slow
+launch. On Android there is no way to discover an app-private cache directory
+from C++, so caching stays off until the host supplies a path.
+
+**It cannot break your app.** An unwritable directory, a full disk, a corrupt
+or truncated entry, a race with another process, an antivirus lock — every one
+of them degrades to "compile it" and carries on. A cache that can fail startup
+would be worse than no cache at all.
+
+**Stale entries are impossible, not merely unlikely.** The key covers the Dawn
+version, the adapter, the driver version and the compile options, so a driver
+update or a GPU swap is a miss rather than a stale hit. Each entry also stores
+its own key and is verified on read, so a hash collision costs a recompile
+instead of silently loading the wrong pipeline.
+
+Three separate controls:
+
+```dart
+Minigpu.configureShaderCache(enabled: false);        // off entirely
+Minigpu.configureShaderCache(directory: '/tmp/x');   // somewhere else
+Minigpu.configureShaderCache(extraKey: 'build-42');  // invalidate everything
+Minigpu.clearShaderCache();                          // delete what is stored
+```
+
+`extraKey` is folded into every key, so changing it makes existing entries
+unreachable — useful as an app-level cache-bust.
+
+Two environment variables override all of the above, so you can answer "is the
+cache the problem?" on a binary you cannot edit:
+
+```sh
+MGPU_SHADER_CACHE=0             # disable entirely
+MGPU_SHADER_CACHE_DIR=/tmp/sc   # store blobs somewhere else
+```
+
+> Shader blobs are machine-specific and are not portable between machines,
+> drivers or Dawn versions. There is no support for shipping precompiled blobs.
+
+### Why there is no Dart-authored cache provider
+
+Dawn's load callback is **synchronous** and may be invoked from an internal
+Dawn thread. Entering a Dart isolate from a foreign thread requires
+`NativeCallable.listener`, which is asynchronous and therefore cannot return a
+blob to a blocked native caller. A Dart provider would deadlock, so the
+built-in provider is entirely native. If you ever need custom storage, the
+viable shape is pre-populating the directory before `init()`, never a live
+callback.
 
 ## VRAM Usage
 

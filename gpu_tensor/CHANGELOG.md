@@ -1,5 +1,13 @@
 # gpu_tensor
 
+## 1.7.0
+
+- Version bump to keep the minigpu 1.7.0 family aligned; inherits the
+  persistent shader cache from minigpu_ffi 1.7.0. Every WGSL kernel this
+  package compiles is now cached on disk and reused on the next process launch,
+  so tensor kernels pay compilation once per machine rather than once per run.
+  No API change in this package.
+
 ## 1.6.1
 
 - released 08/13/26 - MR

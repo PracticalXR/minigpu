@@ -1,10 +1,58 @@
 # minigpu_ffi CHANGELOG
 
-## 1.6.1
+## 1.7.0
 
-- released 08/13/26 - MR
+- **Persistent shader cache — Dawn's blob cache is now wired to disk, so
+  compiled shaders survive process exit.** Dawn has always cached compiled
+  shaders in memory, but it only writes through to storage when the embedder
+  supplies `loadDataFunction` / `storeDataFunction` on a
+  `DawnCacheDeviceDescriptor` chained onto the device descriptor. Nothing was
+  chained, so every launch recompiled everything. On the D3D11 backend that
+  means FXC, whose optimiser cost grows superlinearly with kernel size.
+  Measured with a 3-kernel probe: total time in `wgpuDeviceCreateComputePipeline`
+  **34 ms cold → 1 ms warm**, outputs byte-identical.
 
-## Unreleased
+  New `src/src/shader_cache.cpp` implements the storage; `buffer.cpp` chains
+  the descriptor at device creation and logs ONE summary line per device at
+  INFO (per-entry hit/miss detail is DEBUG — this channel defaults to INFO and
+  a line per blob would bury real warnings). `compute_shader.cpp` times
+  pipeline creation into `pipelineCreateMs`.
+
+  New exports: `mgpuShaderCacheSetEnabled`, `mgpuShaderCacheSetDirectory`,
+  `mgpuShaderCacheSetCapBytes`, `mgpuShaderCacheSetExtraKey`,
+  `mgpuShaderCacheSetProvider`, `mgpuShaderCacheClear`,
+  `mgpuGetShaderCacheStats`, `mgpuGetShaderCacheDirectory`.
+
+  Two environment overrides, following the `MGPU_BACKEND` / `MGPU_ADAPTER_NAME`
+  / `MGPU_WAIT_PROF` convention: **`MGPU_SHADER_CACHE=0`** turns caching off and
+  **`MGPU_SHADER_CACHE_DIR=<path>`** redirects it. Both OUTRANK the
+  programmatic setters — an env var exists to change a binary you cannot edit,
+  so a caller that hard-codes a setting must not be able to defeat it. This is
+  the first thing to try when a shader misbehaves and you need to know whether
+  the cache is involved.
+
+  Implementation notes worth knowing before touching it:
+
+  - **Entries store their full key and it is compared on read.** The filename
+    is only a hash of the key. Dawn's own hash validation binds hash→value, not
+    value→key, so on a filename collision it would accept a blob that is
+    internally valid but belongs to a different pipeline. The stored-key
+    compare is the only thing between a collision and a silently wrong
+    pipeline; a mismatch is a miss.
+  - **Nothing can fail device creation.** Unwritable directory, full disk,
+    corrupt/truncated entry, lock, concurrent process — all become a miss.
+  - Writes are atomic (temp file in the same directory, flushed, then renamed),
+    and readers open with full sharing so eviction cannot fault an in-flight
+    read.
+  - Dawn's two-phase load (size, then fetch) is bridged by a single-entry memo,
+    so the two calls cannot disagree and the file is read once per hit.
+  - `mgpuShaderCacheSetProvider` is intentionally NOT exposed to Dart: Dawn's
+    load callback is synchronous and may arrive on a Dawn-internal thread,
+    while a Dart isolate can only be entered asynchronously from a foreign
+    thread (`NativeCallable.listener`), which cannot return a blob to a blocked
+    caller.
+  - The file is inert under `__EMSCRIPTEN__` — the web build compiles the same
+    source glob and has neither Dawn nor a filesystem.
 
 - **`Buffer.writeRawBytes` no longer copies at all on the way to the GPU —
   `upload` measured 3.71 → 1.84 ms/frame at 4K (-50%).** The chunked path used
@@ -126,6 +174,10 @@
 - Element-type codes for `mgpuReadAsyncToPort` are a dedicated `MGPUElementType`
   enum rather than `BufferDataType`: the Dart and C++ `BufferDataType` enums are
   ordered DIFFERENTLY, so an `.index` crossing the boundary is ambiguous.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 

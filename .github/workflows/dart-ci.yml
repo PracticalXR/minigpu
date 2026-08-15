@@ -8,7 +8,7 @@
 #
 # Resolution: the in-repo packages depend on each other at unpublished 1.5.x
 # versions and resolve locally via the committed pubspec_overrides.yaml (path
-# deps; no melos / workspace). `dart pub get --no-example` skips the nested
+# deps; no melos / workspace). `flutter pub get --no-example` skips the nested
 # example demo packages during resolution — the analyze job only needs each
 # library's own graph.
 #
@@ -76,7 +76,7 @@ jobs:
             (
               cd "$pkg"
               # --no-example: skip nested example packages during resolution.
-              dart pub get --no-example
+              flutter pub get --no-example
               # lib/ + the package's own test/ (if any); exclude example/ demos.
               targets="lib"
               [ -d test ] && targets="$targets test"

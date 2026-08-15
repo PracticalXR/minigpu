@@ -1,10 +1,6 @@
 # minigpu_view CHANGELOG
 
-## 1.6.1
-
-- released 08/13/26 - MR
-
-## Unreleased
+## 1.7.0
 
 - **Windows: one engine texture per source handle, not per controller —
   fixes resource exhaustion with multi-buffered producers.** A producer that
@@ -63,6 +59,10 @@
   as `{sharedHandle, texturePtr, width, height}` across an API boundary rather
   than as an object. Consumers had nothing to call `asPreviewSource()` on and
   were hand-rolling the wire format; getting it subtly wrong is silent.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 

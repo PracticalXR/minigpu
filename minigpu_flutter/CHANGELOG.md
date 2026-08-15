@@ -1,8 +1,4 @@
-## 1.6.1
-
-- released 08/13/26 - MR
-
-## Unreleased
+## 1.7.0
 
 - Docs corrected: `MinigpuBinding` was described as preventing stale
   `NativeCallable` invocations during hot reload. It never could — `reassemble`
@@ -12,6 +8,10 @@
   delivers completions on a Dart native port. This widget is a teardown
   ORDERING aid: it runs your registered GPU disposal at the one moment
   (hot reload) when nothing else does. No functional change.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 

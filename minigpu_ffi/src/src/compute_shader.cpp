@@ -2,6 +2,8 @@
 #include "../include/buffer.h"
 #include "../include/log.h"
 #include "../include/mutex.h"
+#include "../include/shader_cache.h"
+#include <chrono>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -309,8 +311,18 @@ bool ComputeShader::createComputePipeline() {
   pipelineDesc.compute.entryPoint.data = "main";
   pipelineDesc.compute.entryPoint.length = 4;
 
+  // This call is where WGSL becomes a backend shader, so it is the whole cost
+  // the persistent shader cache exists to remove. Accumulating it makes the
+  // difference measurable from Dart (Minigpu.shaderCacheStats) instead of
+  // inferable from wall-clock, and a future regression in compile time shows
+  // up here first.
+  const auto pipelineT0 = std::chrono::steady_clock::now();
   computePipeline =
       wgpuDeviceCreateComputePipeline(mgpu.getDevice(), &pipelineDesc);
+  shaderCacheNotePipelineMs(
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - pipelineT0)
+          .count());
   return computePipeline != nullptr;
 }
 

@@ -1,6 +1,6 @@
 name: minigpu_flutter
 description: Flutter companion for minigpu. Re-exports the full minigpu API and provides MinigpuFlutterBinding for registering hot-restart teardown callbacks.
-version: 1.6.1
+version: 1.7.0
 repository: https://github.com/PracticalXR/minigpu/tree/main/minigpu_flutter
 
 environment:

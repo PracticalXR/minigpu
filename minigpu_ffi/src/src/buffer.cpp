@@ -3,6 +3,7 @@
 #include "../include/log.h"
 #include "../include/mutex.h"
 #include "../include/platform_sleep.h"
+#include "../include/shader_cache.h"
 #include "../include/wait_prof.h"
 #include <algorithm>
 #include <atomic>
@@ -1324,6 +1325,14 @@ void MGPU::initializeContextUnlocked() {
 
   // Log which adapter was selected so it's easy to confirm the right GPU.
   // adapterType: 1=DiscreteGpu 2=IntegratedGpu 3=Cpu 4=Unknown
+  //
+  // These four also feed the shader cache's isolation key below, so they are
+  // copied out here — WGPUAdapterInfo's strings are freed by
+  // wgpuAdapterInfoFreeMembers before the device descriptor is built.
+  uint32_t cacheVendorId = 0;
+  uint32_t cacheDeviceId = 0;
+  std::string cacheAdapterName;
+  std::string cacheDriverDesc;
   {
     WGPUAdapterInfo info{};
     if (wgpuAdapterGetInfo(c->adapter, &info) == WGPUStatus_Success) {
@@ -1342,6 +1351,14 @@ void MGPU::initializeContextUnlocked() {
         (unsigned)info.vendorID, (unsigned)info.deviceID);
       set_selected_adapter_name(devStr);  // queryable via mgpuGetSelectedAdapterName
       selectedName = devStr;              // per-instance (multi-GPU contexts)
+      cacheVendorId = (uint32_t)info.vendorID;
+      cacheDeviceId = (uint32_t)info.deviceID;
+      cacheAdapterName = devStr;
+      // On D3D this is "D3D11 driver version 32.0.15.7688" — a driver update
+      // therefore changes the shader cache key, which is exactly what must
+      // happen (a blob compiled by another driver is not safe to reuse).
+      cacheDriverDesc = (info.description.data && info.description.length)
+          ? std::string(info.description.data, info.description.length) : "";
       wgpuAdapterInfoFreeMembers(info);
     }
   }
@@ -1352,6 +1369,35 @@ void MGPU::initializeContextUnlocked() {
   static const char kMainDeviceLabel[] = "MGPU.MainDevice";
   deviceDesc.label.data = kMainDeviceLabel;
   deviceDesc.label.length = sizeof(kMainDeviceLabel) - 1;
+
+  // ── Persistent shader cache ────────────────────────────────────────────────
+  // Dawn compiles WGSL to a backend shader at pipeline creation and caches the
+  // result in its BlobCache — but only writes through to storage if the
+  // embedder supplies these two callbacks. Without them every launch pays full
+  // compilation again, which on the D3D11 backend means FXC, whose optimiser
+  // cost grows superlinearly with kernel size.
+  //
+  // Both the descriptor and the isolation key must outlive
+  // wgpuAdapterRequestDevice below; they are function-scope locals, and the
+  // request is awaited before this function returns. The callbacks themselves
+  // point at a never-destroyed global, because Dawn keeps calling them for the
+  // life of the device — from its own threads.
+#ifndef __EMSCRIPTEN__
+  WGPUDawnCacheDeviceDescriptor cacheDesc = WGPU_DAWN_CACHE_DEVICE_DESCRIPTOR_INIT;
+  std::string cacheIsolationKey;
+  if (mgpu::shaderCacheIsActive()) {
+    cacheIsolationKey = mgpu::shaderCacheIsolationKey(
+        cacheVendorId, cacheDeviceId, cacheAdapterName + "|" + cacheDriverDesc);
+    cacheDesc.isolationKey.data = cacheIsolationKey.data();
+    cacheDesc.isolationKey.length = cacheIsolationKey.length();
+    cacheDesc.loadDataFunction = &mgpu_shader_cache_dawn_load;
+    cacheDesc.storeDataFunction = &mgpu_shader_cache_dawn_store;
+    cacheDesc.functionUserdata = nullptr;  // global singleton, nothing to own
+    // Chain-preserving even though nothing else chains here today.
+    cacheDesc.chain.next = deviceDesc.nextInChain;
+    deviceDesc.nextInChain = &cacheDesc.chain;
+  }
+#endif
 
   // ── Optionally enable platform-specific shared-texture-memory features so
   //    minigpu_external can import D3D11 NT handles, IOSurfaces, DMA-BUFs and
@@ -1558,6 +1604,12 @@ void MGPU::initializeContextUnlocked() {
 
   c->initialized = true;
   LOG_INFO("WebGPU context initialized successfully");
+#ifndef __EMSCRIPTEN__
+  // ONE line per device creation at INFO. Per-entry hit/miss detail is DEBUG:
+  // this channel defaults to INFO, and a line per blob would bury real
+  // warnings the way per-buffer logging once buried them.
+  MGPU_LOG(mgpu::LOG_INFO, "%s", mgpu::shaderCacheSummaryLine().c_str());
+#endif
 #ifdef __EMSCRIPTEN__
   // Publish the WebGPU device to window.gpuDevice so that JavaScript
   // consumers (e.g. minigpu_view_web canvas blit) can resolve the device

@@ -1,10 +1,6 @@
 # minigpu_web CHANGELOG
 
-## 1.6.1
-
-- released 08/13/26 - MR
-
-## Unreleased
+## 1.7.0
 
 - **`writeRawBytes` no longer allocates and fills a whole second list per
   call.** It built a fresh `Uint32List` the size of the payload and memcpy'd
@@ -17,6 +13,10 @@
   (a caller-supplied view whose `offsetInBytes` is not 4-aligned). This is the
   web half of the same bug fixed natively in minigpu_ffi, and it matters more
   here: the browser has no equivalent of the native path's escape hatches.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 
