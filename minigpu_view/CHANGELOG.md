@@ -1,9 +1,8 @@
 # minigpu_view CHANGELOG
 
-## 1.7.1
+## 1.8.1
 
-- New Release
-- Version alignment with the minigpu 1.7.1 family release.
+- Version alignment with the minigpu 1.8.1 family release.
 
 ## 1.7.0
 

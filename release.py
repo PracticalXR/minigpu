@@ -314,6 +314,17 @@ def add_changelog_message(content, message, version=None):
         return content 
     
     # Find where to insert the message
+    # Do not write the same entry twice. Re-running a release (a failed
+    # preflight, an aborted publish, a second --apply) used to append a
+    # verbatim copy of every message, so a changelog quietly grew a duplicate
+    # of each bullet per attempt.
+    section_end = len(lines)
+    for i in range(target_line_idx + 1, len(lines)):
+        if lines[i].startswith('## '):
+            section_end = i
+            break
+    if f"- {message}" in lines[target_line_idx + 1:section_end]:
+        return content
     insert_message_at = target_line_idx + 1
     
     # Skip any existing blank lines after the header

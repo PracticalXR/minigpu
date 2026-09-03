@@ -1,8 +1,7 @@
 # minigpu_platform_interface CHANGELOG
 
-## 1.7.1
+## 1.8.1
 
-- New Release
 - Add `webBufferHandle` to `PlatformBuffer` (default 0) so platform implementations can expose the underlying WGPUBuffer handle on web.
 
 ## 1.7.0

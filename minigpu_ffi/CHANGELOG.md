@@ -1,8 +1,7 @@
 # minigpu_ffi CHANGELOG
 
-## 1.7.1
+## 1.8.1
 
-- New Release
 - Implement the new `PlatformBuffer.webBufferHandle` accessor (always 0 on native).
 
 ## 1.7.0

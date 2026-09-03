@@ -1,8 +1,7 @@
 # minigpu
 
-## 1.8.0
+## 1.8.1
 
-- New Release
 - **Fixed: a shader could keep dispatching against a destroyed buffer.**
   `setBuffer` treats a bind of the same native handle as no change. Backends
   recycle handles, so a buffer created after another was destroyed can come
@@ -59,10 +58,7 @@
   `web,worker`, and the device is published to `globalThis` rather than
   `window` (which does not exist in a worker).
 
-## 1.7.1
-
 - Add `webBufferHandle` on `Buffer`: the underlying WGPUBuffer handle on web (0 on native), enabling zero-copy GPU presentation of buffer contents.
-
 ## 1.7.0
 
 - **Compiled shaders are now cached on disk, so WGSL compilation is a
