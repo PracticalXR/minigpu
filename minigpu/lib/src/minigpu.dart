@@ -145,6 +145,70 @@ final class Minigpu {
   static String? get selectedAdapterName =>
       MinigpuPlatform.instance.selectedAdapterName;
 
+  /// Configures the persistent shader cache.
+  ///
+  /// Turning WGSL into a backend shader is expensive — on Windows/D3D11 it
+  /// runs through FXC, whose optimiser cost grows superlinearly with kernel
+  /// size, so a large compute kernel can spend tens of seconds in
+  /// [ComputeShader.loadKernelString]'s first dispatch. minigpu caches the
+  /// compiled result on disk BY DEFAULT, making that a once-per-machine cost
+  /// rather than a once-per-process one. You do not need to call this to get
+  /// the benefit; it exists to change where and whether caching happens.
+  ///
+  /// - [enabled] master switch (default true). False makes every lookup a miss
+  ///   and drops every store.
+  /// - [directory] where the default provider stores blobs. Pass `''` to
+  ///   restore the per-platform default (Windows `%LOCALAPPDATA%`, macOS/iOS
+  ///   `Library/Caches`, Linux `$XDG_CACHE_HOME`). **Android has no default** —
+  ///   there is no way to discover an app-private cache directory from C++, so
+  ///   caching stays off there until a host passes one in.
+  /// - [maxBytes] size cap (default 256 MiB); eviction is LRU by last-write
+  ///   time. 0 disables eviction.
+  /// - [extraKey] extra text folded into every cache key. Changing it makes
+  ///   all existing entries unreachable — an app-level cache-bust control.
+  ///
+  /// Must be called BEFORE a context is initialized (one process-global native
+  /// context, hence a static). Returns `true` when every requested change
+  /// landed pre-init; `false` when a context is already live (the values are
+  /// still stored and apply to the next init) or the platform has no cache.
+  ///
+  /// Nothing here can break startup: an unwritable directory, a full disk, a
+  /// corrupt entry or a race with another process all degrade to "compile it"
+  /// and carry on. Web is a no-op — there is no Dawn and no FXC to cache.
+  static bool configureShaderCache({
+    bool? enabled,
+    String? directory,
+    int? maxBytes,
+    String? extraKey,
+  }) => MinigpuPlatform.instance.configureShaderCache(
+    enabled: enabled,
+    directory: directory,
+    maxBytes: maxBytes,
+    extraKey: extraKey,
+  );
+
+  /// Shader cache counters for this process, or `null` on platforms without a
+  /// cache.
+  ///
+  /// The honest signal is [ShaderCacheStats.hits] / [ShaderCacheStats.misses]
+  /// and the RATIO of cold to warm [ShaderCacheStats.pipelineCreateMs].
+  /// Absolute milliseconds vary widely with machine load, so assert on
+  /// counters and report timings.
+  static ShaderCacheStats? get shaderCacheStats =>
+      MinigpuPlatform.instance.shaderCacheStats;
+
+  /// Directory the shader cache is using, or `null` when it is not using one
+  /// (disabled, no platform default, or resolution failed).
+  static String? get shaderCacheDirectory =>
+      MinigpuPlatform.instance.shaderCacheDirectory;
+
+  /// Deletes every cached shader blob. Returns how many files were removed.
+  ///
+  /// Cached blobs are keyed by Dawn version, adapter and driver, so a stale
+  /// entry is already unreachable rather than dangerous — this is for
+  /// reclaiming disk, or for forcing a clean measurement of cold compile time.
+  static int clearShaderCache() => MinigpuPlatform.instance.clearShaderCache();
+
   /// Yield-spin budget (ms) the LOADED native binary implements before the
   /// event drain degrades to coarse sleeping — `null` when it can't be asked
   /// (web, or a binary predating the export), which for a native build means

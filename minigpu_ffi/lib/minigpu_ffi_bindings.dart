@@ -161,6 +161,79 @@ external int mgpuPreferDisplayAdapter(int enable);
 @ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Int)>()
 external int mgpuGetSelectedAdapterName(ffi.Pointer<ffi.Char> out, int cap);
 
+// --- Persistent shader cache -----------------------------------------------
+// Dawn caches compiled shaders but needs somewhere durable to put them;
+// minigpu installs a disk provider by default. Every setter is PRE-INIT and
+// PROCESS-GLOBAL (same contract as mgpuPreferDisplayAdapter): the value is
+// always stored, and the return says whether a context is already live
+// (0 = stored before init, 1 = applies to the next init).
+//
+// There is deliberately NO binding for mgpuShaderCacheSetProvider: Dawn's load
+// callback is synchronous and can arrive on a Dawn-internal thread, and a Dart
+// isolate can only be entered asynchronously from a foreign thread
+// (NativeCallable.listener), which cannot return a blob to a blocked native
+// caller. A Dart-authored provider would deadlock, so it is not exposed.
+
+/// Master switch for shader caching. Default on.
+@ffi.Native<ffi.Int Function(ffi.Int)>()
+external int mgpuShaderCacheSetEnabled(int enabled);
+
+/// Redirects the default provider's directory (NUL-terminated UTF-8).
+/// Pass a pointer to an empty string to restore the per-platform default.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>)>()
+external int mgpuShaderCacheSetDirectory(ffi.Pointer<ffi.Char> utf8Path);
+
+/// Size cap in bytes for the default provider (0 disables eviction).
+@ffi.Native<ffi.Int Function(ffi.UnsignedLongLong)>()
+external int mgpuShaderCacheSetCapBytes(int bytes);
+
+/// Extra text folded into every cache key — changing it makes all existing
+/// entries unreachable.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>)>()
+external int mgpuShaderCacheSetExtraKey(ffi.Pointer<ffi.Char> utf8);
+
+/// Deletes every entry; returns the number of files removed.
+@ffi.Native<ffi.Int Function()>()
+external int mgpuShaderCacheClear();
+
+/// Mirrors the C `MGPUShaderCacheStats`. Field ORDER and TYPES must stay in
+/// lockstep with minigpu.h — extend at the END only.
+final class MGPUShaderCacheStats extends ffi.Struct {
+  @ffi.Uint64()
+  external int hits;
+  @ffi.Uint64()
+  external int misses;
+  @ffi.Uint64()
+  external int stores;
+  @ffi.Uint64()
+  external int storeFailures;
+  @ffi.Uint64()
+  external int evictions;
+  @ffi.Uint64()
+  external int bytesOnDisk;
+  @ffi.Uint64()
+  external int entryCount;
+  @ffi.Uint64()
+  external int loadMs;
+  @ffi.Uint64()
+  external int storeMs;
+  @ffi.Uint64()
+  external int pipelineCreateMs;
+  @ffi.Uint32()
+  external int enabled;
+  @ffi.Uint32()
+  external int usingDefaultProvider;
+}
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUShaderCacheStats>)>()
+external void mgpuGetShaderCacheStats(ffi.Pointer<MGPUShaderCacheStats> out);
+
+/// Copies the resolved cache directory into [out] (NUL-terminated UTF-8,
+/// truncated to [cap]). Returns the untruncated length, or 0 when no
+/// directory is in use.
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Int)>()
+external int mgpuGetShaderCacheDirectory(ffi.Pointer<ffi.Char> out, int cap);
+
 @ffi.Native<ffi.Uint32 Function(ffi.Pointer<MGPUSharedOutputTexture>)>()
 external int mgpuSharedOutputTextureGetWidth(
   ffi.Pointer<MGPUSharedOutputTexture> tex,

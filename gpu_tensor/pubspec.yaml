@@ -1,6 +1,6 @@
 name: gpu_tensor
 description: A comprehensive GPU tensor library for Dart and Flutter, designed to leverage the power of webgpu across platforms for efficient tensor operations.
-version: 1.6.1
+version: 1.7.0
 repository: https://github.com/PracticalXR/minigpu/tree/main/gpu_tensor
 
 environment:

@@ -1,10 +1,50 @@
 # minigpu
 
-## 1.6.1
+## 1.7.0
 
-- released 08/13/26 - MR
+- **Compiled shaders are now cached on disk, so WGSL compilation is a
+  once-per-machine cost instead of a once-per-process one.** On by default —
+  no code change is needed to get it. Turning WGSL into a backend shader is the
+  most expensive thing a process does at startup: on Windows/D3D11 it runs
+  through FXC, whose optimiser cost grows superlinearly with kernel size, so a
+  large compute kernel can spend tens of seconds there on every launch.
+  Measured on a 3-kernel probe: total time in compute pipeline creation
+  **34 ms cold → 1 ms warm**, with byte-identical outputs.
 
-## Unreleased
+  New API, all optional: `Minigpu.configureShaderCache(enabled:, directory:,
+  maxBytes:, extraKey:)`, `Minigpu.shaderCacheStats`,
+  `Minigpu.shaderCacheDirectory`, `Minigpu.clearShaderCache()`, and the
+  `ShaderCacheStats` value type. Configuration is PRE-INIT and process-global,
+  the same contract as `preferDisplayAdapter`.
+
+  `MGPU_SHADER_CACHE=0` disables it and `MGPU_SHADER_CACHE_DIR=<path>`
+  redirects it, both outranking the programmatic settings — so "is the cache
+  the problem?" is answerable on a build you cannot edit.
+
+  Stored under the OS cache convention (`%LOCALAPPDATA%` / `~/Library/Caches` /
+  `$XDG_CACHE_HOME`), capped at 256 MB with LRU eviction. **Android has no
+  default** — an app-private cache directory cannot be discovered from C++, so
+  caching stays off there until a host passes one to `configureShaderCache`.
+  Web is a no-op: no Dawn, no FXC, nothing to cache.
+
+  Every failure mode is a cache miss, never a failed device: an unwritable or
+  missing directory, a full disk, a corrupt or truncated entry, a lock, or a
+  race with another process all degrade to "compile it" and continue. A cache
+  that could break startup would be worse than no cache.
+
+  Stale entries are prevented rather than tolerated. The key covers the Dawn
+  version, adapter, driver version and compile options, so a driver update or a
+  GPU swap MISSES instead of loading a blob built by different software. Each
+  entry also stores its own full key and is verified on read — a filename hash
+  collision costs a recompile rather than silently binding the wrong pipeline,
+  which matters because the blob-level hash Dawn validates proves a blob is
+  intact, not that it belongs to the key that was asked for.
+
+  No Dart-authored cache providers, by construction: Dawn's load callback is
+  synchronous and can arrive on a Dawn-internal thread, and a Dart isolate can
+  only be entered asynchronously from a foreign thread
+  (`NativeCallable.listener`), which cannot return a blob to a blocked native
+  caller.
 
 - **`Buffer.writeRawBytes` is now copy-free on the way to the GPU, on BOTH
   native and web.** No API change; the payload is simply no longer duplicated
@@ -41,6 +81,10 @@
   Flutter hot reload was the reliable trigger, because it pauses the isolate at
   a safepoint for hundreds of milliseconds while the GPU worker thread keeps
   completing work.
+
+## 1.6.1
+
+- released 08/13/26 - MR
 
 ## 1.6.0
 

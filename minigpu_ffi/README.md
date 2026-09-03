@@ -80,6 +80,66 @@ after Dawn itself had compiled. It is now detected at configure time (look for
 `-- emdawnwebgpu port -> …` in the log) and a miss is a `FATAL_ERROR` naming
 `DAWN_COMMIT`.
 
+## Shader compilation: the persistent blob cache
+
+Dawn compiles WGSL to a backend shader at pipeline creation and caches the
+result — but only in memory, unless the embedder gives it somewhere durable to
+write. minigpu now does, so compilation is a once-per-machine cost instead of
+once-per-process. Nothing to enable; it is on by default.
+
+This matters most on the **D3D11 backend**, which cannot consume DXIL, so every
+shader goes through FXC, whose optimiser cost grows superlinearly with the body
+size. A large compute kernel can sit there for tens of seconds on every launch.
+
+Where the blobs go, and how to control it, is documented in the `minigpu`
+package README. The parts specific to this layer:
+
+- **One INFO line per device creation**, and nothing louder. Per-entry hit/miss
+  detail is DEBUG only — this log channel defaults to INFO and a line per blob
+  would bury real warnings, the same mistake per-buffer logging made once:
+
+  ```text
+  [mgpu shadercache] C:\Users\you\AppData\Local\minigpu\shadercache\v1 entries=64 bytes=2311044 cap=256MB hits=64 misses=0 stores=0 evictions=0
+  ```
+
+  This line is also how you confirm a rebuilt binary actually loaded: it names
+  the directory and the counters. Check it rather than a DLL timestamp.
+
+- **`MGPU_SHADER_CACHE=0`** disables caching, and **`MGPU_SHADER_CACHE_DIR`**
+  redirects it. Both outrank the programmatic setters, because the point of an
+  env var is to change a binary you cannot edit — the same precedence
+  `MGPU_ADAPTER_NAME` has over `mgpuPreferDisplayAdapter`. Reach for
+  `MGPU_SHADER_CACHE=0` first when a shader misbehaves and you want to know
+  whether the cache is involved.
+
+- **A failure is always a miss, never a failed device.** Unwritable directory,
+  full disk, corrupt or truncated entry, antivirus lock, a race with another
+  process — each costs a recompile and nothing else. `mgpuCreateContext` cannot
+  fail because of this feature.
+
+- **Stale blobs are prevented, not tolerated.** The key folds in the Dawn
+  version, adapter, driver version and compile options, so a driver update or a
+  GPU swap misses. Each entry additionally stores its own full key and is
+  checked on read: the filename is only a hash, and Dawn's own hash validation
+  binds hash→value rather than value→key, so without that check a filename
+  collision could hand back a blob belonging to a different pipeline.
+
+- **Writes are atomic** (temp file in the same directory, flushed, renamed) and
+  readers open with full sharing, so eviction can never fault an in-flight read
+  and no reader sees a half-written blob.
+
+- **`mgpuShaderCacheSetProvider` is C-only and deliberately not exposed to
+  Dart.** Dawn's load callback is synchronous and may arrive on a Dawn-internal
+  thread; a Dart isolate can only be entered asynchronously from a foreign
+  thread (`NativeCallable.listener`), which cannot return a blob to a blocked
+  native caller. A Dart provider deadlocks. If you need custom storage from
+  Dart, pre-populate the directory before init.
+
+Counters are queryable (`mgpuGetShaderCacheStats`, or `Minigpu.shaderCacheStats`
+from Dart). `pipelineCreateMs` is the total time spent in compute pipeline
+creation — compare a cold launch against a warm one; that ratio, not any single
+absolute number, is the signal.
+
 ## Buffer readback / upload performance
 
 `FfiBuffer` pools its native scratch memory across frames to eliminate per-call

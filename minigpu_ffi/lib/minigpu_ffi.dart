@@ -167,6 +167,85 @@ class MinigpuFfi extends MinigpuPlatform {
     }
   }
 
+  // ---- Persistent shader cache ---------------------------------------------
+  // Each setter reports whether it landed before a context existed; the result
+  // is the AND of them, so configuring several at once is true only when every
+  // one of them can still affect the next device.
+
+  @override
+  bool configureShaderCache({
+    bool? enabled,
+    String? directory,
+    int? maxBytes,
+    String? extraKey,
+  }) {
+    var preInit = true;
+    if (enabled != null) {
+      preInit &= ffi.mgpuShaderCacheSetEnabled(enabled ? 1 : 0) == 0;
+    }
+    if (directory != null) {
+      final ptr = directory.toNativeUtf8();
+      try {
+        preInit &= ffi.mgpuShaderCacheSetDirectory(ptr.cast()) == 0;
+      } finally {
+        malloc.free(ptr);
+      }
+    }
+    if (maxBytes != null) {
+      preInit &= ffi.mgpuShaderCacheSetCapBytes(maxBytes) == 0;
+    }
+    if (extraKey != null) {
+      final ptr = extraKey.toNativeUtf8();
+      try {
+        preInit &= ffi.mgpuShaderCacheSetExtraKey(ptr.cast()) == 0;
+      } finally {
+        malloc.free(ptr);
+      }
+    }
+    return preInit;
+  }
+
+  @override
+  ShaderCacheStats? get shaderCacheStats {
+    final out = malloc<ffi.MGPUShaderCacheStats>();
+    try {
+      ffi.mgpuGetShaderCacheStats(out);
+      final s = out.ref;
+      return ShaderCacheStats(
+        hits: s.hits,
+        misses: s.misses,
+        stores: s.stores,
+        storeFailures: s.storeFailures,
+        evictions: s.evictions,
+        bytesOnDisk: s.bytesOnDisk,
+        entryCount: s.entryCount,
+        loadMs: s.loadMs,
+        storeMs: s.storeMs,
+        pipelineCreateMs: s.pipelineCreateMs,
+        enabled: s.enabled != 0,
+        usingDefaultProvider: s.usingDefaultProvider != 0,
+      );
+    } finally {
+      malloc.free(out);
+    }
+  }
+
+  @override
+  String? get shaderCacheDirectory {
+    const cap = 1024;
+    final buf = malloc.allocate<Char>(cap);
+    try {
+      final len = ffi.mgpuGetShaderCacheDirectory(buf, cap);
+      if (len <= 0) return null;
+      return _decodeCString(buf);
+    } finally {
+      malloc.free(buf);
+    }
+  }
+
+  @override
+  int clearShaderCache() => ffi.mgpuShaderCacheClear();
+
   // ---- Log callback --------------------------------------------------------
   // Delivery is a Dart NATIVE PORT, not a NativeCallable.
   //

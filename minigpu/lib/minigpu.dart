@@ -15,4 +15,5 @@ export 'package:minigpu_platform_interface/minigpu_platform_interface.dart'
         ExternalFence,
         ExternalVideoBuffer,
         PlatformVideoTexture,
-        PlatformSharedOutputTexture;
+        PlatformSharedOutputTexture,
+        ShaderCacheStats;
