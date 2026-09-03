@@ -5,6 +5,14 @@
 /// WebGPU helper), NOT to `Module.WebGPU` (undefined).
 library webgpu_interop;
 
+// 🔴 `.isA<JSObject>()`, NOT `is JSObject`.
+//
+// dart2wasm erases every interop type to one opaque JS value, so an `is` test
+// against a JS interop type cannot mean anything there and the compiler refuses
+// it (`invalid_runtime_check_with_js_interop_types`). dart2js could answer it
+// because interop types are real JS objects there — which is why this compiled
+// for years and only surfaced when a wasm build first pulled this library in.
+
 import 'dart:js_interop';
 
 /// Dart interop type for the Emscripten `WebGPU` global object (defined in
@@ -29,7 +37,7 @@ JSObject? getWebGpuJsObject(int handle) {
   if (handle == 0) return null;
   try {
     final result = _emscriptenWebGpu.getJsObject(handle.toJS);
-    return result is JSObject ? result : null;
+    return result.isA<JSObject>() ? result as JSObject : null;
   } catch (_) {
     return null;
   }

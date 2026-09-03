@@ -1057,10 +1057,12 @@ void MGPU::initializeContextUnlocked() {
             }
           }
 
-          if (tierBAvailable) {
-            // Tier B: D3D12 backend, dGPU selected, GPU-only cross-adapter copy.
-            needsCrossAdapterBridge = true;
-          } else if (!displayName.empty()) {
+          // 🔴 TIER B NO LONGER SWITCHES THE BACKEND — see the D3D11 default
+          // below. It is still DETECTED, because the topology is worth
+          // reporting and it is what MGPU_BACKEND=d3d12 turns back on; it just
+          // no longer decides anything.
+          needsCrossAdapterBridge = tierBAvailable;
+          if (!displayName.empty()) {
             // Tier A*: prefer the display adapter (iGPU) for Dawn so capture and
             // compute share the same device → zero-copy, and the FFmpeg HW
             // encoder (aligned to Dawn's adapter) stays on the iGPU too.
@@ -1069,11 +1071,33 @@ void MGPU::initializeContextUnlocked() {
         }
       }
     }
-    adapterOptions.backendType = needsCrossAdapterBridge
-        ? WGPUBackendType_D3D12   // Tier B: D3D12 cross-adapter GPU copy
-        : WGPUBackendType_D3D11;  // Tier A / Tier A*: D3D11 zero-copy
+    // 🔴 **D3D11 IS THE DEFAULT ON WINDOWS, UNCONDITIONALLY.**
+    //
+    // Tier B used to select D3D12 so `minigpu_external` could do a GPU-only
+    // cross-adapter copy on hybrid laptops. That optimised INGEST while
+    // silently breaking PRESENT: `create_shared_output_texture` is implemented
+    // only for the D3D11 backend and returns null on D3D12, so a Tier B machine
+    // got a fast capture path and no GPU present surface at all — every decoded
+    // frame fell back to a full readback (measured at 84-99 ms/frame).
+    //
+    // The asymmetry is not arbitrary. Windows fixes the API at both ends: the
+    // producers (WGC, Media Foundation) hand out D3D11 textures, and Flutter's
+    // external-texture API takes `kFlutterDesktopGpuSurfaceTypeD3d11Texture2D`.
+    // Dawn's backend is the only free choice, so choosing D3D11 is what makes
+    // capture -> compute -> present one API on one adapter with no bridges.
+    // Choosing D3D12 buys one bridge and owes two.
+    //
+    // The cost is real and accepted: on a Tier B laptop the cross-adapter
+    // INGEST copy now goes through Tier C rather than the D3D12 bridge. That is
+    // the cheaper thing to lose — a copy on the way in is slower, whereas no
+    // present surface is a broken picture. `MGPU_BACKEND=d3d12` restores the
+    // old behaviour for anyone who wants that trade.
+    adapterOptions.backendType = WGPUBackendType_D3D11;
     if (needsCrossAdapterBridge) {
-      MGPU_LOG(mgpu::LOG_INFO, "[mgpu] backend auto-select: D3D12 (Tier B cross-adapter GPU bridge)");
+      MGPU_LOG(mgpu::LOG_INFO,
+          "[mgpu] backend auto-select: D3D11 (cross-adapter topology detected, but "
+          "D3D12's Tier B bridge would disable GPU present - set MGPU_BACKEND=d3d12 "
+          "to prefer ingest speed over presentation)");
     } else if (!autoDisplayAdapterName.empty() && preferDisplayAdapterEnabled()) {
       MGPU_LOG(mgpu::LOG_INFO,
           "[mgpu] backend auto-select: D3D11 (preferDisplayAdapter — binding to "
@@ -1611,11 +1635,17 @@ void MGPU::initializeContextUnlocked() {
   MGPU_LOG(mgpu::LOG_INFO, "%s", mgpu::shaderCacheSummaryLine().c_str());
 #endif
 #ifdef __EMSCRIPTEN__
-  // Publish the WebGPU device to window.gpuDevice so that JavaScript
-  // consumers (e.g. minigpu_view_web canvas blit) can resolve the device
-  // without a separate init call.
+  // Publish the WebGPU device so that JavaScript consumers (e.g. the view
+  // package's canvas blit) can resolve the device without a separate init
+  // call.
+  //
+  // 🔴 `globalThis`, NOT `window`. A dedicated Worker has no `window`, so this
+  // threw there and took the rest of context init with it — an assignment
+  // whose only purpose is convenience was enough to make the whole backend
+  // main-thread-only. `globalThis` is the same object on a page and the right
+  // one in a worker.
   EM_ASM({
-      window.gpuDevice = WebGPU.getJsObject($0);
+      globalThis.gpuDevice = WebGPU.getJsObject($0);
   }, static_cast<uint32_t>(reinterpret_cast<uintptr_t>(c->device)));
 #endif
 }

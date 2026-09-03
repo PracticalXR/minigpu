@@ -24,6 +24,13 @@ final class Buffer {
   /// Returns true if the buffer has not been destroyed.
   bool get isValid => _isValid && _platformBuffer != null;
 
+  /// Web only: the Emscripten integer handle of the underlying `WGPUBuffer`
+  /// (0 natively, or when destroyed) — the zero-readback web display path.
+  /// A view layer resolves the JS `GPUBuffer` from it and blits into a canvas
+  /// on the same device queue; see `PlatformBuffer.webBufferHandle`.
+  int get webBufferHandle =>
+      isValid ? (_platformBuffer?.webBufferHandle ?? 0) : 0;
+
   /// Reads data from the buffer asynchronously.
   /// Throws an error if the buffer has been destroyed.
   Future<void> read(

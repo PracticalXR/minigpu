@@ -1,5 +1,10 @@
 # gpu_tensor
 
+## 1.7.1
+
+- New Release
+- Version alignment with the minigpu 1.7.1 family release.
+
 ## 1.7.0
 
 - Version bump to keep the minigpu 1.7.0 family aligned; inherits the

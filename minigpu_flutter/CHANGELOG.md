@@ -1,3 +1,8 @@
+## 1.7.1
+
+- New Release
+- Version alignment with the minigpu 1.7.1 family release.
+
 ## 1.7.0
 
 - Docs corrected: `MinigpuBinding` was described as preventing stale

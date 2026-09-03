@@ -251,22 +251,77 @@ if(NOT DAWN_BUILD_FOUND)
   if(NOT DEFINED DAWN_COMMIT OR DAWN_COMMIT STREQUAL "")
     set(DAWN_COMMIT "7bd3e6712cde5f69b2053839ab949313e194a57c" CACHE STRING "" FORCE)
   endif()
-  file(MAKE_DIRECTORY ${DAWN_DIR})
-  execute_process(COMMAND git init WORKING_DIRECTORY "${DAWN_DIR}")
-  execute_process(
-    COMMAND git remote get-url origin
-    WORKING_DIRECTORY "${DAWN_DIR}"
-    RESULT_VARIABLE _have_origin
-    OUTPUT_QUIET ERROR_QUIET
-  )
-  if(_have_origin EQUAL 0)
-    execute_process(COMMAND git remote set-url origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
-  else()
-    execute_process(COMMAND git remote add origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
+
+  # MINIGPU_DAWN_DEV — do not touch the Dawn checkout at all.
+  #
+  # The sync below is DESTRUCTIVE BY DESIGN, and correctly so for a consumer
+  # build: it forces DAWN_DIR onto DAWN_COMMIT so a shipped artifact is always
+  # built from the pinned source. Two of its steps are ruinous while DEVELOPING
+  # a Dawn change, and both fail silently:
+  #
+  #   * `git remote set-url origin <upstream>` REPOINTS A FORK back to
+  #     dawn.googlesource.com, so a checkout tracking a personal fork quietly
+  #     stops being one;
+  #   * `git reset --hard ${DAWN_COMMIT}` DISCARDS the branch and every
+  #     uncommitted change in it.
+  #
+  # So a build run in the middle of Dawn work destroys that work. Setting
+  # MINIGPU_DAWN_DEV=ON (cache variable or environment) leaves DAWN_DIR exactly
+  # as the developer left it: their remote, their branch, their edits.
+  #
+  # THE TRADE IS THAT NOTHING GUARANTEES WHAT YOU BUILT, so this branch REPORTS
+  # the real HEAD instead. That is not decoration: `C:\dawn` was found sitting
+  # ~9 months behind DAWN_COMMIT while every log line implied the pin was in
+  # force, which sent a whole debugging session after the wrong Dawn version.
+  # An unpinned build must say so, loudly, every configure.
+  if(NOT DEFINED MINIGPU_DAWN_DEV AND DEFINED ENV{MINIGPU_DAWN_DEV})
+    set(MINIGPU_DAWN_DEV "$ENV{MINIGPU_DAWN_DEV}")
   endif()
-  execute_process(COMMAND git fetch origin ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
-  execute_process(COMMAND git checkout ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
-  execute_process(COMMAND git reset --hard ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+
+  if(MINIGPU_DAWN_DEV)
+    execute_process(COMMAND git rev-parse --short HEAD
+      WORKING_DIRECTORY "${DAWN_DIR}" OUTPUT_VARIABLE _dawn_head
+      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND git rev-parse --abbrev-ref HEAD
+      WORKING_DIRECTORY "${DAWN_DIR}" OUTPUT_VARIABLE _dawn_branch
+      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND git remote get-url origin
+      WORKING_DIRECTORY "${DAWN_DIR}" OUTPUT_VARIABLE _dawn_origin
+      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND git status --porcelain
+      WORKING_DIRECTORY "${DAWN_DIR}" OUTPUT_VARIABLE _dawn_dirty
+      OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_dawn_dirty STREQUAL "")
+      set(_dawn_state "clean")
+    else()
+      set(_dawn_state "DIRTY (uncommitted changes)")
+    endif()
+    message(WARNING
+      "Dawn: MINIGPU_DAWN_DEV is ON - the pin is NOT enforced.\n"
+      "  dir    : ${DAWN_DIR}\n"
+      "  origin : ${_dawn_origin}\n"
+      "  HEAD   : ${_dawn_head} (${_dawn_branch}) ${_dawn_state}\n"
+      "  pin    : ${DAWN_COMMIT} (ignored)\n"
+      "  This build is NOT reproducible from DAWN_COMMIT. Unset "
+      "MINIGPU_DAWN_DEV for a pinned build.")
+  else()
+    file(MAKE_DIRECTORY ${DAWN_DIR})
+    execute_process(COMMAND git init WORKING_DIRECTORY "${DAWN_DIR}")
+    execute_process(
+      COMMAND git remote get-url origin
+      WORKING_DIRECTORY "${DAWN_DIR}"
+      RESULT_VARIABLE _have_origin
+      OUTPUT_QUIET ERROR_QUIET
+    )
+    if(_have_origin EQUAL 0)
+      execute_process(COMMAND git remote set-url origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
+    else()
+      execute_process(COMMAND git remote add origin https://dawn.googlesource.com/dawn WORKING_DIRECTORY "${DAWN_DIR}")
+    endif()
+    execute_process(COMMAND git fetch origin ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+    execute_process(COMMAND git checkout ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+    execute_process(COMMAND git reset --hard ${DAWN_COMMIT} WORKING_DIRECTORY "${DAWN_DIR}")
+  endif()
 
   FetchContent_Declare(
     dawn
