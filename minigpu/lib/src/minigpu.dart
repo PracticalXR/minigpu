@@ -96,12 +96,23 @@ final class Minigpu {
     }();
   }
 
+  /// One small buffer per context that lives as long as the context does.
+  /// [ComputeShader] binds it for an instant when a slot's previous buffer
+  /// has been destroyed, so the native layer — which compares raw handles —
+  /// sees a change even when the new buffer was handed the destroyed one's
+  /// handle. Created on first need; counted as live until [destroy].
+  Buffer? _rebindSentinel;
+  Buffer get rebindSentinel =>
+      _rebindSentinel ??= createBuffer(16, BufferDataType.uint32);
+
   /// Destroys the minigpu context.
   Future<void> destroy() async {
     if (!isInitialized) throw MinigpuNotInitializedError();
 
     _copyShader?.destroy();
     _copyShader = null;
+    _rebindSentinel?.destroy();
+    _rebindSentinel = null;
 
     await _platform.destroyContext();
     isInitialized = false;

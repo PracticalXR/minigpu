@@ -1,5 +1,64 @@
 # minigpu
 
+## 1.8.1
+
+- **Fixed: a shader could keep dispatching against a destroyed buffer.**
+  `setBuffer` treats a bind of the same native handle as no change. Backends
+  recycle handles, so a buffer created after another was destroyed can come
+  back with the destroyed one's handle — and a long-lived shader then kept
+  the bind group built for the dead buffer and read zeros (or someone else's
+  memory) from it. Seen on the web as an encoder that emitted nothing after
+  a smaller one replaced a larger one in the same page, and as a later
+  instance misreading a few rows. `ComputeShader` now remembers the `Buffer`
+  object bound at each slot; when that object has been destroyed, the next
+  bind passes through a per-context sentinel buffer so the handle change is
+  visible and the bind group is rebuilt. No API change; one 16-byte buffer
+  per context, created on first need and freed with the context.
+
+- **Precompile kernels ahead of first use, with progress and named failures —
+  `warmShaders()`.** Compilation is lazy: a kernel is turned into a backend
+  shader on its FIRST `dispatch`, while the GPU mutex is held. So the cost does
+  not land where a caller can plan for it, it lands on the first frame or the
+  first inference and looks like a hang. The workaround has been to dispatch a
+  throwaway job at startup and hope; this makes that an API.
+
+  ```dart
+  final warm = warmShaders(gpu, [
+    KernelWarmSpec(label: 'blur', source: blurWgsl, buffers: {'src': 4, 'dst': 4}),
+  ], ensureReady: gpu.init);
+  warm.progress.listen((p) => print('${p.completed}/${p.total} ${p.label ?? ""}'));
+  final result = await warm.done;   // never throws — inspect result.phase
+  ```
+
+  Kernels build **one at a time**, awaiting each, which yields to the event
+  loop between them — that is what makes it usable at launch on platforms with
+  no spare thread. There is deliberately no concurrency option: the backend
+  serialises GPU work anyway, and compiling a batch back-to-back is a good way
+  to make a mobile driver stop answering.
+
+  `WarmProgress` carries `completed`/`total`/`fraction`, the label of the
+  kernel being built, and a list of `WarmError`s naming the kernel and the
+  stage (`create`, `dispatch`, `timeout`, `deviceLost`). Per-kernel timeouts
+  fail that kernel only; a lost device ends the set rather than paying one
+  timeout per remaining kernel. `progress` replays its latest value to late
+  subscribers, so a panel attached after startup still renders real state.
+
+  This is the first compile-failure signal the Dart API has had — previously a
+  pipeline that would never build was indistinguishable from one that had not
+  built yet.
+
+  Complements the disk cache added in 1.7.0 rather than replacing it: the cache
+  makes the second run cheap, this makes the first run visible and survivable.
+
+- **The web build can now be loaded inside a Web Worker.** It was compiled
+  `-sENVIRONMENT=web`, which hard-codes `ENVIRONMENT_IS_WORKER = false` and
+  strips the worker bootstrap, so the module could only ever be instantiated on
+  the main thread. Since GPU pipelines cannot be transferred between threads,
+  that confined every GPU workload on the web to the main thread. Now built
+  `web,worker`, and the device is published to `globalThis` rather than
+  `window` (which does not exist in a worker).
+
+- Add `webBufferHandle` on `Buffer`: the underlying WGPUBuffer handle on web (0 on native), enabling zero-copy GPU presentation of buffer contents.
 ## 1.7.0
 
 - **Compiled shaders are now cached on disk, so WGSL compilation is a

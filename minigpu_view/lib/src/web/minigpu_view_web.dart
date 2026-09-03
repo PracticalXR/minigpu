@@ -13,6 +13,14 @@
 /// and sink share a queue.
 library minigpu_view_web;
 
+// 🔴 `.isA<JSObject>()`, NOT `is JSObject`.
+//
+// dart2wasm erases every interop type to one opaque JS value, so an `is` test
+// against a JS interop type cannot mean anything there and the compiler refuses
+// it (`invalid_runtime_check_with_js_interop_types`). dart2js could answer it
+// because interop types are real JS objects there — which is why this compiled
+// for years and only surfaced when a wasm build first pulled this library in.
+
 import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
@@ -42,7 +50,9 @@ JSObject? _webGpuGetJsObject(int handle) {
   if (handle == 0) return null;
   try {
     final result = _emscriptenWebGpu?.getJsObject(handle.toJS);
-    return result is JSObject ? result : null;
+    return (result != null && result.isA<JSObject>())
+        ? result as JSObject
+        : null;
   } catch (_) {
     return null;
   }
@@ -107,6 +117,9 @@ class MinigpuViewWebPlugin {
     }
   }
 
+  /// One-shot marker for the silent-blank failure mode below.
+  static bool _saidBufferLookupMiss = false;
+
   Map<String, Object?> _present(int instanceId, Map<String, Object?> args) {
     final kind = args['kind'] as String;
     final width = (args['width'] as num).toInt();
@@ -121,15 +134,26 @@ class MinigpuViewWebPlugin {
       //   JS GPUBuffer locally via WebGPU.getJsObject() to stay codec-safe.
       final texture = args['texture'];
       final bufferHandle = args['bufferHandle'];
-      if (texture is JSObject) {
-        sink.copyFromGpuTexture(texture, width, height);
+      if (texture is JSAny && texture.isA<JSObject>()) {
+        sink.copyFromGpuTexture(texture as JSObject, width, height);
       } else if (bufferHandle is int && bufferHandle != 0) {
         final jsBuffer = _webGpuGetJsObject(bufferHandle);
         if (jsBuffer != null) {
           final format = args['format'] as String? ?? 'rgba32float';
           sink.copyFromGpuBuffer(jsBuffer, width, height, format);
+        } else if (!_saidBufferLookupMiss) {
+          // One frame of "not ready yet" is normal; EVERY frame missing means
+          // the handle table (`globalThis.WebGPU`) is absent or belongs to a
+          // different module instance — the present "succeeds" but nothing is
+          // ever blitted, which renders as a permanently blank surface with
+          // zero errors. Say it once.
+          _saidBufferLookupMiss = true;
+          // ignore: avoid_print
+          print('[minigpu_view] WebGPU.getJsObject($bufferHandle) returned '
+              'null — GPU-buffer presents are being skipped; if this frame is '
+              'not the first, the handle table and the compute module do not '
+              'match');
         }
-        // jsBuffer == null → WASM not ready yet; skip frame silently.
       }
       // else: handle is 0/null → first frame, skip blit silently.
     } else if (kind == 'webVideoFrame') {
@@ -140,8 +164,8 @@ class MinigpuViewWebPlugin {
       JSObject? frame;
       if (handle is int) {
         frame = _takeVideoFrame(handle);
-      } else if (args['frame'] is JSObject) {
-        frame = args['frame'] as JSObject;
+      } else if (args['frame'] case final JSAny f when f.isA<JSObject>()) {
+        frame = f as JSObject;
       }
       // Registry miss (handle already consumed / frame not ready) → skip
       // silently, like the WebGPU-not-ready path above.
@@ -206,7 +230,7 @@ class _CanvasSink {
   JSObject? _resolveDevice() {
     final globalThis = web.window as JSObject;
     final dev = globalThis['gpuDevice'];
-    if (dev is JSObject) return dev;
+    if (dev != null && dev.isA<JSObject>()) return dev as JSObject;
     return null;
   }
 

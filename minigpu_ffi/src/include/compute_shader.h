@@ -92,6 +92,7 @@ private:
   // Helper methods
   void cleanup();
   size_t calculateBindingsHash() const;
+  std::string kernelLabel() const;
   bool createShaderModule();
   bool createBindGroupLayout();
   bool createPipelineLayout();

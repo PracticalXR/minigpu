@@ -1,5 +1,9 @@
 # minigpu_web CHANGELOG
 
+## 1.8.1
+
+- Implement `webBufferHandle` on `WebBuffer` via `mgpuGetWGPUBufferHandle`, exposing the WGPUBuffer handle for same-device zero-copy presentation.
+
 ## 1.7.0
 
 - **`writeRawBytes` no longer allocates and fills a whole second list per

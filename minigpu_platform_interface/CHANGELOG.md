@@ -1,5 +1,9 @@
 # minigpu_platform_interface CHANGELOG
 
+## 1.8.1
+
+- Add `webBufferHandle` to `PlatformBuffer` (default 0) so platform implementations can expose the underlying WGPUBuffer handle on web.
+
 ## 1.7.0
 
 - Add the persistent shader cache surface: `configureShaderCache(...)`,

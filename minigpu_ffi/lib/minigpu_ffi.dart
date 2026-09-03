@@ -362,6 +362,26 @@ class MinigpuFfi extends MinigpuPlatform {
 
 // Video texture FFI
 final class FfiVideoTexture implements PlatformVideoTexture {
+  /// Native backends bind a texture to a shader the ordinary way
+  /// ([setOnShader]) and drive the dispatch through the same native pipeline as
+  /// every other kernel, so there is nothing for this to do. It exists because
+  /// the WEB backend's imported resource is a `GPUExternalTexture`, which that
+  /// route cannot carry at all — see `WebVideoTexture.landPackedRgba8`.
+  ///
+  /// Declared here rather than inherited because this class `implements` the
+  /// interface, which takes the signature and not the default body.
+  @override
+  bool get requiresExternalLanding => false;
+
+  @override
+  bool landPackedRgba8(
+    PlatformBuffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) =>
+      false;
+
   FfiVideoTexture(
     Pointer<ffi.MGPUVideoTexture> ptr,
     ExternalPixelFormat fmt,
@@ -645,6 +665,10 @@ final class FfiBuffer implements PlatformBuffer {
   FfiBuffer(Pointer<ffi.MGPUBuffer> self) : _self = self;
 
   final Pointer<ffi.MGPUBuffer> _self;
+
+  /// Web-only concept (Emscripten WGPUBuffer handle); nothing here.
+  @override
+  int get webBufferHandle => 0;
 
   // --- Pooled scratch + readback callback ---------------------------------
   // The read/write hot path used to `malloc` a scratch buffer and allocate a

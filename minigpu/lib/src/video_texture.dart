@@ -35,6 +35,30 @@ final class VideoTexture {
     _platformTex!.setOnShader(shader.platformShader, slot, planeIndex);
   }
 
+  /// True when [landPackedRgba8] is the only way to consume this texture, so a
+  /// failed land must NOT fall back to [setOnShader]. See
+  /// [PlatformVideoTexture.requiresExternalLanding].
+  bool get requiresExternalLanding => _platformTex!.requiresExternalLanding;
+
+  /// Land this texture into [dst] as packed RGBA8 (`array<u32>`, row-major),
+  /// returning false when this platform drives textures the ordinary way
+  /// ([setOnShader]) instead. See [PlatformVideoTexture.landPackedRgba8].
+  bool landPackedRgba8(
+    Buffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) {
+    final pb = dst.platformBuffer;
+    if (pb == null) return false;
+    return _platformTex!.landPackedRgba8(
+      pb,
+      width: width,
+      height: height,
+      downscale: downscale,
+    );
+  }
+
   /// Convert to an RGBA8 [Buffer] via an internal compute pass.
   /// The returned buffer has `width * height * 4` bytes (row-major, RGBA8).
   Buffer toRGBA() {

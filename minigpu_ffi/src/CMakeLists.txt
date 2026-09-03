@@ -174,19 +174,29 @@ if(EMSCRIPTEN)
         "--use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true"
     )
 
-    set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
+    # Overridable with -DMGPU_WEB_DEBUG=ON: builds the wasm with -sASSERTIONS=2
+    # etc. (below). 🔴 That is THE diagnostic for asyncify contract violations:
+    # the release build fails them SILENTLY (an awaited async ccall resolves
+    # while its C++ is still suspended — observed as init stopping after
+    # "Requesting WebGPU adapter..." and readDirect "returning" zeros), while
+    # the assertions build names the exact violation at the exact call.
+    option(MGPU_WEB_DEBUG "Debug Emscripten build (assertions, -O0; slow, large)" OFF)
+    set(EMSCRIPTEN_DEBUG ${MGPU_WEB_DEBUG})
 
-    # minigpu's own C ABI never crosses an asyncify operation through an
-    # indirect call, so IGNORE_INDIRECT is a safe size/speed win. Extra
-    # sources (single-blob clients) may use vtables on the asyncify path
-    # (e.g. the crosscoder's backend dispatch around readSync) — IGNORE
-    # would silently corrupt those frames, so drop it when they're present.
-    if(MGPU_EXTRA_SOURCES)
-        set(MGPU_ASYNCIFY_INDIRECT_FLAG "")
-        message(STATUS "MGPU_EXTRA_SOURCES set: ASYNCIFY_IGNORE_INDIRECT disabled")
-    else()
-        set(MGPU_ASYNCIFY_INDIRECT_FLAG "-sASYNCIFY_IGNORE_INDIRECT=1")
-    endif()
+    # 🔴 ASYNCIFY_IGNORE_INDIRECT is PERMANENTLY OFF (2026-08-17). The old
+    # rationale ("minigpu's own C ABI never crosses an asyncify operation
+    # through an indirect call") stopped being true: the emdawnwebgpu port's
+    # event dispatch invokes completion callbacks (buffer-map, adapter and
+    # device requests) THROUGH FUNCTION POINTERS while the caller is
+    # suspended in a platformSleep poll loop. Under IGNORE_INDIRECT those
+    # frames are uninstrumented and asyncify silently corrupts them — the
+    # OBSERVED failure in the plain (no-extra-sources) build was an awaited
+    # async ccall RESOLVING while its C++ never completed: init stopped
+    # after "Requesting WebGPU adapter..." yet returned success, and every
+    # readDirect logged its entry, suspended, and "returned" zeros. The
+    # single-blob build (MGPU_EXTRA_SOURCES) never had the flag, which is
+    # why the same wasm machinery worked there and failed here.
+    set(MGPU_ASYNCIFY_INDIRECT_FLAG "")
 
     message(STATUS "Needs Emscripten 4.0.10+, please upgrade if you face issues.")
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
@@ -204,7 +214,21 @@ if(EMSCRIPTEN)
         --source-map-base=http://localhost:8080/ \
     ")
     else()
-        # Release flags
+        # Release flags.
+        #
+        # 🔴 `-sENVIRONMENT=web,worker`, NOT `web`. `web` alone hard-codes
+        # `ENVIRONMENT_IS_WORKER = false` in the generated glue and strips the
+        # worker bootstrap, so the module cannot be instantiated inside a
+        # dedicated Worker at all. That one token confined every GPU workload
+        # on this platform to the main thread: WebGPU objects are not
+        # transferable between threads, so a pipeline can only ever be used by
+        # the thread that built it, and anything that must stay off the UI
+        # thread therefore could not use this backend. Costs a little glue.
+        #
+        # 🔴 AND KEEP COMMENTS OUT OF THE STRING. These flags are one quoted,
+        # backslash-continued CMake string: a `#` inside it is not a comment,
+        # it is passed to the linker, and em++ answers with the memorable
+        # `error: #: No such file or directory`.
         set(DEBUG_FLAGS "\
             -O3 \
             -flto \
@@ -212,7 +236,7 @@ if(EMSCRIPTEN)
             -DNDEBUG \
             -sMINIFY_HTML=1 \
             -sFILESYSTEM=0 \
-            -sENVIRONMENT=web \
+            -sENVIRONMENT=web,worker \
             -sMALLOC=emmalloc \
             -sNO_EXIT_RUNTIME=1 \
             -sTEXTDECODER=2 \
@@ -240,6 +264,7 @@ if(EMSCRIPTEN)
         -sWASM_BIGINT=1 \
         --use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
+        --post-js ${CMAKE_CURRENT_SOURCE_DIR}/web/webgpu_adapter_info_guard.post.js \
     ")
 else()
     # Compiler-specific optimizations
