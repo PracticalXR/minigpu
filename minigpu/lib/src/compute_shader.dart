@@ -14,6 +14,19 @@ final class ComputeShader {
   PlatformComputeShader get platformShader => _shader;
 
   final Map<String, int> _kernelTags = {};
+
+  /// The [Buffer] object last bound at each slot. The native layer keeps the
+  /// raw `WGPUBuffer` handle per slot and treats a bind of the SAME handle as
+  /// no change — which is wrong once that handle has been destroyed, because
+  /// the backend recycles handles: a buffer created after another was
+  /// destroyed can come back with the destroyed one's handle, the shader
+  /// keeps the bind group built for the dead buffer, and every dispatch reads
+  /// (and writes) memory that is no longer the caller's. Holding the Dart
+  /// object lets [_bind] see the difference the handle cannot show: a
+  /// different object whose predecessor is no longer valid. The map also
+  /// pins the bound objects, so a finalizer cannot destroy one behind the
+  /// shader's back.
+  final Map<int, Buffer> _boundBySlot = {};
   String? shaderCode;
   static final Finalizer<PlatformComputeShader> _finalizer = Finalizer(
     (platformShader) => platformShader.destroy(),
@@ -44,7 +57,7 @@ final class ComputeShader {
       } else {
         _kernelTags[tag] = _kernelTags[tag]!;
       }
-      _shader.setBufferFire(_kernelTags[tag]!, buffer.platformBuffer!);
+      _bind(_kernelTags[tag]!, buffer);
     } catch (e, stackTrace) {
       print('Error setting buffer for tag $tag: $e\n$stackTrace');
       throw Exception('Failed to set buffer for tag $tag: $e');
@@ -64,8 +77,32 @@ final class ComputeShader {
   /// with buffer bindings in the same shader, where slot numbers must be
   /// coordinated explicitly rather than derived from tag insertion order.
   void setBufferAtSlot(int slot, Buffer buffer) {
+    _bind(slot, buffer);
+  }
+
+  /// Every buffer bind goes through here. When the object previously bound
+  /// at [slot] has been destroyed, its handle may by now belong to [buffer],
+  /// and the native layer would keep the stale bind group (see
+  /// [_boundBySlot]). Binding the context's sentinel buffer first makes the
+  /// handle change visible, so the real bind that follows rebuilds the bind
+  /// group. Both binds join the same FIFO; nothing dispatches between them,
+  /// so the sentinel never reaches a bind group. A shader without a context
+  /// (none is created that way today) falls back to the plain bind.
+  void _bind(int slot, Buffer buffer) {
+    final prev = _boundBySlot[slot];
+    if (prev != null && !identical(prev, buffer) && !prev.isValid) {
+      final sentinel = _rebindSentinel();
+      if (sentinel != null && !identical(sentinel, buffer)) {
+        _shader.setBufferFire(slot, sentinel.platformBuffer!);
+      }
+    }
+    _boundBySlot[slot] = buffer;
     _shader.setBufferFire(slot, buffer.platformBuffer!);
   }
+
+  /// A live buffer of this shader's context whose handle can never be the
+  /// one being bound (it is never destroyed while the context lives).
+  Buffer? _rebindSentinel() => null;
 
   /// WebGPU caps the workgroup count at 65535 PER DIMENSION. A dispatch that
   /// exceeds it invalidates the whole CommandBuffer — and because WebGPU
@@ -112,6 +149,7 @@ final class ComputeShader {
   /// Destroys the compute shader.
   void destroy() {
     _finalizer.detach(this); // Use the same detach key
+    _boundBySlot.clear();
     _shader.destroy();
   }
 }
@@ -121,6 +159,9 @@ final class CachedComputeShader extends ComputeShader {
   final Minigpu _gpu;
 
   CachedComputeShader(PlatformComputeShader shader, this._gpu) : super(shader);
+
+  @override
+  Buffer? _rebindSentinel() => _gpu.rebindSentinel;
 
   @override
   void destroy() {

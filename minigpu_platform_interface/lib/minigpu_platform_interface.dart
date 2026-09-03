@@ -2,7 +2,19 @@ import 'dart:typed_data';
 
 import 'platform_stub/minigpu_platform_stub.dart'
     if (dart.library.ffi) 'package:minigpu_ffi/minigpu_ffi.dart'
-    if (dart.library.js) 'package:minigpu_web/minigpu_web.dart';
+    // 🔴 `dart.library.js_interop`, NOT `dart.library.js`.
+    //
+    // `dart:js` does not exist under dart2wasm — only `dart:js_interop` does —
+    // so `if (dart.library.js)` is FALSE there and this falls all the way
+    // through to the stub. The symptom is not a compile error: the app builds,
+    // starts, and throws `UnsupportedError: No platform implementation
+    // available.` out of a wasm frame with no Dart stack, which reads as a
+    // broken wasm build rather than as an unselected implementation.
+    //
+    // `js_interop` is provided by dart2js AND dart2wasm and by neither the VM
+    // nor AOT, so it selects exactly the same web implementation the old
+    // condition did, and one more target besides.
+    if (dart.library.js_interop) 'package:minigpu_web/minigpu_web.dart';
 
 /// Enum representing supported buffer data types.
 enum BufferDataType {
@@ -417,6 +429,20 @@ class ExternalVideoBuffer {
   final ExternalFence fence;
   final int timestampUs;
 
+  /// An opaque platform object that cannot be expressed as an integer address.
+  ///
+  /// Every other content type names its resource with a number — an NT handle,
+  /// a pointer, an fd — which [ExternalPlane.dataPtr] carries. The web has no
+  /// such number: a WebCodecs `VideoFrame` is a JS object, and the only thing
+  /// that can be handed to `importExternalTexture` is the object itself. So
+  /// [ExternalContentType.webVideoFrame] puts it HERE and leaves [planes]
+  /// empty.
+  ///
+  /// Typed as [Object] rather than `JSAny` on purpose: this file is imported by
+  /// native builds that must not see `dart:js_interop`. The web backend is the
+  /// only reader and casts it back.
+  final Object? externalHandle;
+
   const ExternalVideoBuffer({
     required this.contentType,
     required this.pixelFormat,
@@ -425,11 +451,45 @@ class ExternalVideoBuffer {
     required this.planes,
     this.fence = const ExternalFence(),
     this.timestampUs = 0,
+    this.externalHandle,
   });
 }
 
 /// Opaque handle to an imported video texture on the GPU.
 abstract class PlatformVideoTexture {
+  /// True when [landPackedRgba8] is the ONLY way to consume this texture.
+  ///
+  /// 🔴 THE CALLER MUST NOT FALL BACK when this is true and the land fails.
+  /// A web `GPUExternalTexture` cannot be bound to the ordinary
+  /// texture-to-shader route at all — that route's pipelines declare
+  /// `texture_2d<f32>` — so "try the normal way instead" produces a validation
+  /// error per frame and, because WebGPU validation is UNCAPTURED and
+  /// ASYNCHRONOUS, still reports success. That is how a capture path accepted a
+  /// configuration that could never draw a pixel.
+  bool get requiresExternalLanding => false;
+
+  /// Land this texture into [dst] as packed RGBA8 (`array<u32>`, one texel per
+  /// element, row-major) — the destination layout every downstream kernel
+  /// already reads.
+  ///
+  /// 🔴 EXISTS FOR THE WEB, where the imported resource is a
+  /// `GPUExternalTexture` and the ordinary route cannot carry it: an external
+  /// texture must be declared `texture_external` in WGSL and bound where the
+  /// texture actually lives, which on web is the JS side rather than the wasm
+  /// module that owns every other pipeline. Backends whose normal
+  /// bind-a-texture-to-a-shader path already works return false here and are
+  /// driven the usual way.
+  ///
+  /// [downscale] > 1 box-means that many source texels per landed pixel, in the
+  /// same dispatch — the simulcast-rung input path.
+  bool landPackedRgba8(
+    PlatformBuffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) =>
+      false;
+
   int get numPlanes;
   int get width;
   int get height;
@@ -571,6 +631,16 @@ abstract class PlatformBuffer {
     words.buffer.asUint8List().setRange(0, bytes.length, bytes);
     return write(words, words.length, dataType: BufferDataType.uint32);
   }
+
+  /// Web only: the Emscripten integer handle of the underlying `WGPUBuffer`,
+  /// or 0 where the concept does not exist (native, or WASM not up).
+  ///
+  /// This is the zero-readback web display path: a view layer (minigpu_view's
+  /// canvas plugin) resolves the JS `GPUBuffer` from the handle via
+  /// `WebGPU.getJsObject(handle)` and blits it into a canvas on the SAME
+  /// device queue. Integers are method-channel-codec-safe, which is why the
+  /// handle and not the JS object crosses layers.
+  int get webBufferHandle => 0;
 
   void destroy();
 }

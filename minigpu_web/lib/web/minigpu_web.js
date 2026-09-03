@@ -17,10 +17,13 @@ var Module = typeof Module != 'undefined' ? Module : {};
 // Determine the runtime environment we are in. You can customize this by
 // setting the ENVIRONMENT setting at compile time (see settings.js).
 
-var ENVIRONMENT_IS_WEB = true;
-var ENVIRONMENT_IS_WORKER = false;
-var ENVIRONMENT_IS_NODE = false;
-var ENVIRONMENT_IS_SHELL = false;
+// Attempt to auto-detect the environment
+var ENVIRONMENT_IS_WEB = typeof window == 'object';
+var ENVIRONMENT_IS_WORKER = typeof WorkerGlobalScope != 'undefined';
+// N.b. Electron.js environment is simultaneously a NODE-environment, but
+// also a web environment.
+var ENVIRONMENT_IS_NODE = typeof process == 'object' && process.versions?.node && process.type != 'renderer';
+var ENVIRONMENT_IS_SHELL = !ENVIRONMENT_IS_WEB && !ENVIRONMENT_IS_NODE && !ENVIRONMENT_IS_WORKER;
 
 // --pre-jses are emitted after the Module integration code, so that they can
 // refer to Module (if they choose; they can also define Module)
@@ -35,6 +38,10 @@ var quit_ = (status, toThrow) => {
 // In MODULARIZE mode _scriptName needs to be captured already at the very top of the page immediately when the page is parsed, so it is generated there
 // before the page load. In non-MODULARIZE modes generate it here.
 var _scriptName = typeof document != 'undefined' ? document.currentScript?.src : undefined;
+
+if (ENVIRONMENT_IS_WORKER) {
+  _scriptName = self.location.href;
+}
 
 // `/` should be present at the end if `scriptDirectory` is not empty
 var scriptDirectory = '';
@@ -61,7 +68,17 @@ if (ENVIRONMENT_IS_WEB || ENVIRONMENT_IS_WORKER) {
 
   {
 // include: web_or_worker_shell_read.js
-readAsync = async (url) => {
+if (ENVIRONMENT_IS_WORKER) {
+    readBinary = (url) => {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', url, false);
+      xhr.responseType = 'arraybuffer';
+      xhr.send(null);
+      return new Uint8Array(/** @type{!ArrayBuffer} */(xhr.response));
+    };
+  }
+
+  readAsync = async (url) => {
     var response = await fetch(url, { credentials: 'same-origin' });
     if (response.ok) {
       return response.arrayBuffer();
@@ -2601,7 +2618,7 @@ async function createWasm() {
   
   var Asyncify = {
   instrumentWasmImports(imports) {
-        var importPattern = /^(__asyncjs__.*)$/;
+        var importPattern = /^(invoke_.*|__asyncjs__.*)$/;
   
         for (let [x, original] of Object.entries(imports)) {
           if (typeof original == 'function') {
@@ -2943,7 +2960,7 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 // end include: postlibrary.js
 
 var ASM_CONSTS = {
-  32924: ($0) => { window.gpuDevice = WebGPU.getJsObject($0); }
+  32940: ($0) => { globalThis.gpuDevice = WebGPU.getJsObject($0); }
 };
 
 // Imports from the Wasm binary.
@@ -3057,6 +3074,14 @@ var _malloc,
   _mgpuDestroySharedOutputTexture,
   _mgpuGetWGPUDeviceHandle,
   _mgpuGetWGPUBufferHandle,
+  _mgpuShaderCacheSetEnabled,
+  _mgpuShaderCacheSetDirectory,
+  _mgpuShaderCacheSetCapBytes,
+  _mgpuShaderCacheSetExtraKey,
+  _mgpuShaderCacheSetProvider,
+  _mgpuShaderCacheClear,
+  _mgpuGetShaderCacheStats,
+  _mgpuGetShaderCacheDirectory,
   _emwgpuCreateBindGroup,
   _emwgpuCreateBindGroupLayout,
   _emwgpuCreateCommandBuffer,
@@ -3226,6 +3251,14 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuDestroySharedOutputTexture'] = _mgpuDestroySharedOutputTexture = wasmExports['mgpuDestroySharedOutputTexture'];
   Module['_mgpuGetWGPUDeviceHandle'] = _mgpuGetWGPUDeviceHandle = wasmExports['mgpuGetWGPUDeviceHandle'];
   Module['_mgpuGetWGPUBufferHandle'] = _mgpuGetWGPUBufferHandle = wasmExports['mgpuGetWGPUBufferHandle'];
+  Module['_mgpuShaderCacheSetEnabled'] = _mgpuShaderCacheSetEnabled = wasmExports['mgpuShaderCacheSetEnabled'];
+  Module['_mgpuShaderCacheSetDirectory'] = _mgpuShaderCacheSetDirectory = wasmExports['mgpuShaderCacheSetDirectory'];
+  Module['_mgpuShaderCacheSetCapBytes'] = _mgpuShaderCacheSetCapBytes = wasmExports['mgpuShaderCacheSetCapBytes'];
+  Module['_mgpuShaderCacheSetExtraKey'] = _mgpuShaderCacheSetExtraKey = wasmExports['mgpuShaderCacheSetExtraKey'];
+  Module['_mgpuShaderCacheSetProvider'] = _mgpuShaderCacheSetProvider = wasmExports['mgpuShaderCacheSetProvider'];
+  Module['_mgpuShaderCacheClear'] = _mgpuShaderCacheClear = wasmExports['mgpuShaderCacheClear'];
+  Module['_mgpuGetShaderCacheStats'] = _mgpuGetShaderCacheStats = wasmExports['mgpuGetShaderCacheStats'];
+  Module['_mgpuGetShaderCacheDirectory'] = _mgpuGetShaderCacheDirectory = wasmExports['mgpuGetShaderCacheDirectory'];
   _emwgpuCreateBindGroup = wasmExports['emwgpuCreateBindGroup'];
   _emwgpuCreateBindGroupLayout = wasmExports['emwgpuCreateBindGroupLayout'];
   _emwgpuCreateCommandBuffer = wasmExports['emwgpuCreateCommandBuffer'];
@@ -3440,4 +3473,38 @@ preInit();
 run();
 
 // end include: postamble.js
+
+// include: C:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/web/webgpu_adapter_info_guard.post.js
+// Appended to the generated minigpu_web.js by the build (CMakeLists.txt,
+// `--post-js`), so it survives every `make build_weblib`.
+//
+// WebKit ships WebGPU without `GPUAdapter.info`, and Dawn's Emscripten port
+// implements wgpuAdapterGetInfo as `fillAdapterInfoStruct(adapter.info, ...)`,
+// which dereferences the result unguarded:
+//
+//   TypeError: undefined is not an object (evaluating 'info.subgroupMinSize')
+//
+// thrown out of the FIRST context init, so every encoder and decoder on the
+// page is stillborn while `navigator.gpu` itself works. Seen on iPadOS Safari.
+//
+// This wraps the port's helper with the spec's shape — blank strings, zero
+// subgroup sizes — when the adapter has no `info`. It runs in the glue's own
+// scope (a classic, non-MODULARIZE build, where `WebGPU` is a script-level
+// var), before the runtime initializes. minigpu_web's Dart loader installs
+// the same guard on `GPUAdapter.prototype` for hosts that preload the glue
+// their own way; the two are deliberately redundant.
+(function () {
+  if (typeof WebGPU === 'undefined' || !WebGPU ||
+      typeof WebGPU.fillAdapterInfoStruct !== 'function') {
+    return;
+  }
+  var fill = WebGPU.fillAdapterInfoStruct;
+  WebGPU.fillAdapterInfoStruct = function (info, infoStruct) {
+    return fill(info || {
+      vendor: '', architecture: '', device: '', description: '',
+      subgroupMinSize: 0, subgroupMaxSize: 0, isFallbackAdapter: false,
+    }, infoStruct);
+  };
+})();
+// end include: C:/Code/git/practical/gpu/minigpu/minigpu_ffi/src/web/webgpu_adapter_info_guard.post.js
 

@@ -3,6 +3,7 @@
 #include "../include/log.h"
 #include "../include/mutex.h"
 #include "../include/shader_cache.h"
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -182,6 +183,30 @@ size_t ComputeShader::calculateBindingsHash() const {
   return hash;
 }
 
+// First non-empty line of the WGSL, stripped of comment slashes and capped —
+// kernels here name themselves in a leading comment. Backend errors quote the
+// object label, so this is what turns "[ComputePipeline (unlabeled)] ...
+// E_OUTOFMEMORY" in a console into the name of the kernel that caused it.
+std::string ComputeShader::kernelLabel() const {
+  size_t pos = 0;
+  while (pos < shaderCode.size()) {
+    size_t eol = shaderCode.find('\n', pos);
+    if (eol == std::string::npos) eol = shaderCode.size();
+    size_t b = pos, e = eol;
+    while (b < e && (shaderCode[b] == ' ' || shaderCode[b] == '\t' ||
+                     shaderCode[b] == '/' || shaderCode[b] == '\r')) {
+      ++b;
+    }
+    while (e > b && (shaderCode[e - 1] == ' ' || shaderCode[e - 1] == '\t' ||
+                     shaderCode[e - 1] == '\r')) {
+      --e;
+    }
+    if (e > b) return shaderCode.substr(b, std::min<size_t>(e - b, 96));
+    pos = eol + 1;
+  }
+  return "minigpu kernel";
+}
+
 bool ComputeShader::createShaderModule() {
   // only recreate if shader actually changed
   if (shaderModule && !pipelineDirty) {
@@ -200,6 +225,10 @@ bool ComputeShader::createShaderModule() {
 
   WGPUShaderModuleDescriptor shaderModuleDesc = {};
   shaderModuleDesc.nextInChain = &wgslDesc.chain;
+  // Dawn copies descriptor strings during the create call, so a local is safe.
+  const std::string label = kernelLabel();
+  shaderModuleDesc.label.data = label.data();
+  shaderModuleDesc.label.length = label.size();
 
   shaderModule =
       wgpuDeviceCreateShaderModule(mgpu.getDevice(), &shaderModuleDesc);
@@ -310,6 +339,15 @@ bool ComputeShader::createComputePipeline() {
   pipelineDesc.compute.module = shaderModule;
   pipelineDesc.compute.entryPoint.data = "main";
   pipelineDesc.compute.entryPoint.length = 4;
+  // Same label as the module: uncaptured errors (a D3D12 E_OUTOFMEMORY at
+  // pipeline-state creation, say) then NAME the kernel instead of printing
+  // "[ComputePipeline (unlabeled)]". Note WebGPU returns an INVALID object,
+  // not null, on creation failure — the nullptr check below does not catch
+  // it, so the label on the later SetPipeline validation error is often the
+  // only identification the console gets.
+  const std::string label = kernelLabel();
+  pipelineDesc.label.data = label.data();
+  pipelineDesc.label.length = label.size();
 
   // This call is where WGSL becomes a backend shader, so it is the whole cost
   // the persistent shader cache exists to remove. Accumulating it makes the

@@ -1,10 +1,23 @@
-@JS('Module')
+// 🔴 Scoped to `MinigpuModule`, NOT `Module`: classic Emscripten builds all
+// claim `globalThis.Module`, and any other wasm on the page (miniav_web's
+// audio module in the meet app) clobbers it — every `_mgpu*` extern then
+// resolves on the WRONG module and dies as "func is not a function".
+// `module_loader.dart` publishes the glue's private instance under this name
+// (or adopts a host-page-preloaded global `Module`); nothing here may read
+// the shared global.
+@JS('MinigpuModule')
 library minigpu_bindings;
 
 import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:typed_data';
 import 'package:js_interop_utils/js_interop_utils.dart';
+
+import 'module_loader.dart';
+import 'webgpu_interop.dart';
+
+export 'module_loader.dart'
+    show ensureMinigpuModuleLoaded, isMinigpuModuleLoaded;
 
 typedef MGPUBuffer = JSNumber;
 typedef MGPUComputeShader = JSNumber;
@@ -53,6 +66,9 @@ external JSNumber _malloc(JSNumber size);
 external void _free(JSNumber ptr);
 
 Future<void> mgpuInitializeContext() async {
+  // Everything else in this library assumes an initialized context, so this
+  // is the one choke point where the module itself must be up first.
+  await ensureMinigpuModuleLoaded();
   await ccall(
     "mgpuInitializeContext".toJS,
     "void".toJS,
@@ -1061,6 +1077,187 @@ class GPUDevice {}
 
 extension GPUDeviceImport on GPUDevice {
   external JSObject importExternalTexture(JSObject descriptor);
+
+  // The rest of the device surface needed to run a compute pass from Dart.
+  // Declared here rather than pulled from a WebGPU package so this file keeps
+  // its single dependency on `dart:js_interop`.
+  external JSObject createShaderModule(JSObject descriptor);
+  external JSObject createComputePipeline(JSObject descriptor);
+  external JSObject createBindGroup(JSObject descriptor);
+  external JSObject createCommandEncoder();
+  external JSObject get queue;
+}
+
+@JS()
+@staticInterop
+class _GPUPipeline {}
+
+extension _GPUPipelineExt on _GPUPipeline {
+  external JSObject getBindGroupLayout(int index);
+}
+
+@JS()
+@staticInterop
+class _GPUQueue {}
+
+extension _GPUQueueExt on _GPUQueue {
+  external void submit(JSArray<JSObject> buffers);
+}
+
+@JS()
+@staticInterop
+class _GPUEncoder {}
+
+extension _GPUEncoderExt on _GPUEncoder {
+  external JSObject beginComputePass();
+  external JSObject finish();
+}
+
+@JS()
+@staticInterop
+class _GPUComputePass {}
+
+extension _GPUComputePassExt on _GPUComputePass {
+  external void setPipeline(JSObject pipeline);
+  external void setBindGroup(int index, JSObject bindGroup);
+  external void dispatchWorkgroups(int x, int y, int z);
+  external void end();
+}
+
+/// The landing kernel, in the ONE form a `GPUExternalTexture` can be read.
+///
+/// 🔴 `texture_external`, NOT `texture_2d<f32>` — binding an external texture
+/// to a 2D-texture declaration fails pipeline validation with
+/// "Binding doesn't exist in [BindGroupLayoutInternal]", and because WebGPU
+/// validation errors are UNCAPTURED and ASYNCHRONOUS the dispatch then fails
+/// silently on every frame. That is a black screen under a healthy log.
+///
+/// `textureLoad` accepts a `texture_external` directly (two args, no mip
+/// level), so no sampler and no bind-group entry for one. The browser has
+/// already done any YUV->RGB conversion, so `.x` is red exactly as in the
+/// native landing kernel — which is what keeps this byte-identical to it.
+///
+/// 🔴 GEOMETRY IS BAKED IN AS `const`, NOT PASSED IN A UNIFORM. The uniform
+/// version needed `GPUQueue.writeBuffer`, which failed on Chrome with
+/// "Overload resolution failed" through this interop layer — so the whole
+/// call, and the buffer it needed, are gone. Resolution changes are rare
+/// (once per capture configuration), a shader compile is cheap, and pipelines
+/// are cached per geometry. Fewer moving interop pieces on a path that cannot
+/// be unit-tested is worth more than avoiding a recompile nobody notices.
+String _webLandWgsl(int w, int h, int s) => '''
+@group(0) @binding(0) var srcTex: texture_external;
+@group(0) @binding(1) var<storage, read_write> dst: array<u32>;
+
+const W: u32 = ${w}u;
+const H: u32 = ${h}u;
+const S: u32 = ${s}u;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= W || gid.y >= H) { return; }
+  var c: vec4<f32>;
+  if (S <= 1u) {
+    c = textureLoad(srcTex, vec2<i32>(i32(gid.x), i32(gid.y)));
+  } else {
+    var acc = vec4<f32>(0.0);
+    for (var yy = 0u; yy < S; yy = yy + 1u) {
+      for (var xx = 0u; xx < S; xx = xx + 1u) {
+        acc = acc + textureLoad(srcTex,
+            vec2<i32>(i32(gid.x * S + xx), i32(gid.y * S + yy)));
+      }
+    }
+    c = acc / f32(S * S);
+  }
+  let q = clamp(c, vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0 + vec4<f32>(0.5);
+  dst[gid.y * W + gid.x] =
+      u32(q.x) | (u32(q.y) << 8u) | (u32(q.z) << 16u) | (u32(q.w) << 24u);
+}
+''';
+
+/// Landing pipelines, keyed by geometry. Small and bounded: one entry per
+/// distinct capture configuration seen this session.
+final Map<String, JSObject> _landPipelines = {};
+
+/// Run the external-texture landing pass: [externalTexture] -> packed RGBA8
+/// `array<u32>` in the buffer behind [dstBufferHandle], the same destination
+/// layout the native D3D11 path writes.
+///
+/// Returns false — having said why, once — if any step fails. 🔴 A false here
+/// must NOT be treated as "try the ordinary route instead": no other route on
+/// this platform can read an external texture.
+bool mgpuLandExternalTexture({
+  required JSObject externalTexture,
+  required int dstBufferHandle,
+  required int width,
+  required int height,
+  required int downscale,
+}) {
+  final dev = _importDevice();
+  if (dev == null) {
+    _sayLandFailed('no GPUDevice');
+    return false;
+  }
+  final dst = getWebGpuJsObject(dstBufferHandle);
+  if (dst == null) {
+    _sayLandFailed('destination WGPUBuffer $dstBufferHandle is not in the '
+        'Emscripten object table');
+    return false;
+  }
+
+  final s = downscale < 1 ? 1 : downscale;
+  final key = '${width}x${height}:$s';
+  var step = 'createComputePipeline';
+  try {
+    final pipeline = _landPipelines.putIfAbsent(key, () {
+      final module = dev.createShaderModule(
+          {'code': _webLandWgsl(width, height, s)}.jsify() as JSObject);
+      return dev.createComputePipeline({
+        'layout': 'auto',
+        'compute': {'module': module, 'entryPoint': 'main'},
+      }.jsify() as JSObject);
+    });
+
+    // 🔴 THE BIND GROUP CANNOT BE CACHED. A GPUExternalTexture is SINGLE-USE:
+    // it expires with the frame it came from, so a cached group would
+    // reference a dead texture on the very next pass.
+    step = 'createBindGroup';
+    final bindGroup = dev.createBindGroup({
+      'layout': (pipeline as _GPUPipeline).getBindGroupLayout(0),
+      'entries': [
+        {'binding': 0, 'resource': externalTexture},
+        {
+          'binding': 1,
+          'resource': {'buffer': dst},
+        },
+      ],
+    }.jsify() as JSObject);
+
+    step = 'dispatch';
+    final encoder = dev.createCommandEncoder() as _GPUEncoder;
+    final pass = encoder.beginComputePass() as _GPUComputePass;
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups((width + 7) ~/ 8, (height + 7) ~/ 8, 1);
+    pass.end();
+    (dev.queue as _GPUQueue).submit(<JSObject>[encoder.finish()].toJS);
+    return true;
+  } catch (e) {
+    // The step is named because these are all one-line interop calls that fail
+    // identically from the outside, and this path cannot be unit-tested.
+    _sayLandFailed('$step threw: $e');
+    _landPipelines.remove(key);
+    return false;
+  }
+}
+
+bool _saidLandFailed = false;
+
+void _sayLandFailed(String why) {
+  if (_saidLandFailed) return;
+  _saidLandFailed = true;
+  // ignore: avoid_print
+  print('[minigpu] 🔴 external-texture landing pass FAILED — $why. Zero-copy '
+      'video capture will produce nothing on this page.');
 }
 
 // The JS global 'gpuDevice' must be set by the app before calling
@@ -1069,17 +1266,60 @@ extension GPUDeviceImport on GPUDevice {
 @JS('gpuDevice')
 external GPUDevice? get jsGpuDevice;
 
-/// Import a VideoFrame (WebCodecs) as a GPUExternalTexture.
-/// Returns null if gpuDevice is not set or the browser rejects the import.
+/// Import a `VideoFrame` (or `HTMLVideoElement`) as a `GPUExternalTexture`.
+///
+/// 🔴 **THE DEVICE IS OURS, NOT THE HOST PAGE'S.** This used to read ONLY the
+/// JS global `globalThis.gpuDevice` and return null when it was unset — and nothing
+/// in this repo sets it, so on a page where the wasm side never ran its
+/// `EM_ASM` setter every import failed silently. Observed live as a camera that
+/// delivered 121 VideoFrames of which NONE landed, with no error anywhere: a
+/// null here is indistinguishable from "the browser rejected the frame".
+///
+/// minigpu already knows its own device — `mgpuGetWGPUDeviceHandle()` is the
+/// Emscripten handle and `getWebGpuJsObject` resolves it — so ask for it
+/// directly and treat the global as a legacy override only. It must be the SAME
+/// device that will sample the texture, which is exactly what this returns.
 JSObject? mgpuImportExternalTexture(JSAny videoFrame) {
-  final dev = jsGpuDevice;
-  if (dev == null) return null;
+  final dev = _importDevice();
+  if (dev == null) {
+    _sayImportFailed('no GPUDevice — minigpu is not initialised on this page '
+        '(mgpuGetWGPUDeviceHandle returned 0 and globalThis.gpuDevice is '
+        'unset)');
+    return null;
+  }
   final desc = {'source': videoFrame}.toJSDeep as JSObject;
   try {
     return dev.importExternalTexture(desc);
-  } catch (_) {
+  } catch (e) {
+    // Real rejections land here: a closed VideoFrame, an unsupported colour
+    // space, a source this browser will not wrap. Distinguishable from the
+    // missing-device case above, which is the whole point of splitting them.
+    _sayImportFailed('importExternalTexture threw: $e');
     return null;
   }
+}
+
+/// Our own device first; the host-page global only as a legacy override.
+GPUDevice? _importDevice() {
+  try {
+    final own = getWebGpuJsObject(mgpuGetWGPUDeviceHandle());
+    if (own != null) return own as GPUDevice;
+  } catch (_) {
+    // Module not loaded yet, or no WebGPU global — fall through.
+  }
+  return jsGpuDevice;
+}
+
+bool _saidImportFailed = false;
+
+/// Named ONCE. A per-frame message here would be thousands of lines a second,
+/// and silence is what made this cost a debugging round in the first place.
+void _sayImportFailed(String why) {
+  if (_saidImportFailed) return;
+  _saidImportFailed = true;
+  // ignore: avoid_print
+  print('[minigpu] 🔴 importExternalTexture FAILED — $why. Every zero-copy '
+      'video frame will fall back to the CPU path until this is fixed.');
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,6 +1327,17 @@ JSObject? mgpuImportExternalTexture(JSAny videoFrame) {
 // ---------------------------------------------------------------------------
 // Note: getWebGpuJsObject() lives in webgpu_interop.dart (no @JS('Module')
 // scope) so it accesses the global window.WebGPU object, not Module.WebGPU.
+
+@JS('_mgpuSetLogLevel')
+external void _mgpuSetLogLevelJs(JSNumber level);
+
+/// Minimum native log verbosity (0=DEBUG 1=INFO 2=WARN 3=ERROR, -1 silences
+/// all). The wasm default is INFO, which narrates ~7 buffer ops per encoded
+/// frame straight onto the browser console via stderr `printChar`. Callable
+/// only once the module is loaded — `MinigpuWeb` stages the level and applies
+/// it right after [ensureMinigpuModuleLoaded], before context init, so even
+/// the adapter/device bring-up logs honor it.
+void mgpuSetLogLevel(int level) => _mgpuSetLogLevelJs(level.toJS);
 
 @JS('_mgpuGetWGPUDeviceHandle')
 external JSNumber _mgpuGetWGPUDeviceHandleJs();

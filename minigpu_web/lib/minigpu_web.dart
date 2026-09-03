@@ -16,9 +16,46 @@ class MinigpuWeb extends MinigpuPlatform {
   /// constructor but accessible from test code.
   factory MinigpuWeb.createForTest() => MinigpuWeb._();
 
+  /// Staged log level, applied the moment the wasm module is up. The host
+  /// calls `Minigpu.setLogCallback(..., level: N)` at main() — long before the
+  /// module loads on web — so the level must survive until it can land.
+  int? _pendingLogLevel;
+
+  @override
+  void setLogCallback(
+    void Function(int level, String message)? callback, {
+    int level = 1,
+  }) {
+    // Only the LEVEL is honored on web: routing native log lines through a
+    // Dart callback needs a wasm function-pointer table slot
+    // (Emscripten addFunction), which this build does not reserve. Messages
+    // at/above [level] go to the browser console via stderr, as before.
+    _pendingLogLevel = level;
+    if (wasm.isMinigpuModuleLoaded) wasm.mgpuSetLogLevel(level);
+  }
+
   @override
   Future<void> initializeContext() async {
+    // The level must land BETWEEN module load and context init, or the
+    // adapter/device bring-up narrates at the wasm default (INFO).
+    await wasm.ensureMinigpuModuleLoaded();
+    final lvl = _pendingLogLevel;
+    if (lvl != null) wasm.mgpuSetLogLevel(lvl);
     await wasm.mgpuInitializeContext();
+    // 🔴 VERDICT PROBE for the asyncify early-resolution failure: the await
+    // above can resolve while the wasm-side init is still suspended in its
+    // adapter/device poll loop (observed: "Requesting WebGPU adapter..." is
+    // the last init log, yet callers proceed). The device handle is a SYNC
+    // export, so reading 0 here is proof the resolution was a lie — and the
+    // page's every later async read will "resolve" with zeros the same way.
+    final dev = wasm.mgpuGetWGPUDeviceHandle();
+    if (dev == 0) {
+      // ignore: avoid_print
+      print('[minigpu_web] 🔴 initializeContext RESOLVED but the WGPUDevice '
+          'handle is 0 — the wasm init never actually completed (asyncify '
+          'early-resolution); all GPU work on this page will silently '
+          'produce zeros');
+    }
   }
 
   @override
@@ -38,6 +75,22 @@ class MinigpuWeb extends MinigpuPlatform {
     return WebBuffer(buff);
   }
 
+  /// 🔴 **THE IMPORT IS ONLY HALF THE ANSWER — THE CONSUMER HAS TO EXIST TOO.**
+  /// This answered `true` for `webVideoFrame` on the strength of
+  /// [importVideoFrameWeb] alone, while nothing could actually READ the
+  /// resulting texture: the dispatch runs inside the wasm module, which builds
+  /// its bind group from the WGSL declaration, and every landing kernel there
+  /// declares `texture_2d<f32>` where a `GPUExternalTexture` requires
+  /// `texture_external`. The pipeline failed validation, every dispatch after
+  /// it was invalid, and — because WebGPU validation errors are UNCAPTURED and
+  /// ASYNCHRONOUS — nothing threw. The staging call returned `true` while the
+  /// GPU wrote nothing: a black screen under a completely healthy log.
+  ///
+  /// Both halves now exist. [WebVideoTexture.landPackedRgba8] runs the pass
+  /// from Dart on minigpu's own device with a `texture_external` kernel, and
+  /// writes into the same packed-RGBA8 buffer the native path targets, so the
+  /// answer here is true again — and it is now a claim about the whole route,
+  /// not just the import.
   @override
   bool isExternalContentTypeSupported(ExternalContentType type) =>
       type == ExternalContentType.webVideoFrame;
@@ -50,9 +103,24 @@ class MinigpuWeb extends MinigpuPlatform {
   @override
   PlatformVideoTexture? importVideoFrame(ExternalVideoBuffer buf) {
     if (buf.contentType != ExternalContentType.webVideoFrame) return null;
-    // Web callers use importVideoFrameWeb() directly to pass a JSAny VideoFrame.
-    // This path is a no-op to satisfy the platform interface contract.
-    return null;
+    // 🔴 THE GENERIC PATH WORKS ON WEB NOW. It used to `return null` here with
+    // a note saying web callers should reach for `importVideoFrameWeb()`
+    // directly — which meant every cross-platform caller had to grow a
+    // conditional import to get a GPU texture on web, so none of them did, and
+    // the web capture path stayed on a full-frame canvas readback while this
+    // backend could import a VideoFrame the whole time.
+    //
+    // `ExternalVideoBuffer.externalHandle` is what closed that gap: a JS object
+    // has no integer address to put in `planes[0].dataPtr`, so it rides as an
+    // opaque `Object?` and is cast back here.
+    final handle = buf.externalHandle;
+    if (handle == null) return null;
+    return importVideoFrameWeb(
+      handle as JSAny,
+      buf.pixelFormat,
+      buf.width,
+      buf.height,
+    );
   }
 
   @override
@@ -120,11 +188,30 @@ class WebComputeShader implements PlatformComputeShader {
     await wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
   }
 
+  /// One-shot marker: a fired dispatch that REJECTED. Static — one report
+  /// per page is enough to name the failure.
+  static bool _saidFireFailed = false;
+
   @override
   void dispatchFire(int groupsX, int groupsY, int groupsZ) {
     // queue.submit is synchronous in JS WebGPU; the returned promise only
     // covers call plumbing, so dropping it preserves submission order.
-    wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
+    //
+    // 🔴 "Dropping it" must still HANDLE rejection: an uncaught C++ exception
+    // in the wasm surfaces as a bare number (the exception pointer) on this
+    // promise, and unhandled it kills the surrounding Dart zone with no
+    // frames pointing anywhere — that is exactly the shape of an entire test
+    // failing with just "67157776" and zone plumbing for a stack.
+    wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ).catchError((Object e) {
+      if (!_saidFireFailed) {
+        _saidFireFailed = true;
+        // ignore: avoid_print
+        print('[minigpu_web] fired dispatch($groupsX,$groupsY,$groupsZ) '
+            'REJECTED: $e — a bare number is a wasm C++ exception pointer; '
+            'raise the log level (Minigpu.setLogCallback level 0/1) to see '
+            'the native narration up to the throw');
+      }
+    });
   }
 
   @override
@@ -149,6 +236,9 @@ class WebBuffer implements PlatformBuffer {
   final wasm.MGPUBuffer _buffer;
 
   WebBuffer(this._buffer);
+
+  @override
+  int get webBufferHandle => wasm.mgpuGetWGPUBufferHandle(_buffer);
 
   @override
   Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) {
@@ -385,16 +475,54 @@ class WebVideoTexture implements PlatformVideoTexture {
   @override
   int get numPlanes => 1; // GPUExternalTexture is always single-plane on Web
 
+  /// 🔴 **THIS DOES NOT BIND ANYTHING — USE [landPackedRgba8].** It stores the
+  /// texture in a map nothing reads, because the wasm-side pipeline that would
+  /// consume it declares `texture_2d<f32>` and cannot take an external texture
+  /// at all. Kept only so the platform interface stays satisfied; a caller that
+  /// reaches it has taken a route that silently produces no pixels, so it says
+  /// so once rather than looking like plumbing.
   @override
   void setOnShader(PlatformComputeShader shader, int slot, int planeIndex) {
-    // Web: pass the external texture to the WebComputeShader via a custom method.
-    // The shader implementation must call device.setBindGroup with the external texture.
-    // For now we store the texture on the shader via the JS interop tag mechanism.
-    if (shader is WebComputeShader) {
-      shader.setExternalTexture(slot, _externalTexture);
-    } else {
+    if (shader is! WebComputeShader) {
       throw UnsupportedError('setOnShader requires WebComputeShader on Web');
     }
+    if (!_saidStub) {
+      _saidStub = true;
+      // ignore: avoid_print
+      print('[minigpu] 🔴 WebVideoTexture.setOnShader binds NOTHING on web — '
+          'a GPUExternalTexture needs a texture_external kernel and a bind '
+          'group built JS-side. Use landPackedRgba8() instead; this pass will '
+          'produce no pixels.');
+    }
+    shader.setExternalTexture(slot, _externalTexture);
+  }
+
+  static bool _saidStub = false;
+
+  /// 🔴 Always true: a `GPUExternalTexture` has no other consumer here.
+  @override
+  bool get requiresExternalLanding => true;
+
+  /// Land this external texture into [dst] as packed RGBA8.
+  ///
+  /// The web answer to "bind a video texture to a compute pass": the pass runs
+  /// from Dart, on minigpu's own device, with a kernel declared
+  /// `texture_external` — the only form that can read one.
+  @override
+  bool landPackedRgba8(
+    PlatformBuffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) {
+    if (dst is! WebBuffer) return false;
+    return wasm.mgpuLandExternalTexture(
+      externalTexture: _externalTexture,
+      dstBufferHandle: dst.webBufferHandle,
+      width: width,
+      height: height,
+      downscale: downscale,
+    );
   }
 
   @override
