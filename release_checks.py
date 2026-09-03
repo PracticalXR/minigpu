@@ -267,14 +267,26 @@ def check_internal_pins(root, packages):
     return errs
 
 
-def check_external_constraints(root, packages):
-    """Family constraints must admit what is currently PUBLISHED.
+def check_external_constraints(root, packages, planned=None):
+    """Family constraints must admit what WILL be published.
 
     This is the cross-repo check no single release.py could do before. It is how
     minigpu_view sat on `miniav: ^0.5.2` while miniav shipped 0.7.0, silently
     blocking every consumer of both -- for as long as it took someone to try.
+
+    `planned` maps package name -> the version this run is about to publish, for
+    EVERY package in the run and not merely the ones in this repo. Without it
+    the check answers a subtly different question - "does pub.dev serve this
+    already" - and fails a coordinated release for pins that the run itself
+    satisfies a few positions earlier. minigpu_view depending on miniav is the
+    standing example: it is in a different repo, so it was never in `packages`,
+    so its planned version was invisible and a correct pin read as broken.
+
+    A pin naming a version that nothing in the run publishes is still an error,
+    and that is the case worth catching: the window never closes.
     """
     errs = []
+    planned = planned or {}
     local = set(packages)
     for pkg in packages:
         if not _local_version(root, pkg):
@@ -291,16 +303,23 @@ def check_external_constraints(root, packages):
             if not info:
                 continue
             latest, _ = info
-            verdict = _satisfies(constraint, latest)
-            if verdict is False:
+            # What a consumer will be able to resolve once this run finishes:
+            # the version being published if there is one, else what is up now.
+            target = planned.get(dep, latest)
+            verdict = _satisfies(constraint, target)
+            if verdict is False and dep in planned:
+                errs.append(f"{pkg}: constrains {dep} to '{constraint}' but "
+                            f"this run publishes {dep} {target} -- the pin "
+                            f"names a version nobody will publish")
+            elif verdict is False:
                 errs.append(f"{pkg}: constrains {dep} to '{constraint}' but "
                             f"{dep} {latest} is published -- a consumer of both "
                             f"cannot resolve")
             elif verdict is None:
                 errs.append(f"{pkg}: constrains {dep} to '{constraint}', a "
                             f"constraint form this script cannot evaluate, so it "
-                            f"was NOT checked against the published {dep} "
-                            f"{latest} -- rewrite it as a caret range")
+                            f"was NOT checked against {dep} "
+                            f"{target} -- rewrite it as a caret range")
     return errs
 
 
@@ -413,11 +432,17 @@ def check_publish_validation(root, packages):
     return errs
 
 
-def preflight(root, packages, skip_validation=False):
-    """Run every check. Returns True when it is safe to publish."""
+def preflight(root, packages, skip_validation=False, planned=None):
+    """Run every check. Returns True when it is safe to publish.
+
+    `planned` (name -> version for the WHOLE run, across repos) lets the family
+    constraint check judge pins against what will exist rather than what exists
+    now. Omitting it keeps the old standalone behaviour.
+    """
     checks = [
         ("internal pins", check_internal_pins),
-        ("published family constraints", check_external_constraints),
+        ("published family constraints",
+         lambda r, p: check_external_constraints(r, p, planned)),
         ("version already published", check_version_bumped),
     ]
     if not skip_validation:
