@@ -1,5 +1,13 @@
 # minigpu_view CHANGELOG
 
+## 1.8.2
+
+- Increment downstream deps
+
+## 1.8.1
+
+- Version alignment with the minigpu 1.8.1 family release.
+
 ## 1.7.0
 
 - **Windows: one engine texture per source handle, not per controller —

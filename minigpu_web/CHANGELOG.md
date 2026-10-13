@@ -1,5 +1,19 @@
 # minigpu_web CHANGELOG
 
+## Unreleased
+
+- Retire GPU-only resources after the exact creation device's observed WebGPU
+  loss. Keep host-reader teardown separate and reject healthy, stale or merely
+  unavailable device lookups.
+- Add final module-retirement observation and root-owned browser recovery.
+  Replacement preserves required features/limits on a fresh browser-selected
+  device; it does not claim native physical-adapter identity. Rejected candidates
+  must retire before explicit Retry. Outstanding readers still block replacement.
+
+## 1.8.1
+
+- Implement `webBufferHandle` on `WebBuffer` via `mgpuGetWGPUBufferHandle`, exposing the WGPUBuffer handle for same-device zero-copy presentation.
+
 ## 1.7.0
 
 - **`writeRawBytes` no longer allocates and fills a whole second list per

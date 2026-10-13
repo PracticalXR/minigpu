@@ -84,6 +84,16 @@ typedef enum {
  * Structures
  * ---------------------------------------------------------------------- */
 
+/** D3D11-only provenance in planes[0].drm_format_modifier ("WGC1").
+ *  The producer promises a unique, immutable snapshot whose GPU writes have
+ *  completed. It must never recycle or modify that allocation after handoff.
+ *  Closing the NT handle/releasing producer COM references after import is OK:
+ *  the consumer retains the resource. Zero or any other value keeps the
+ *  conservative import-copy path. Linux DRM modifiers retain their meaning.
+ *  This reuses platform-discriminated metadata without changing the C ABI;
+ *  older consumers ignore the tag and continue copying. */
+#define MGPU_D3D11_IMMUTABLE_READY_TAG UINT64_C(0x57474331)
+
 /** Per-plane descriptor for an external video buffer. */
 typedef struct {
     void    *data_ptr;          /**< CPU: pixel data ptr.
@@ -97,9 +107,10 @@ typedef struct {
     uint32_t stride_bytes;      /**< Row stride in bytes. */
     uint32_t offset_bytes;      /**< Byte offset within the shared resource. */
     uint32_t subresource_index; /**< D3D11 subresource / Vulkan aspect index. */
-    /* Linux DMA-BUF specific (ignored on other platforms) */
+    /* Platform-specific metadata; see each field's content-type contract. */
     int      dmabuf_fd;         /**< Per-plane DMA-BUF fd (-1 if not DMA-BUF). */
-    uint64_t drm_format_modifier; /**< DRM modifier (0 = DRM_FORMAT_MOD_LINEAR). */
+    uint64_t drm_format_modifier; /**< Linux: DRM modifier (0 = LINEAR).
+                                     D3D11: MGPU_D3D11_IMMUTABLE_READY_TAG or 0. */
 } MGPUExternalPlane;
 
 /** Optional GPU synchronisation fence.

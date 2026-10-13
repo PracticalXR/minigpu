@@ -373,6 +373,38 @@ external void mgpuDestroyContext();
 @ffi.Native<ffi.Int Function()>()
 external int mgpuContextRefCount();
 
+/// Returns 1 only for the current, live device and writes both limits.
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<ffi.Uint64>, ffi.Pointer<ffi.Uint64>, ffi.Pointer<ffi.Uint64>,
+  )
+>()
+external int mgpuGetCurrentDeviceBufferLimits(
+  ffi.Pointer<ffi.Uint64> maxBufferSize,
+  ffi.Pointer<ffi.Uint64> maxStorageBufferBindingSize,
+  ffi.Pointer<ffi.Uint64> deviceGeneration,
+);
+
+@ffi.Native<ffi.Int Function(
+  ffi.Pointer<ffi.Uint64>, ffi.Pointer<ffi.Uint64>, ffi.Pointer<ffi.Uint64>
+)>()
+external int mgpuGetCurrentDeviceTextureLimits(
+  ffi.Pointer<ffi.Uint64> maxDimension2D,
+  ffi.Pointer<ffi.Uint64> maxArrayLayers,
+  ffi.Pointer<ffi.Uint64> deviceGeneration,
+);
+
+@ffi.Native<ffi.Int Function(
+  ffi.Pointer<MGPUContextHandle>, ffi.Pointer<ffi.Uint64>,
+  ffi.Pointer<ffi.Uint64>, ffi.Pointer<ffi.Uint64>
+)>()
+external int mgpuContextGetCurrentDeviceTextureLimits(
+  ffi.Pointer<MGPUContextHandle> handle,
+  ffi.Pointer<ffi.Uint64> maxDimension2D,
+  ffi.Pointer<ffi.Uint64> maxArrayLayers,
+  ffi.Pointer<ffi.Uint64> deviceGeneration,
+);
+
 /// Install a native log callback. [callback] receives (int level, Pointer<Char> message)
 /// where level: 0=DEBUG 1=INFO 2=WARN 3=ERROR. Pass a null pointer to revert to stderr.
 @ffi.Native<
@@ -419,6 +451,335 @@ external int mgpuHasKernel(ffi.Pointer<MGPUComputeShader> shader);
 @ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int, ffi.Int)>()
 external ffi.Pointer<MGPUBuffer> mgpuCreateBuffer(int bufferSize, int dataType);
 
+@ffi.Native<ffi.Uint32 Function()>(symbol: 'mgpuBufferDescriptorVersion')
+external int mgpuBufferDescriptorVersion();
+
+@ffi.Native<ffi.Uint32 Function()>(symbol: 'mgpuBufferBindingVersion')
+external int mgpuBufferBindingVersion();
+
+@ffi.Native<ffi.Uint32 Function()>(symbol: 'mgpuTextureResourceVersion')
+external int mgpuTextureResourceVersion();
+
+@ffi.Native<
+  ffi.Pointer<MGPUTexture> Function(
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuCreateTexture2D')
+external ffi.Pointer<MGPUTexture> mgpuCreateTexture2D(
+  int width,
+  int height,
+  int format,
+  int usage,
+  int layers,
+  int mipLevels,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUTexture> Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuContextCreateTexture2D')
+external ffi.Pointer<MGPUTexture> mgpuContextCreateTexture2D(
+  ffi.Pointer<MGPUContextHandle> context,
+  int width,
+  int height,
+  int format,
+  int usage,
+  int layers,
+  int mipLevels,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUTextureView> Function(
+    ffi.Pointer<MGPUTexture>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuCreateTextureView')
+external ffi.Pointer<MGPUTextureView> mgpuCreateTextureView(
+  ffi.Pointer<MGPUTexture> texture,
+  int dimension,
+  int baseMip,
+  int mipCount,
+  int baseLayer,
+  int layerCount,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUSampler> Function(
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Float,
+    ffi.Float,
+    ffi.Int,
+  )
+>(symbol: 'mgpuCreateSampler')
+external ffi.Pointer<MGPUSampler> mgpuCreateSampler(
+  int addressU,
+  int addressV,
+  int addressW,
+  int mag,
+  int min,
+  int mip,
+  double lodMin,
+  double lodMax,
+  int compare,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUSampler> Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Float,
+    ffi.Float,
+    ffi.Int,
+  )
+>(symbol: 'mgpuContextCreateSampler')
+external ffi.Pointer<MGPUSampler> mgpuContextCreateSampler(
+  ffi.Pointer<MGPUContextHandle> context,
+  int addressU,
+  int addressV,
+  int addressW,
+  int mag,
+  int min,
+  int mip,
+  double lodMin,
+  double lodMax,
+  int compare,
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUTexture>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuWriteTexture2D')
+external int mgpuWriteTexture2D(
+  ffi.Pointer<MGPUTexture> texture,
+  ffi.Pointer<ffi.Uint8> bytes,
+  int byteCount,
+  int mipLevel,
+  int arrayLayer,
+);
+
+@ffi.Native<ffi.Uint32 Function()>(symbol: 'mgpuTextureRegionUploadVersion')
+external int mgpuTextureRegionUploadVersion();
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUTexture>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuWriteTextureRegion2D')
+external int mgpuWriteTextureRegion2D(
+  ffi.Pointer<MGPUTexture> texture,
+  ffi.Pointer<ffi.Uint8> bytes,
+  int byteCount,
+  int x,
+  int y,
+  int width,
+  int height,
+  int mipLevel,
+  int arrayLayer,
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Pointer<MGPUTextureView>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuSetOwnedTexture')
+external int mgpuSetOwnedTexture(
+  ffi.Pointer<MGPUComputeShader> shader,
+  int slot,
+  ffi.Pointer<MGPUTextureView> view,
+  int kind,
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Pointer<MGPUSampler>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuSetOwnedSampler')
+external int mgpuSetOwnedSampler(
+  ffi.Pointer<MGPUComputeShader> shader,
+  int slot,
+  ffi.Pointer<MGPUSampler> sampler,
+  int kind,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUTexture>)>(
+  symbol: 'mgpuDestroyTexture',
+)
+external void mgpuDestroyTexture(ffi.Pointer<MGPUTexture> texture);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUTextureView>)>(
+  symbol: 'mgpuDestroyTextureView',
+)
+external void mgpuDestroyTextureView(ffi.Pointer<MGPUTextureView> view);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUSampler>)>(
+  symbol: 'mgpuDestroySampler',
+)
+external void mgpuDestroySampler(ffi.Pointer<MGPUSampler> sampler);
+
+@ffi.Native<ffi.Uint32 Function()>(symbol: 'mgpuRasterResourceVersion')
+external int mgpuRasterResourceVersion();
+@ffi.Native<
+  ffi.Pointer<MGPURenderPipeline> Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuCreateRenderPipeline')
+external ffi.Pointer<MGPURenderPipeline> mgpuCreateRenderPipeline(
+  ffi.Pointer<ffi.Char> code,
+  ffi.Pointer<ffi.Char> vertex,
+  ffi.Pointer<ffi.Char> fragment,
+  ffi.Pointer<ffi.Uint32> descriptor,
+  int words,
+);
+@ffi.Native<
+  ffi.Pointer<MGPURenderPipeline> Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuContextCreateRenderPipeline')
+external ffi.Pointer<MGPURenderPipeline> mgpuContextCreateRenderPipeline(
+  ffi.Pointer<MGPUContextHandle> context,
+  ffi.Pointer<ffi.Char> code,
+  ffi.Pointer<ffi.Char> vertex,
+  ffi.Pointer<ffi.Char> fragment,
+  ffi.Pointer<ffi.Uint32> descriptor,
+  int words,
+);
+@ffi.Native<ffi.Int Function(ffi.Pointer<MGPURenderPipeline>)>(
+  symbol: 'mgpuRenderPipelineStatus',
+)
+external int mgpuRenderPipelineStatus(ffi.Pointer<MGPURenderPipeline> pipeline);
+@ffi.Native<ffi.Double Function(ffi.Pointer<MGPURenderPipeline>, ffi.Int)>(
+  symbol: 'mgpuRenderPipelineBindingStat',
+)
+external double mgpuRenderPipelineBindingStat(
+  ffi.Pointer<MGPURenderPipeline> pipeline,
+  int selector,
+);
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPURenderPipeline>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuRenderPipelineDiagnostic')
+external int mgpuRenderPipelineDiagnostic(
+  ffi.Pointer<MGPURenderPipeline> pipeline,
+  ffi.Pointer<ffi.Char> destination,
+  int capacity,
+);
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPURenderPipeline>)>(
+  symbol: 'mgpuDestroyRenderPipeline',
+)
+external void mgpuDestroyRenderPipeline(
+  ffi.Pointer<MGPURenderPipeline> pipeline,
+);
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPURenderPipeline>,
+    ffi.Pointer<MGPUTextureView>,
+    ffi.Pointer<MGPUTextureView>,
+    ffi.Pointer<ffi.Float>,
+    ffi.Int,
+    ffi.Pointer<ffi.Pointer<MGPUBuffer>>,
+    ffi.Int,
+    ffi.Pointer<ffi.Pointer<MGPUTextureView>>,
+    ffi.Int,
+    ffi.Pointer<ffi.Pointer<MGPUSampler>>,
+    ffi.Int,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Int,
+  )
+>(symbol: 'mgpuSubmitRender')
+external int mgpuSubmitRender(
+  ffi.Pointer<MGPURenderPipeline> pipeline,
+  ffi.Pointer<MGPUTextureView> color,
+  ffi.Pointer<MGPUTextureView> depth,
+  ffi.Pointer<ffi.Float> clear,
+  int loadFlags,
+  ffi.Pointer<ffi.Pointer<MGPUBuffer>> buffers,
+  int bufferCount,
+  ffi.Pointer<ffi.Pointer<MGPUTextureView>> views,
+  int viewCount,
+  ffi.Pointer<ffi.Pointer<MGPUSampler>> samplers,
+  int samplerCount,
+  ffi.Pointer<ffi.Uint32> commands,
+  int commandCount,
+);
+
+@ffi.Native<ffi.Pointer<MGPUBuffer> Function(ffi.Int, ffi.Uint32)>(
+  symbol: 'mgpuCreateBufferWithUsage',
+)
+external ffi.Pointer<MGPUBuffer> mgpuCreateBufferWithUsage(
+  int sizeBytes,
+  int usage,
+);
+
+@ffi.Native<
+  ffi.Pointer<MGPUBuffer> Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Int,
+    ffi.Uint32,
+  )
+>(symbol: 'mgpuContextCreateBufferWithUsage')
+external ffi.Pointer<MGPUBuffer> mgpuContextCreateBufferWithUsage(
+  ffi.Pointer<MGPUContextHandle> handle,
+  int sizeBytes,
+  int usage,
+);
+
 @ffi.Native<ffi.Void Function(ffi.Pointer<MGPUBuffer>)>()
 external void mgpuDestroyBuffer(ffi.Pointer<MGPUBuffer> buffer);
 
@@ -433,6 +794,25 @@ external void mgpuSetBuffer(
   ffi.Pointer<MGPUComputeShader> shader,
   int tag,
   ffi.Pointer<MGPUBuffer> buffer,
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUComputeShader>,
+    ffi.Int,
+    ffi.Pointer<MGPUBuffer>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuSetBufferRange')
+external int mgpuSetBufferRange(
+  ffi.Pointer<MGPUComputeShader> shader,
+  int slot,
+  ffi.Pointer<MGPUBuffer> buffer,
+  int kind,
+  int offsetBytes,
+  int sizeBytes,
 );
 
 @ffi.Native<
@@ -652,9 +1032,7 @@ external ffi.Pointer<MGPUContextHandle> mgpuCreateContextHandle(
   ffi.Pointer<ffi.Char> adapterFilter,
 );
 
-@ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUContextHandle>, MGPUCallback)
->()
+@ffi.Native<ffi.Void Function(ffi.Pointer<MGPUContextHandle>, MGPUCallback)>()
 external void mgpuContextInitializeAsync(
   ffi.Pointer<MGPUContextHandle> handle,
   MGPUCallback callback,
@@ -674,6 +1052,22 @@ external int mgpuContextGetAdapterName(
   ffi.Pointer<MGPUContextHandle> handle,
   ffi.Pointer<ffi.Char> out,
   int cap,
+);
+
+/// Returns 1 only for this context's current, live device.
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUContextHandle>,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Pointer<ffi.Uint64>,
+  )
+>()
+external int mgpuContextGetCurrentDeviceBufferLimits(
+  ffi.Pointer<MGPUContextHandle> handle,
+  ffi.Pointer<ffi.Uint64> maxBufferSize,
+  ffi.Pointer<ffi.Uint64> maxStorageBufferBindingSize,
+  ffi.Pointer<ffi.Uint64> deviceGeneration,
 );
 
 @ffi.Native<
@@ -1162,6 +1556,14 @@ external void mgpuWriteDouble(
 external int mgpuQueryVramBytes();
 
 final class MGPUComputeShader extends ffi.Opaque {}
+
+final class MGPUTexture extends ffi.Opaque {}
+
+final class MGPUTextureView extends ffi.Opaque {}
+
+final class MGPUSampler extends ffi.Opaque {}
+
+final class MGPURenderPipeline extends ffi.Opaque {}
 
 final class MGPUBuffer extends ffi.Opaque {}
 

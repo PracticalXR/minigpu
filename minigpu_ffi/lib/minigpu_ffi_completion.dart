@@ -77,8 +77,9 @@ typedef IntCallbackIssue =
 abstract final class GpuCompletion {
   /// Runs an operation whose native completion carries no result.
   ///
-  /// Returns false only when the C layer rejected the request outright (a null
-  /// handle, an unknown element type). Callers that had no notion of failure
+  /// Returns false when the C layer rejects the request (for example a null
+  /// handle, unknown element type or failed device initialization). Callers
+  /// that had no notion of failure
   /// before can ignore it — the point of reporting rather than staying silent
   /// is that the old code left such callers awaiting a future that would never
   /// complete.
@@ -275,7 +276,8 @@ final class IntCompletionSlot {
     final completer = _completer;
     _completer = null;
     _nc.keepIsolateAlive = false;
-    if (completer != null && !completer.isCompleted) completer.complete(ok != 0);
+    if (completer != null && !completer.isCompleted)
+      completer.complete(ok != 0);
   }
 
   static final Queue<IntCompletionSlot> _free = Queue<IntCompletionSlot>();
@@ -332,9 +334,23 @@ external void mgpuContextInitializeAsyncToPort(
   int token,
 );
 
-@Native<Void Function(Pointer<ffi.MGPUComputeShader>, Int, Int, Int, Int64, Int64)>(
-  symbol: 'mgpuDispatchAsyncToPort',
+@Native<Void Function(Pointer<ffi.MGPUContextHandle>, Int64, Int64)>(
+  symbol: 'mgpuContextWaitForSubmittedWorkAsyncToPort',
 )
+external void mgpuContextWaitForSubmittedWorkAsyncToPort(
+  Pointer<ffi.MGPUContextHandle> handle,
+  int port,
+  int token,
+);
+
+@Native<Void Function(Int64, Int64)>(
+  symbol: 'mgpuWaitForSubmittedWorkAsyncToPort',
+)
+external void mgpuWaitForSubmittedWorkAsyncToPort(int port, int token);
+
+@Native<
+  Void Function(Pointer<ffi.MGPUComputeShader>, Int, Int, Int, Int64, Int64)
+>(symbol: 'mgpuDispatchAsyncToPort')
 external void mgpuDispatchAsyncToPort(
   Pointer<ffi.MGPUComputeShader> shader,
   int groupsX,
@@ -401,3 +417,122 @@ external void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
 /// references frees it under that task. No-op if called from the worker thread.
 @Native<Void Function()>(symbol: 'mgpuDrainWorkQueue')
 external void mgpuDrainWorkQueue();
+
+final class NativeContextLease extends Opaque {}
+
+final class NativeContextLeaseInfo extends Struct {
+  @Uint32()
+  external int structSize;
+  @Uint32()
+  external int version;
+  @Uint64()
+  external int contextGeneration;
+  @Uint64()
+  external int deviceGeneration;
+  @Uint32()
+  external int current;
+  @Uint32()
+  external int reserved;
+}
+
+@Native<Int32 Function(Pointer<ffi.MGPUContextHandle>, Pointer<Pointer<NativeContextLease>>)>(
+  symbol: 'mgpuContextRetainLease',
+)
+external int mgpuContextRetainLease(
+  Pointer<ffi.MGPUContextHandle> context,
+  Pointer<Pointer<NativeContextLease>> lease,
+);
+
+@Native<Int32 Function(Pointer<NativeContextLease>, Pointer<NativeContextLeaseInfo>, Uint32)>(
+  symbol: 'mgpuContextLeaseGetInfo',
+)
+external int mgpuContextLeaseGetInfo(
+  Pointer<NativeContextLease> lease,
+  Pointer<NativeContextLeaseInfo> info,
+  int size,
+);
+
+final class NativeDeviceAdapterIdentity extends Struct {
+  @Uint32()
+  external int structSize;
+  @Uint32()
+  external int version;
+  @Uint64()
+  external int deviceGeneration;
+  @Uint32()
+  external int backend;
+  @Uint32()
+  external int kind;
+  @Uint32()
+  external int low;
+  @Uint32()
+  external int high;
+}
+
+@Native<Int32 Function(Pointer<NativeContextLease>, Pointer<NativeDeviceAdapterIdentity>, Uint32)>(
+  symbol: 'mgpuContextLeaseGetAdapterIdentity',
+)
+external int mgpuContextLeaseGetAdapterIdentity(
+  Pointer<NativeContextLease> lease,
+  Pointer<NativeDeviceAdapterIdentity> identity,
+  int size,
+);
+
+@Native<
+  Int32 Function(
+    Pointer<Pointer<NativeContextLease>>,
+    Pointer<Pointer<ffi.MGPUContextHandle>>,
+  )
+>(symbol: 'mgpuDefaultContextRetainLease')
+external int mgpuDefaultContextRetainLease(
+  Pointer<Pointer<NativeContextLease>> lease,
+  Pointer<Pointer<ffi.MGPUContextHandle>> context,
+);
+
+@Native<Void Function(Pointer<NativeContextLease>)>(
+  symbol: 'mgpuContextReleaseLease',
+)
+external void mgpuContextReleaseLease(Pointer<NativeContextLease> lease);
+
+/// Native destruction receipt for the retained creation device, not successful
+/// rendering or external-reader retirement. Trusted host recovery only; never
+/// call as a substitute for consumer fencing/retirement or source permission.
+@Native<Void Function(Pointer<NativeContextLease>, Int64, Int64)>(
+  symbol: 'mgpuContextLeaseRetireDeviceAsyncToPort',
+)
+external void mgpuContextLeaseRetireDeviceAsyncToPort(
+  Pointer<NativeContextLease> lease,
+  int port,
+  int token,
+);
+
+@Native<Void Function(Pointer<NativeContextLease>, Int64, Int64)>(
+  symbol: 'mgpuContextLeaseObserveRetirementAsyncToPort',
+)
+external void mgpuContextLeaseObserveRetirementAsyncToPort(
+  Pointer<NativeContextLease> lease,
+  int port,
+  int token,
+);
+
+@Native<Int32 Function(Pointer<ffi.MGPUComputeShader>, Int32)>(
+  symbol: 'mgpuReleaseTextureBinding',
+)
+external int mgpuReleaseTextureBinding(Pointer<ffi.MGPUComputeShader> shader, int slot);
+
+@Native<Int32 Function(Pointer<Void>, Pointer<Void>, Uint32)>(
+  symbol: 'mgpuExternalPoolQueryCapabilities',
+)
+external int _queryExternalPoolForHost(
+  Pointer<Void> context,
+  Pointer<Void> capabilities,
+  int capabilitiesSize,
+);
+
+/// Installed provider export address for trusted native host pool consumers.
+/// This grants no texture access, room data, route or publication permission.
+Pointer<Void> get externalPoolQueryFunctionForHost =>
+    Native.addressOf<
+          NativeFunction<Int32 Function(Pointer<Void>, Pointer<Void>, Uint32)>
+        >(_queryExternalPoolForHost)
+        .cast<Void>();

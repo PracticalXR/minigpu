@@ -1,8 +1,27 @@
 import 'dart:typed_data';
+import 'src/buffer_descriptor.dart';
+import 'src/texture_descriptor.dart';
+import 'src/render_descriptor.dart';
+
+export 'src/buffer_descriptor.dart';
+export 'src/texture_descriptor.dart';
+export 'src/render_descriptor.dart';
 
 import 'platform_stub/minigpu_platform_stub.dart'
     if (dart.library.ffi) 'package:minigpu_ffi/minigpu_ffi.dart'
-    if (dart.library.js) 'package:minigpu_web/minigpu_web.dart';
+    // 🔴 `dart.library.js_interop`, NOT `dart.library.js`.
+    //
+    // `dart:js` does not exist under dart2wasm — only `dart:js_interop` does —
+    // so `if (dart.library.js)` is FALSE there and this falls all the way
+    // through to the stub. The symptom is not a compile error: the app builds,
+    // starts, and throws `UnsupportedError: No platform implementation
+    // available.` out of a wasm frame with no Dart stack, which reads as a
+    // broken wasm build rather than as an unselected implementation.
+    //
+    // `js_interop` is provided by dart2js AND dart2wasm and by neither the VM
+    // nor AOT, so it selects exactly the same web implementation the old
+    // condition did, and one more target besides.
+    if (dart.library.js_interop) 'package:minigpu_web/minigpu_web.dart';
 
 /// Enum representing supported buffer data types.
 enum BufferDataType {
@@ -144,6 +163,86 @@ class GpuAdapterInfo {
       '${usedVramBytes >= 0 ? '${usedVramBytes >> 20} MB used' : 'usage n/a'})';
 }
 
+/// Exact local hardware/backend identity; names and model numbers are not
+/// sufficient to distinguish identical adapters. Not a room/public identifier.
+final class DeviceAdapterIdentity {
+  const DeviceAdapterIdentity({
+    required this.backend,
+    required this.kind,
+    required this.low,
+    required this.high,
+  });
+  final int backend, kind, low, high;
+
+  @override
+  bool operator ==(Object other) => other is DeviceAdapterIdentity &&
+      backend == other.backend && kind == other.kind &&
+      low == other.low && high == other.high;
+  @override
+  int get hashCode => Object.hash(backend, kind, low, high);
+}
+
+/// Host-local replacement requirements, never room authorization or a device ID
+/// that may be serialized. Unsupported platforms expose no target.
+sealed class DeviceRecoveryTarget {
+  const DeviceRecoveryTarget();
+}
+
+final class SameAdapterRecoveryTarget extends DeviceRecoveryTarget {
+  const SameAdapterRecoveryTarget(this.adapter);
+  final DeviceAdapterIdentity adapter;
+  @override
+  bool operator ==(Object other) =>
+      other is SameAdapterRecoveryTarget && adapter == other.adapter;
+  @override
+  int get hashCode => adapter.hashCode;
+}
+
+/// A fresh browser-selected device must preserve these capabilities. Identity
+/// is this exact backend-owned object, not adapter name/model or physical GPU.
+final class BrowserRecoveryTarget extends DeviceRecoveryTarget {
+  BrowserRecoveryTarget({required Iterable<String> features,
+      required Map<String, int> limits})
+      : features = Set.unmodifiable(features), limits = Map.unmodifiable(limits);
+  final Set<String> features;
+  final Map<String, int> limits;
+
+  bool accepts(Set<String> offeredFeatures, Map<String, int> offeredLimits) {
+    if (!offeredFeatures.containsAll(features)) return false;
+    for (final entry in limits.entries) {
+      final offered = offeredLimits[entry.key];
+      if (offered == null) return false;
+      final alignment = entry.key == 'minUniformBufferOffsetAlignment' ||
+          entry.key == 'minStorageBufferOffsetAlignment';
+      if (alignment ? offered > entry.value : offered < entry.value) return false;
+    }
+    return true;
+  }
+}
+
+/// A failed replacement whose candidate is conclusively gone. Only a trusted
+/// backend may issue this receipt, after final context retirement (or proof
+/// that no candidate was allocated). An initialization error, a timeout or a
+/// returned attachment alone is not evidence of retirement.
+///
+/// This certifies only this replacement attempt, never the original device's
+/// consumers. The root must separately join all original retirement receipts.
+class DeviceRecoveryDiscarded extends StateError {
+  DeviceRecoveryDiscarded({required this.target, required String message})
+      : super(message);
+  final DeviceRecoveryTarget target;
+}
+
+/// Compatible native receipt; the physical-adapter contract is unchanged.
+final class DeviceReplacementDiscarded extends DeviceRecoveryDiscarded {
+  DeviceReplacementDiscarded({
+    required this.expectedAdapter,
+    required super.message,
+  }) : super(target: SameAdapterRecoveryTarget(expectedAdapter));
+
+  final DeviceAdapterIdentity expectedAdapter;
+}
+
 abstract class MinigpuPlatform {
   MinigpuPlatform();
 
@@ -160,8 +259,82 @@ abstract class MinigpuPlatform {
 
   Future<void> initializeContext();
   Future<void> destroyContext();
+
+  /// Captured while attached; may remain available after observed loss.
+  DeviceAdapterIdentity? get creationAdapterIdentity => null;
+
+  /// Browser implementations return their exact local capability target;
+  /// native implementations default to the existing physical-adapter contract.
+  DeviceRecoveryTarget? get creationRecoveryTarget {
+    final adapter = creationAdapterIdentity;
+    return adapter == null ? null : SameAdapterRecoveryTarget(adapter);
+  }
+
+  /// Root-owned successor creation after final context and reader retirement.
+  /// No browser fallback is inferred for a native physical-adapter request.
+  Future<void> initializeContextForReplacement(DeviceRecoveryTarget expected) =>
+      switch (expected) {
+        SameAdapterRecoveryTarget(:final adapter) => initializeContextForRecovery(adapter),
+        BrowserRecoveryTarget() => Future.error(
+            UnsupportedError('Browser device replacement is unsupported')),
+      };
+
+  /// Called by the root only after final old-context retirement. A new context
+  /// must match the exact physical adapter/backend before it becomes usable.
+  /// Owned secondary contexts allocate a fresh native handle. Unsupported
+  /// backends refuse; this must never choose a fallback adapter silently.
+  /// A failure permits explicit host retry only when accompanied by a
+  /// [DeviceReplacementDiscarded] receipt for [expected]. All other failures
+  /// retain uncertain cleanup and prohibit replacement.
+  Future<void> initializeContextForRecovery(DeviceAdapterIdentity expected) =>
+      Future.error(UnsupportedError('Same-adapter recovery is unsupported'));
+
+  /// Trusted resource-retirement operation for a previously observed lost
+  /// creation device. Success means that device's GPU access has ended,
+  /// possibly aborted; it never certifies rendering or external-reader cleanup.
+  /// The backend must retain the exact generation while ready and refuse any
+  /// replacement/healthy device. Unsupported backends fail closed.
+  Future<void> retireLostDevice({required int deviceGeneration}) =>
+      Future.error(UnsupportedError('Lost-device retirement is unsupported'));
+
+  /// Register a non-owning receipt before detaching this creation device.
+  /// It completes only after final context teardown, including other module/native
+  /// attachments. A worker must not await it before releasing its own owners.
+  Future<void> observeContextRetirement({required int deviceGeneration}) =>
+      Future.error(UnsupportedError('Final context retirement is unsupported'));
+
+  /// Limits of this platform context's current, live GPUDevice. Null when the
+  /// device is absent, lost, or the backend cannot prove its limits.
+  DeviceBufferLimits? get currentDeviceBufferLimits => null;
+
+  /// Exact current-device texture limits and bounded upload support, or null
+  /// on older backends. This does not initialize or replace a device.
+  DeviceTextureLimits? get currentDeviceTextureLimits => null;
+
+  /// Called once for each observed device loss. Implementations must discard
+  /// stale callbacks from devices replaced by a later initialization.
+  void setDeviceLostCallback(void Function()? callback) {}
   PlatformComputeShader createComputeShader();
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType);
+  PlatformTexture createTexture(TextureDescriptor descriptor) =>
+      throw UnsupportedError('Owned textures are unsupported by this backend');
+  PlatformSampler createSampler(SamplerDescriptor descriptor) =>
+      throw UnsupportedError('Owned samplers are unsupported by this backend');
+  PlatformRenderPipeline createRenderPipeline(
+    RenderPipelineDescriptor descriptor,
+  ) => throw UnsupportedError(
+    'Raster pipelines are unsupported by this backend',
+  );
+
+  PlatformBuffer createBufferFromDescriptor(BufferDescriptor descriptor) {
+    descriptor.validate();
+    if (descriptor.usage != BufferUsage.legacy) {
+      throw UnsupportedError(
+        'Explicit buffer usage is unsupported by this backend',
+      );
+    }
+    return createBuffer(descriptor.sizeBytes, BufferDataType.uint32);
+  }
 
   /// Install a log callback for the native minigpu/Dawn layer.
   ///
@@ -256,6 +429,18 @@ abstract class MinigpuPlatform {
   /// the export.
   void drainWorkQueue() {}
 
+  /// Waits until work submitted before this call has completed on this
+  /// platform context's GPU queue.
+  ///
+  /// Implementations must flush any recorded work before registering the
+  /// completion point. Platforms that cannot observe GPU queue completion
+  /// must reject this request rather than treating submission as completion.
+  Future<void> waitForSubmittedWork() async {
+    throw UnsupportedError(
+      'Submitted GPU work completion is not supported on this platform',
+    );
+  }
+
   /// Creates an INDEPENDENT platform context bound to the adapter whose name
   /// contains [adapterFilter] (case-insensitive substring, e.g. "3090") —
   /// its own device, queue, and task FIFO.  Buffers and shaders created from
@@ -283,6 +468,35 @@ abstract class MinigpuPlatform {
 
   /// Deletes every cached entry; returns how many files were removed.
   int clearShaderCache() => 0;
+}
+
+/// Buffer limits reported by the current device, in bytes.
+///
+/// This value has no lifetime of its own. Callers must bind it to their
+/// Minigpu device epoch and discard it when the device is lost or retired.
+final class DeviceBufferLimits {
+  const DeviceBufferLimits({
+    required this.deviceGeneration,
+    required this.maxBufferSize,
+    required this.maxStorageBufferBindingSize,
+  });
+
+  /// Backend generation of the device these limits came from.
+  final int deviceGeneration;
+  final int maxBufferSize;
+  final int maxStorageBufferBindingSize;
+}
+
+final class DeviceTextureLimits {
+  const DeviceTextureLimits({
+    required this.deviceGeneration,
+    required this.maxTextureDimension2D,
+    required this.maxTextureArrayLayers,
+    required this.supportsRegionWrite,
+  });
+
+  final int deviceGeneration, maxTextureDimension2D, maxTextureArrayLayers;
+  final bool supportsRegionWrite;
 }
 
 /// Snapshot of persistent shader cache counters.
@@ -372,6 +586,14 @@ enum ExternalPixelFormat {
   yuv420pAsRGBPlanes,
 }
 
+/// D3D11-only provenance stored in [ExternalPlane.drmFormatModifier].
+///
+/// The producer must have completed all GPU writes to a unique snapshot and
+/// must never reuse or modify its allocation after handoff. Import retains the
+/// resource even after the producer closes its handle. Other values keep the
+/// conservative copy path. Linux DRM modifiers retain their existing meaning.
+const int kD3D11ImmutableReadyTag = 0x57474331; // "WGC1"
+
 class ExternalPlane {
   final int dataPtr; // Native pointer / fd as integer
   final int width;
@@ -417,6 +639,20 @@ class ExternalVideoBuffer {
   final ExternalFence fence;
   final int timestampUs;
 
+  /// An opaque platform object that cannot be expressed as an integer address.
+  ///
+  /// Every other content type names its resource with a number — an NT handle,
+  /// a pointer, an fd — which [ExternalPlane.dataPtr] carries. The web has no
+  /// such number: a WebCodecs `VideoFrame` is a JS object, and the only thing
+  /// that can be handed to `importExternalTexture` is the object itself. So
+  /// [ExternalContentType.webVideoFrame] puts it HERE and leaves [planes]
+  /// empty.
+  ///
+  /// Typed as [Object] rather than `JSAny` on purpose: this file is imported by
+  /// native builds that must not see `dart:js_interop`. The web backend is the
+  /// only reader and casts it back.
+  final Object? externalHandle;
+
   const ExternalVideoBuffer({
     required this.contentType,
     required this.pixelFormat,
@@ -425,11 +661,52 @@ class ExternalVideoBuffer {
     required this.planes,
     this.fence = const ExternalFence(),
     this.timestampUs = 0,
+    this.externalHandle,
   });
+
+  /// Whether the producer explicitly permits immutable D3D11 snapshot import.
+  /// The native backend additionally validates texture format and capabilities.
+  bool get isD3D11ImmutableReady =>
+      contentType == ExternalContentType.d3d11SharedHandle &&
+      pixelFormat == ExternalPixelFormat.bgra32 &&
+      planes.length == 1 &&
+      planes.first.drmFormatModifier == kD3D11ImmutableReadyTag;
 }
 
 /// Opaque handle to an imported video texture on the GPU.
 abstract class PlatformVideoTexture {
+  /// True when [landPackedRgba8] is the ONLY way to consume this texture.
+  ///
+  /// 🔴 THE CALLER MUST NOT FALL BACK when this is true and the land fails.
+  /// A web `GPUExternalTexture` cannot be bound to the ordinary
+  /// texture-to-shader route at all — that route's pipelines declare
+  /// `texture_2d<f32>` — so "try the normal way instead" produces a validation
+  /// error per frame and, because WebGPU validation is UNCAPTURED and
+  /// ASYNCHRONOUS, still reports success. That is how a capture path accepted a
+  /// configuration that could never draw a pixel.
+  bool get requiresExternalLanding => false;
+
+  /// Land this texture into [dst] as packed RGBA8 (`array<u32>`, one texel per
+  /// element, row-major) — the destination layout every downstream kernel
+  /// already reads.
+  ///
+  /// 🔴 EXISTS FOR THE WEB, where the imported resource is a
+  /// `GPUExternalTexture` and the ordinary route cannot carry it: an external
+  /// texture must be declared `texture_external` in WGSL and bound where the
+  /// texture actually lives, which on web is the JS side rather than the wasm
+  /// module that owns every other pipeline. Backends whose normal
+  /// bind-a-texture-to-a-shader path already works return false here and are
+  /// driven the usual way.
+  ///
+  /// [downscale] > 1 box-means that many source texels per landed pixel, in the
+  /// same dispatch — the simulcast-rung input path.
+  bool landPackedRgba8(
+    PlatformBuffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) => false;
+
   int get numPlanes;
   int get width;
   int get height;
@@ -453,8 +730,9 @@ abstract class PlatformVideoTexture {
   /// blocking the calling isolate on a busy-poll. The default implementation
   /// runs the synchronous [bgraToRgbaSharedOutput]; backends with a worker
   /// thread should override it to actually run off-thread.
-  Future<bool> bgraToRgbaSharedOutputAsync(PlatformSharedOutputTexture dst) async =>
-      bgraToRgbaSharedOutput(dst);
+  Future<bool> bgraToRgbaSharedOutputAsync(
+    PlatformSharedOutputTexture dst,
+  ) async => bgraToRgbaSharedOutput(dst);
 
   void destroy();
 }
@@ -523,6 +801,30 @@ abstract class PlatformComputeShader {
   /// are race-free even with [dispatchFire].  Backends whose task execution
   /// is inherently in-order (single-threaded web) may alias [setBuffer].
   void setBufferFire(int tag, PlatformBuffer buffer) => setBuffer(tag, buffer);
+
+  void setBufferRange(
+    int slot,
+    PlatformBuffer buffer,
+    BufferBindingDescriptor descriptor,
+  ) {
+    throw UnsupportedError(
+      'Explicit buffer ranges are unsupported by this backend',
+    );
+  }
+
+  void setTexture(
+    int slot,
+    PlatformTextureView view,
+    TextureBindingKind kind,
+  ) => throw UnsupportedError('Owned textures are unsupported by this backend');
+  /// Trusted native input cleanup, after actual GPU reads. Retires cached
+  /// input/bind-group references while preserving the shader's layout.
+  void releaseTextureBindingAfterGpuRead(int slot) => throw UnsupportedError(
+    'Completed texture binding release is unsupported by this backend',
+  );
+  void setSampler(int slot, PlatformSampler sampler, SamplerBindingKind kind) =>
+      throw UnsupportedError('Owned samplers are unsupported by this backend');
+
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ);
 
   /// Fire-and-forget dispatch: enqueues the compute pass and returns without
@@ -539,6 +841,55 @@ abstract class PlatformComputeShader {
     dispatch(groupsX, groupsY, groupsZ);
   }
 
+  void destroy();
+}
+
+abstract class PlatformTexture {
+  PlatformTextureView createView(TextureViewDescriptor descriptor);
+  Future<void> write(Uint8List bytes, {int mipLevel = 0, int arrayLayer = 0});
+  bool get supportsRegionWrite => false;
+
+  /// Tightly packed rectangle; source bytes may be released after completion.
+  /// This is not a submitted GPU work fence.
+  Future<void> writeRegion(
+    Uint8List bytes, {
+    required int x,
+    required int y,
+    required int width,
+    required int height,
+    int mipLevel = 0,
+    int arrayLayer = 0,
+  }) => throw UnsupportedError('Texture region uploads are unsupported');
+  void destroy();
+}
+
+abstract class PlatformTextureView {
+  void destroy();
+}
+
+abstract class PlatformSampler {
+  void destroy();
+}
+
+abstract class PlatformRenderPipeline {
+  int get status;
+  String get diagnostic;
+
+  /// Native/backend counters for retained render bind groups, ordered as
+  /// created, reused, retired and live. Null means the loaded backend predates
+  /// this diagnostic; it does not imply that bindings are retained.
+  List<int>? get bindingCacheStats => null;
+
+  Future<void> submitRender({
+    required PlatformTextureView color,
+    PlatformTextureView? depth,
+    required List<double> clear,
+    required int loadFlags,
+    required List<PlatformBuffer> buffers,
+    required List<PlatformTextureView> views,
+    required List<PlatformSampler> samplers,
+    required List<int> commands,
+  });
   void destroy();
 }
 
@@ -571,6 +922,16 @@ abstract class PlatformBuffer {
     words.buffer.asUint8List().setRange(0, bytes.length, bytes);
     return write(words, words.length, dataType: BufferDataType.uint32);
   }
+
+  /// Web only: the Emscripten integer handle of the underlying `WGPUBuffer`,
+  /// or 0 where the concept does not exist (native, or WASM not up).
+  ///
+  /// This is the zero-readback web display path: a view layer (minigpu_view's
+  /// canvas plugin) resolves the JS `GPUBuffer` from the handle via
+  /// `WebGPU.getJsObject(handle)` and blits it into a canvas on the SAME
+  /// device queue. Integers are method-channel-codec-safe, which is why the
+  /// handle and not the JS object crosses layers.
+  int get webBufferHandle => 0;
 
   void destroy();
 }

@@ -1,28 +1,44 @@
 import 'dart:typed_data';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
+import 'resource_retirement.dart';
+
 /// A buffer.
 final class Buffer {
   /// [owner] is an optional callback invoked exactly once when [destroy] is
   /// called (or the finalizer runs).  [Minigpu] passes [_onBufferDestroyed]
   /// here so it can maintain [liveBufferCount] without a circular import.
-  Buffer(PlatformBuffer buffer, [void Function()? owner])
-    : _platformBuffer = buffer,
-      _owner = owner {
-    _finalizer.attach(this, _DestroyArgs(buffer, owner), detach: this);
+  Buffer(
+    PlatformBuffer buffer, [
+    void Function()? owner,
+    this.descriptor,
+    GpuResourceRetirement? retirement,
+  ]) : _platformBuffer = buffer,
+       _retirement =
+           retirement ?? GpuResourceRetirement(buffer.destroy, owner) {
+    _finalizer.attach(this, _retirement, detach: this);
   }
 
-  static final Finalizer<_DestroyArgs> _finalizer = Finalizer((args) {
-    args.platformBuffer.destroy();
-    args.owner?.call();
+  static final Finalizer<GpuResourceRetirement> _finalizer = Finalizer((token) {
+    token.retire();
   });
 
   PlatformBuffer? _platformBuffer;
-  final void Function()? _owner;
+  final GpuResourceRetirement _retirement;
+  final BufferDescriptor? descriptor;
   bool _isValid = true;
 
   /// Returns true if the buffer has not been destroyed.
-  bool get isValid => _isValid && _platformBuffer != null;
+  bool get isValid =>
+      _isValid && _platformBuffer != null && !_retirement.isRetired;
+  GpuResourceRetirement get retirement => _retirement;
+
+  /// Web only: the Emscripten integer handle of the underlying `WGPUBuffer`
+  /// (0 natively, or when destroyed) — the zero-readback web display path.
+  /// A view layer resolves the JS `GPUBuffer` from it and blits into a canvas
+  /// on the same device queue; see `PlatformBuffer.webBufferHandle`.
+  int get webBufferHandle =>
+      isValid ? (_platformBuffer?.webBufferHandle ?? 0) : 0;
 
   /// Reads data from the buffer asynchronously.
   /// Throws an error if the buffer has been destroyed.
@@ -35,6 +51,9 @@ final class Buffer {
   }) async {
     if (!isValid) {
       throw StateError('Cannot read from a destroyed buffer.');
+    }
+    if (descriptor != null && descriptor!.usage & BufferUsage.copySrc == 0) {
+      throw UnsupportedError('Buffer was not created with copySrc usage');
     }
     // Use the null assertion operator (!) as isValid check ensures it's not null
     return _platformBuffer!.read(
@@ -56,6 +75,9 @@ final class Buffer {
     if (!isValid) {
       throw StateError('Cannot write to a destroyed buffer.');
     }
+    if (descriptor != null && descriptor!.usage & BufferUsage.copyDst == 0) {
+      throw UnsupportedError('Buffer was not created with copyDst usage');
+    }
     // Use the null assertion operator (!)
     await _platformBuffer!.write(
       inputData,
@@ -71,32 +93,27 @@ final class Buffer {
     if (!isValid) {
       throw StateError('Cannot write to a destroyed buffer.');
     }
+    if (descriptor != null && descriptor!.usage & BufferUsage.copyDst == 0) {
+      throw UnsupportedError('Buffer was not created with copyDst usage');
+    }
     await _platformBuffer!.writeRawBytes(bytes, dstByteOffset: dstByteOffset);
   }
 
   /// Destroys the buffer and releases associated resources.
   /// Can be called multiple times safely.
   void destroy() {
-    if (_isValid && _platformBuffer != null) {
+    final buffer = _platformBuffer;
+    if (_isValid && buffer != null) {
       _finalizer.detach(this);
-      _platformBuffer!.destroy();
-      _owner?.call();
       _platformBuffer = null;
       _isValid = false;
+      _retirement.retire();
     }
   }
 
   // Internal access for ComputeShader (consider if this is the best pattern)
   // Or adjust ComputeShader to accept Buffer directly.
   PlatformBuffer? get platformBuffer => _platformBuffer;
-}
-
-/// Internal holder used by [Buffer]'s [Finalizer] so the finalizer can invoke
-/// both the platform destroy and the owner callback without capturing `this`.
-class _DestroyArgs {
-  const _DestroyArgs(this.platformBuffer, this.owner);
-  final PlatformBuffer platformBuffer;
-  final void Function()? owner;
 }
 
 class MinigpuAlreadyInitError extends Error {

@@ -500,7 +500,10 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     // Query the descriptor so we know dimensions / format.
     WGPUSharedTextureMemoryProperties props{};
     props.nextInChain = nullptr;
-    wgpuSharedTextureMemoryGetProperties(mem, &props);
+    if (wgpuSharedTextureMemoryGetProperties(mem, &props) != WGPUStatus_Success) {
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     WGPUTextureDescriptor td{};
     td.usage = WGPUTextureUsage_TextureBinding;
@@ -520,7 +523,11 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true; // producer (CopyResource) already wrote
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc) != WGPUStatus_Success) {
+        wgpuTextureRelease(texture);
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
@@ -745,6 +752,17 @@ static bool dawn_is_d3d12() {
     WGPUDevice dev = get_device();
     if (!dev) return false;
     return dawn::native::d3d12::GetD3D12Device(dev) != nullptr;
+}
+
+// Dawn's backend-specific GetD3D11Device helper casts without a backend check.
+// Inspect the public adapter metadata before using it on an import fast path.
+static bool dawn_is_d3d11(WGPUDevice device) {
+    WGPUAdapterInfo info{};
+    const auto status = wgpuDeviceGetAdapterInfo(device, &info);
+    const bool matches = status == WGPUStatus_Success &&
+                         info.backendType == WGPUBackendType_D3D11;
+    wgpuAdapterInfoFreeMembers(info);
+    return matches;
 }
 
 // Initialise the D3D12 + D3D11on12 state on `info`.
@@ -1124,6 +1142,39 @@ static MGPUVideoTexture* import_d3d11_same_adapter(const MGPUExternalVideoBuffer
 
     D3D11_TEXTURE2D_DESC sd{};
     srcOnDawnDev->GetDesc(&sd);
+    // Only a producer-certified, completed immutable snapshot may be shared
+    // directly. In particular, a WGC-acquired surface can be recycled when
+    // its frame is released and MUST retain the private-copy path below.
+    // The D3D11 texture descriptor requires Dawn's own D3D11 device; D3D12
+    // and every unrecognised/untagged input keep their existing path.
+    const bool immutableReady =
+        buf->content_type == MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE &&
+        buf->num_planes == 1 &&
+        buf->pixel_format == MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32 &&
+        buf->planes[0].drm_format_modifier == MGPU_D3D11_IMMUTABLE_READY_TAG &&
+        buf->planes[0].subresource_index == 0 &&
+        sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sd.Width == buf->width && sd.Height == buf->height &&
+        sd.ArraySize == 1 && sd.MipLevels == 1 && sd.SampleDesc.Count == 1 &&
+        (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 &&
+        dawn_is_d3d11(device) &&
+        dawn::native::d3d11::GetD3D11Device(device).Get() == d11;
+    if (immutableReady) {
+        dawn::native::d3d11::SharedTextureMemoryD3D11Texture2DDescriptor direct;
+        direct.texture = srcOnDawnDev;
+        WGPUSharedTextureMemoryDescriptor desc{};
+        desc.nextInChain = const_cast<WGPUChainedStruct*>(
+            reinterpret_cast<const WGPUChainedStruct*>(
+                static_cast<const wgpu::ChainedStruct*>(&direct)));
+        auto mem = wgpuDeviceImportSharedTextureMemory(device, &desc);
+        // SharedTextureMemory and its Texture retain the D3D11 resource.
+        // The producer's handle and COM reference may be released as soon
+        // as this import returns; queued GPU reads retain their own refs.
+        if (auto* imported = import_shared(mem, buf)) {
+            LOG_DEBUG("[minigpu_external] immutable D3D11 snapshot imported directly");
+            return imported;
+        }
+    }
     {
         static int s_probed = 0;
         if (s_probed++ < 2) {
@@ -1749,7 +1800,21 @@ struct MGPUSharedOutputTexture {
     // match. By keeping the D3D11 texture and handing the encoder the same
     // device that created it, we never need OpenSharedResource1 at all.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
-    HANDLE                                 nt_handle  = nullptr; // owned
+
+    // D3D12 BACKEND ONLY: the resource Dawn actually renders into. The
+    // ID3D11Texture2D above is then a VIEW of this same allocation opened on
+    // the sibling D3D11 device, which is what Flutter samples.
+    Microsoft::WRL::ComPtr<ID3D12Resource>  d3d12_texture;
+
+    HANDLE                                 nt_handle  = nullptr;
+
+    // 🔴 THE TWO BACKENDS PRODUCE DIFFERENT KINDS OF HANDLE, and only one of
+    // them may be closed. The D3D11 path uses IDXGIResource::GetSharedHandle(),
+    // a LEGACY share handle that MSDN says is owned by the texture - closing it
+    // is a double free. The D3D12 path uses ID3D12Device::CreateSharedHandle(),
+    // a real NT handle that leaks unless we close it. Same field, opposite
+    // rules, so the destructor is told which kind it is holding.
+    bool                                   nt_handle_owned = false;
     WGPUSharedTextureMemory                shared_mem = nullptr;
     WGPUTexture                            texture    = nullptr;
     WGPUTextureView                        view       = nullptr;
@@ -2133,7 +2198,33 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
 static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
                                                              uint32_t h) {
     WGPUDevice device = get_device();
-    if (!device || w == 0 || h == 0) return nullptr;
+    // 🔴 THE LAST SILENT RETURN IN THIS FUNCTION. Every other failure path logs,
+    // so a NULL with no log at all meant "we cannot tell you anything" - which
+    // cost a debugging round on its own, because the Dart side then GUESSED at
+    // a cause it had never observed. Both possible faults are named here.
+    if (!device) {
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: get_device() "
+                  "returned NULL - minigpu has no WGPUDevice on this thread.");
+        return nullptr;
+    }
+    if (w == 0 || h == 0) {
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: degenerate size "
+                  "%ux%u.", w, h);
+        return nullptr;
+    }
+    // Entry marker: proves the call HAPPENED. A missing "SharedOutputTexture ..."
+    // line is otherwise indistinguishable from the function never being called,
+    // which is exactly the ambiguity that stalled this investigation.
+    //
+    // 🔴 WARN, NOT INFO, AND ONLY ONCE. Hosts run minigpu at warn+ because INFO
+    // narrates several buffer ops per encoded frame - so an INFO breadcrumb here
+    // is invisible in exactly the situation it exists to diagnose. Once is
+    // enough to distinguish "never called" from "called and failed".
+    static std::atomic<bool> saidEntered{false};
+    if (!saidEntered.exchange(true)) {
+        LOG_WARN("[minigpu_external] create_shared_output_texture(%ux%u) entered "
+                 "(first call; logged once).", w, h);
+    }
 
     ID3D11Device* d3d11Device = get_or_create_d3d11_device_on_dawn_adapter();
     if (!d3d11Device) {
@@ -2152,6 +2243,8 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
     const bool dawnOnD3D11 = dawnD11 && dawnD11.Get() == d3d11Device;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11Tex;
+    Microsoft::WRL::ComPtr<ID3D12Resource>  d3d12Texture;
+    bool ownsNtHandle = false;
     HANDLE ntHandle = nullptr;
     WGPUSharedTextureMemory mem = nullptr;
 
@@ -2216,8 +2309,127 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
             }
         }
     } else {
-        LOG_ERROR("[minigpu_external] create_shared_output_texture: Dawn is not on D3D11 backend; cross-API path not implemented in this build. Set MGPU_BACKEND=d3d11.");
-        return nullptr;
+        // ── Dawn is on the D3D12 backend ────────────────────────────────
+        //
+        // Allocate the presentation texture on DAWN'S OWN D3D12 DEVICE, export
+        // it as an NT handle, and open that handle on the sibling D3D11 device.
+        // Both devices sit on the same adapter (guaranteed by
+        // get_or_create_d3d11_device_on_dawn_adapter), so the two APIs are
+        // views of ONE allocation - a cross-API view, NOT a cross-adapter copy.
+        // Nothing is transferred.
+        //
+        // This used to be a flat "not implemented" bail, which left the D3D12
+        // backend unable to present at all: every decoded frame fell back to a
+        // full readback (measured 84-99 ms/frame). It is also why Tier B's
+        // cross-adapter ingest was unusable in practice - Tier B requires the
+        // D3D12 backend, so selecting it silently cost the whole present path.
+        Microsoft::WRL::ComPtr<ID3D12Device> dawn12 =
+            dawn::native::d3d12::GetD3D12Device(device);
+        if (!dawn12) {
+            LOG_ERROR("[minigpu_external] create_shared_output_texture: Dawn is on "
+                      "neither the D3D11 nor the D3D12 backend; no cross-API "
+                      "present path exists.");
+            return nullptr;
+        }
+
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width            = w;
+        rd.Height           = h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        // 🔴 ALLOW_SIMULTANEOUS_ACCESS is REQUIRED, not defensive: Flutter's
+        // compositor samples this texture on its own D3D11 device while Dawn
+        // may still hold it, and without the flag the runtime forbids two
+        // devices touching one resource concurrently. ALLOW_RENDER_TARGET
+        // mirrors the D3D11 branch, which sets D3D11_BIND_RENDER_TARGET.
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> d3d12Tex;
+        HRESULT hr12 = dawn12->CreateCommittedResource(
+            &heapProps, D3D12_HEAP_FLAG_SHARED, &rd,
+            D3D12_RESOURCE_STATE_COMMON, /*pOptimizedClearValue=*/nullptr,
+            IID_PPV_ARGS(&d3d12Tex));
+        if (FAILED(hr12) || !d3d12Tex) {
+            LOG_ERROR("[minigpu_external] CreateCommittedResource(SharedOutput, "
+                      "D3D12) failed: 0x%08lX", (unsigned long)hr12);
+            return nullptr;
+        }
+
+        // Export as an NT handle. It serves BOTH consumers: Dawn imports the
+        // handle below, then the D3D11 device opens the same handle. We own it.
+        HANDLE shareH = nullptr;
+        hr12 = dawn12->CreateSharedHandle(d3d12Tex.Get(), /*pAttributes=*/nullptr,
+                                          GENERIC_ALL, /*Name=*/nullptr, &shareH);
+        if (FAILED(hr12) || !shareH) {
+            LOG_ERROR("[minigpu_external] CreateSharedHandle(SharedOutput) failed: 0x%08lX",
+                      (unsigned long)hr12);
+            return nullptr;
+        }
+
+        // Import into Dawn THROUGH THE HANDLE rather than through the resource.
+        //
+        // 🔴 NOT `SharedTextureMemoryD3D12ResourceDescriptor` - that struct does
+        // not exist in every Dawn this repo builds against. It is present in the
+        // 2026-05 tree under external/dawn but ABSENT from the 2025-08 tree at
+        // C:\dawn that actually gets linked, so using it compiles against one
+        // checkout and fails against the other. The DXGI-shared-handle
+        // descriptor has existed far longer and is what Tier B already relies
+        // on, so this path works on both. Cost is one extra open at allocation,
+        // never per frame.
+        //
+        // `useKeyedMutex=false` matches Tier B: synchronisation is by fence via
+        // SharedTextureMemory Begin/EndAccess. A keyed mutex would additionally
+        // require Flutter's compositor to acquire it, which it does not do.
+        WGPUSharedTextureMemoryDXGISharedHandleDescriptor handleDesc{};
+        handleDesc.chain.sType = WGPUSType_SharedTextureMemoryDXGISharedHandleDescriptor;
+        handleDesc.handle        = shareH;
+        handleDesc.useKeyedMutex = false;
+        WGPUSharedTextureMemoryDescriptor smDesc12{};
+        smDesc12.nextInChain = &handleDesc.chain;
+        mem = wgpuDeviceImportSharedTextureMemory(device, &smDesc12);
+        if (!mem) {
+            LOG_ERROR("[minigpu_external] importSharedTextureMemory(DXGISharedHandle, "
+                      "D3D12 output) failed.");
+            CloseHandle(shareH);
+            return nullptr;
+        }
+
+        // Open it on the sibling D3D11 device for the ID3D11Texture2D Flutter
+        // needs. 🔴 THIS IS THE CALL a comment on MGPUSharedOutputTexture claims
+        // returns E_INVALIDARG on many NVIDIA drivers "even when LUIDs match".
+        // That was recorded during CROSS-ADAPTER work; here both devices are on
+        // the same adapter by construction. If it does fail the HRESULT is
+        // reported rather than swallowed, and the caller falls back to the CPU
+        // present path instead of showing nothing.
+        Microsoft::WRL::ComPtr<ID3D11Device1> d3d11_1;
+        hr12 = d3d11Device->QueryInterface(IID_PPV_ARGS(&d3d11_1));
+        if (SUCCEEDED(hr12) && d3d11_1) {
+            hr12 = d3d11_1->OpenSharedResource1(shareH, IID_PPV_ARGS(&d3d11Tex));
+        }
+        if (FAILED(hr12) || !d3d11Tex) {
+            LOG_ERROR("[minigpu_external] OpenSharedResource1(D3D12 shared output) "
+                      "failed: 0x%08lX. Dawn is on D3D12 and this driver will not "
+                      "open its resources on a D3D11 device - run with "
+                      "MGPU_BACKEND=d3d11.", (unsigned long)hr12);
+            CloseHandle(shareH);
+            wgpuSharedTextureMemoryRelease(mem);
+            return nullptr;
+        }
+
+        ntHandle     = shareH;
+        ownsNtHandle = true;
+        d3d12Texture = d3d12Tex;
+        LOG_INFO("[minigpu_external] SharedOutputTexture (D3D12 cross-API) "
+                 "d12=%p d11=%p mem=%p",
+                 (void*)d3d12Tex.Get(), (void*)d3d11Tex.Get(), (void*)mem);
     }
     WGPUTextureDescriptor td{};
     // The shared d3d11 texture only needs CopyDst/CopySrc/TextureBinding —
@@ -2273,7 +2485,9 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
 
     auto* out = new MGPUSharedOutputTexture();
     out->d3d11_texture       = d3d11Tex;
+    out->d3d12_texture       = d3d12Texture;   // null on the D3D11 backend
     out->nt_handle           = ntHandle;
+    out->nt_handle_owned     = ownsNtHandle;
     out->shared_mem          = mem;
     out->texture             = wgpuTex;
     out->view                = view;
@@ -3115,9 +3329,15 @@ EXPORT void mgpuDestroySharedOutputTexture(MGPUSharedOutputTexture* tex) {
     if (tex->view)        wgpuTextureViewRelease(tex->view);
     if (tex->texture)     wgpuTextureRelease(tex->texture);
     if (tex->shared_mem)  wgpuSharedTextureMemoryRelease(tex->shared_mem);
-    // Note: nt_handle here is a legacy DXGI share handle obtained via
-    // IDXGIResource::GetSharedHandle().  Per MSDN, legacy share handles are
-    // OWNED BY THE TEXTURE and must NOT be CloseHandle()'d.
+    // 🔴 CLOSE THE HANDLE ONLY IF WE MADE IT. On the D3D11 backend nt_handle is
+    // a LEGACY DXGI share handle from IDXGIResource::GetSharedHandle(), which
+    // MSDN says is owned by the texture - closing it is a double free, and this
+    // function deliberately did not. The D3D12 backend instead exports a real
+    // NT handle via ID3D12Device::CreateSharedHandle(), which leaks unless it
+    // IS closed. nt_handle_owned records which one this is.
+    if (tex->nt_handle_owned && tex->nt_handle) {
+        CloseHandle(tex->nt_handle);
+    }
     delete tex;
 #else
     (void)tex;

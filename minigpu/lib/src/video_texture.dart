@@ -30,9 +30,39 @@ final class VideoTexture {
   int get height => _platformTex!.height;
   ExternalPixelFormat get pixelFormat => _platformTex!.pixelFormat;
 
+  PlatformVideoTexture get platformTexture {
+    final texture = _platformTex;
+    if (!_isValid || texture == null) throw StateError('Video texture is destroyed');
+    return texture;
+  }
+
   /// Bind plane [planeIndex] to compute shader binding [slot].
   void setOnShader(ComputeShader shader, int slot, {int planeIndex = 0}) {
-    _platformTex!.setOnShader(shader.platformShader, slot, planeIndex);
+    shader.setVideoTexture(slot, this, planeIndex: planeIndex);
+  }
+
+  /// True when [landPackedRgba8] is the only way to consume this texture, so a
+  /// failed land must NOT fall back to [setOnShader]. See
+  /// [PlatformVideoTexture.requiresExternalLanding].
+  bool get requiresExternalLanding => _platformTex!.requiresExternalLanding;
+
+  /// Land this texture into [dst] as packed RGBA8 (`array<u32>`, row-major),
+  /// returning false when this platform drives textures the ordinary way
+  /// ([setOnShader]) instead. See [PlatformVideoTexture.landPackedRgba8].
+  bool landPackedRgba8(
+    Buffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) {
+    final pb = dst.platformBuffer;
+    if (pb == null) return false;
+    return _platformTex!.landPackedRgba8(
+      pb,
+      width: width,
+      height: height,
+      downscale: downscale,
+    );
   }
 
   /// Convert to an RGBA8 [Buffer] via an internal compute pass.

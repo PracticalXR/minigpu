@@ -5,6 +5,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 
 import 'exceptions.dart';
@@ -28,6 +29,10 @@ class MinigpuPreviewController extends ChangeNotifier {
   int? _textureId;
   Size _size = Size.zero;
   bool _disposed = false;
+  bool _registrationAttempted = false;
+  bool _notificationPending = false;
+  final _pending = <Future<void>>{};
+  Future<void>? _clearing, _disposing;
 
   final StreamController<int> _presentedAtUs = StreamController.broadcast();
 
@@ -52,20 +57,38 @@ class MinigpuPreviewController extends ChangeNotifier {
   /// texture registry. May throw [UnsupportedPreviewException] on
   /// platforms whose surface API isn't yet wired, or
   /// [PreviewPresentException] when the host rejects the handle.
-  Future<void> present(PreviewSource source) async {
-    if (_disposed) {
-      throw StateError('MinigpuPreviewController used after dispose()');
+  Future<void> present(PreviewSource source) {
+    if (_disposed || _clearing != null) {
+      return Future.error(StateError('Preview controller is retiring'));
     }
+    final done = Completer<void>();
+    _pending.add(done.future);
+    () async {
+      try {
+        await _present(source);
+        done.complete();
+      } catch (error, stack) {
+        done.completeError(error, stack);
+      } finally {
+        _pending.remove(done.future);
+      }
+    }();
+    return done.future;
+  }
+
+  Future<void> _present(PreviewSource source) async {
     final args = <String, Object?>{
       'instanceId': _instanceId,
       'kind': source.kind.name,
       ...source.toChannelMessage(),
     };
     try {
+      _registrationAttempted = true;
       final result = await _channel.invokeMapMethod<String, Object?>(
         'present',
         args,
       );
+      if (_disposed || _clearing != null) return;
       if (result == null) {
         throw const PreviewPresentException('host returned null');
       }
@@ -87,7 +110,7 @@ class MinigpuPreviewController extends ChangeNotifier {
       if (ts != null && !_presentedAtUs.isClosed) {
         _presentedAtUs.add(ts);
       }
-      if (changed) notifyListeners();
+      if (changed) _notifyViewChanged();
     } on MissingPluginException catch (e) {
       throw UnsupportedPreviewException(
         'minigpu_view plugin not registered for this platform: ${e.message}',
@@ -100,20 +123,79 @@ class MinigpuPreviewController extends ChangeNotifier {
     }
   }
 
-  @override
-  Future<void> dispose() async {
-    if (_disposed) return;
-    _disposed = true;
-    super.dispose();
-    await _presentedAtUs.close();
-    if (_textureId != null) {
+  /// Hide immediately, then retire the registered surface after any host
+  /// requests already in flight. The same controller can present again later.
+  Future<void> clear() {
+    if (_disposed) return _disposing ?? Future<void>.value();
+    final pending = _clearing;
+    if (pending != null) return pending;
+    final done = Completer<void>();
+    _clearing = done.future;
+    _textureId = null;
+    _size = Size.zero;
+    _notifyViewChanged();
+    () async {
       try {
-        await _channel.invokeMethod<void>('dispose', {
-          'instanceId': _instanceId,
-        });
-      } catch (_) {
-        // Plugin may already be torn down — swallow.
+        await _releaseRegistration();
+        done.complete();
+      } catch (error, stack) {
+        done.completeError(error, stack);
+      } finally {
+        _clearing = null;
       }
+    }();
+    return done.future;
+  }
+
+  void _notifyViewChanged() {
+    if (_disposed || _notificationPending) return;
+    final scheduler = SchedulerBinding.instance;
+    if (scheduler.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      // Retirement can be triggered by a new view during build. State and
+      // platform retirement change immediately; only widget notification waits.
+      _notificationPending = true;
+      scheduler.addPostFrameCallback((_) {
+        _notificationPending = false;
+        if (!_disposed) notifyListeners();
+      });
+    } else {
+      notifyListeners();
     }
+  }
+
+  Future<void> _releaseRegistration() async {
+    // A failed request can still have registered a host texture. Unregister by
+    // instance even when no successful response provided a texture id.
+    await Future.wait([
+      for (final work in _pending.toList())
+        work.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+    ]);
+    if (!_registrationAttempted) return;
+    await _channel.invokeMethod<void>('dispose', {'instanceId': _instanceId});
+    _registrationAttempted = false;
+  }
+
+  @override
+  Future<void> dispose() {
+    final pending = _disposing;
+    if (pending != null) return pending;
+    _disposed = true;
+    _textureId = null;
+    _size = Size.zero;
+    super.dispose();
+    // Paused listeners must not hold GPU registration teardown indefinitely.
+    _presentedAtUs.close().ignore();
+    final done = Completer<void>();
+    _disposing = done.future;
+    () async {
+      try {
+        await _clearing;
+        await _releaseRegistration();
+        done.complete();
+      } catch (error, stack) {
+        done.completeError(error, stack);
+      }
+    }();
+    return done.future;
   }
 }
