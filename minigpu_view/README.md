@@ -31,6 +31,13 @@ On **Windows** the plugin registers a `kFlutterDesktopGpuSurfaceTypeDxgiSharedHa
 
 On **Web** the plugin registers a WebGPU canvas element as an `HtmlElementView`.
 
+GPU-buffer previews accept tightly packed `rgba8` (one little-endian `u32` per
+pixel) and `rgba32float` (four `f32` values per pixel). The producer buffer needs
+storage usage and must belong to the same WebGPU device as the canvas. A direct
+render pass reads its pixels without row padding, intermediate textures or CPU
+readback. The sink caches its pipelines and a 16-byte size uniform; dispose the
+preview controller to release that uniform and the canvas.
+
 ## Installation
 
 ```yaml

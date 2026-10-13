@@ -1,8 +1,126 @@
+import 'dart:async';
+
 import 'package:minigpu/src/buffer.dart';
 import 'package:minigpu/src/compute_shader.dart';
+import 'package:minigpu/src/gpu_texture.dart';
+import 'package:minigpu/src/render_pipeline.dart';
 import 'package:minigpu/src/shared_output_texture.dart';
 import 'package:minigpu/src/video_texture.dart';
+import 'package:minigpu/src/resource_retirement.dart';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
+
+part 'device_coordinator.dart';
+part 'device_recovery.dart';
+
+/// Monotonic resource lifecycle counters for one [Minigpu] wrapper.
+///
+/// Created and retired totals never reset when the device is reopened, so a
+/// create-and-retire cycle remains visible even when every live count returns
+/// to its earlier value. The counters describe wrapper allocations, not driver
+/// heap bytes or memory pressure.
+final class GpuResourceAllocationSnapshot {
+  const GpuResourceAllocationSnapshot({
+    required this.buffersCreated,
+    required this.buffersRetired,
+    required this.buffersLive,
+    required this.texturesCreated,
+    required this.texturesRetired,
+    required this.texturesLive,
+    required this.textureViewsCreated,
+    required this.textureViewsRetired,
+    required this.textureViewsLive,
+    required this.samplersCreated,
+    required this.samplersRetired,
+    required this.samplersLive,
+    required this.computeShadersCreated,
+    required this.computeShadersRetired,
+    required this.computeShadersLive,
+    required this.renderPipelinesCreated,
+    required this.renderPipelinesRetired,
+    required this.renderPipelinesLive,
+  });
+
+  final int buffersCreated, buffersRetired, buffersLive;
+  final int texturesCreated, texturesRetired, texturesLive;
+  final int textureViewsCreated, textureViewsRetired, textureViewsLive;
+  final int samplersCreated, samplersRetired, samplersLive;
+  final int computeShadersCreated, computeShadersRetired, computeShadersLive;
+  final int renderPipelinesCreated, renderPipelinesRetired, renderPipelinesLive;
+
+  int get totalCreated =>
+      buffersCreated +
+      texturesCreated +
+      textureViewsCreated +
+      samplersCreated +
+      computeShadersCreated +
+      renderPipelinesCreated;
+
+  int get totalRetired =>
+      buffersRetired +
+      texturesRetired +
+      textureViewsRetired +
+      samplersRetired +
+      computeShadersRetired +
+      renderPipelinesRetired;
+
+  Map<String, Object> toJson() => {
+    'buffers': _resourceJson(buffersCreated, buffersRetired, buffersLive),
+    'textures': _resourceJson(texturesCreated, texturesRetired, texturesLive),
+    'texture_views': _resourceJson(
+      textureViewsCreated,
+      textureViewsRetired,
+      textureViewsLive,
+    ),
+    'samplers': _resourceJson(samplersCreated, samplersRetired, samplersLive),
+    'compute_shaders': _resourceJson(
+      computeShadersCreated,
+      computeShadersRetired,
+      computeShadersLive,
+    ),
+    'render_pipelines': _resourceJson(
+      renderPipelinesCreated,
+      renderPipelinesRetired,
+      renderPipelinesLive,
+    ),
+    'total_created': totalCreated,
+    'total_retired': totalRetired,
+  };
+
+  static Map<String, int> _resourceJson(int created, int retired, int live) => {
+    'created': created,
+    'retired': retired,
+    'live': live,
+  };
+}
+
+/// Buffer limits captured from one current GPU device generation.
+final class GpuDeviceBufferLimitsSnapshot {
+  const GpuDeviceBufferLimitsSnapshot({
+    required this.deviceEpoch,
+    required this.maxBufferSize,
+    required this.maxStorageBufferBindingSize,
+  });
+
+  final int deviceEpoch;
+  final int maxBufferSize;
+  final int maxStorageBufferBindingSize;
+}
+
+/// Texture limits captured from this wrapper's current device epoch.
+final class GpuDeviceTextureLimitsSnapshot {
+  const GpuDeviceTextureLimitsSnapshot({
+    required this.deviceEpoch,
+    required this.maxTextureDimension2D,
+    required this.maxTextureArrayLayers,
+    required this.supportsRegionWrite,
+  });
+
+  final int deviceEpoch, maxTextureDimension2D, maxTextureArrayLayers;
+  final bool supportsRegionWrite;
+}
+
+/// Resource cleanup evidence. Aborted device work cannot be used as a frame.
+enum GpuWorkRetirement { completed, deviceAborted }
 
 /// Controls the initialization and destruction of the minigpu context.
 ///
@@ -29,22 +147,147 @@ final class Minigpu {
   /// instances must never be mixed in one dispatch.  Throws
   /// [UnsupportedError] on platforms without multi-adapter support (web).
   factory Minigpu.forAdapter(String adapterFilter) {
-    final platform =
-        MinigpuPlatform.instance.createSecondaryPlatform(adapterFilter);
+    final platform = MinigpuPlatform.instance.createSecondaryPlatform(
+      adapterFilter,
+    );
     if (platform == null) {
       throw UnsupportedError(
-          'Multi-adapter contexts are not supported on this platform');
+        'Multi-adapter contexts are not supported on this platform',
+      );
     }
     return Minigpu._withPlatform(platform);
   }
+
+  /// Creates an independent wrapper around an embedder-supplied platform.
+  ///
+  /// Constructing it does not create a device. Its [init] and [destroy] use
+  /// the same attachment and resource-lifetime contract as other wrappers.
+  factory Minigpu.withPlatform(MinigpuPlatform platform) =>
+      Minigpu._withPlatform(platform);
 
   Minigpu._withPlatform(this._platform);
 
   static final Minigpu _instance = Minigpu._();
 
   final MinigpuPlatform _platform;
+  GpuDeviceCoordinator? _coordinator;
+
+  /// Trusted lifetime ownership for this wrapper, including external readers.
+  GpuDeviceCoordinator get deviceCoordinator =>
+      _coordinator ??= GpuDeviceCoordinator._(this);
   bool isInitialized = false;
+  int _deviceEpoch = 0;
+
+  /// Increments after each successful device initialization. Shader warm
+  /// residency must be scoped to this epoch, not only to source text.
+  int get deviceEpoch => _deviceEpoch;
+  GpuDeviceBufferLimitsSnapshot? _currentDeviceBufferLimits;
+  int? _expectedPlatformDeviceGeneration;
+  bool _deviceInvalidated = false;
+  DeviceAdapterIdentity? _creationAdapterIdentity;
+  DeviceRecoveryTarget? _creationRecoveryTarget;
+  _GpuDeviceRecovery? _recovery;
+  bool _recoveryDetach = false;
+  final _recoveryListeners = <Object, void Function(GpuRecoverySnapshot)>{};
+  void Function(int deviceEpoch)? _deviceLostCallback;
+  final _deviceLostListeners = <Object, void Function(int)>{};
+
+  /// The exact limits of this wrapper's current device, or null when the
+  /// device is unavailable, lost, retiring, or cannot be queried safely.
+  /// A previously returned snapshot must be discarded after its epoch ends.
+  GpuDeviceBufferLimitsSnapshot? get currentDeviceBufferLimits {
+    if (!isInitialized || _closing || _deviceInvalidated) return null;
+    final limits = _platform.currentDeviceBufferLimits;
+    if (limits == null ||
+        limits.deviceGeneration != _expectedPlatformDeviceGeneration) {
+      if (_expectedPlatformDeviceGeneration != null) {
+        _onPlatformDeviceLost(_deviceEpoch);
+      }
+      return null;
+    }
+    final old = _currentDeviceBufferLimits;
+    if (old != null && old.deviceEpoch == _deviceEpoch &&
+        old.maxBufferSize == limits.maxBufferSize &&
+        old.maxStorageBufferBindingSize == limits.maxStorageBufferBindingSize) {
+      return old;
+    }
+    return _currentDeviceBufferLimits = GpuDeviceBufferLimitsSnapshot(
+      deviceEpoch: _deviceEpoch,
+      maxBufferSize: limits.maxBufferSize,
+      maxStorageBufferBindingSize: limits.maxStorageBufferBindingSize,
+    );
+  }
+
+  /// True only when this backend can verify the current device and limits.
+  bool get isDeviceCurrent => currentDeviceBufferLimits != null;
+
+  GpuDeviceTextureLimitsSnapshot? get currentDeviceTextureLimits {
+    if (!isDeviceCurrent) return null;
+    final limits = _platform.currentDeviceTextureLimits;
+    if (limits == null ||
+        limits.deviceGeneration != _expectedPlatformDeviceGeneration ||
+        limits.maxTextureDimension2D < 1 ||
+        limits.maxTextureArrayLayers < 1) return null;
+    return GpuDeviceTextureLimitsSnapshot(
+      deviceEpoch: _deviceEpoch,
+      maxTextureDimension2D: limits.maxTextureDimension2D,
+      maxTextureArrayLayers: limits.maxTextureArrayLayers,
+      supportsRegionWrite: limits.supportsRegionWrite,
+    );
+  }
+
+  /// Installs a callback for observed loss of this wrapper's current device.
+  /// Native loss is detected by a subsequent limits/status query; web listens
+  /// to the owned GPUDevice.lost promise. Replacing the callback is supported.
+  void setDeviceLostCallback(void Function(int deviceEpoch)? callback) {
+    _deviceLostCallback = callback;
+  }
+
+  /// Observes device loss without replacing another consumer's callback.
+  ///
+  /// Notification is synchronous and once per lost epoch, so publications can
+  /// be fenced before another frame is submitted. Each subscription is owned
+  /// independently; the returned removal is idempotent. Listeners added during
+  /// a notification start with the next loss. This does not replay a past loss:
+  /// callers must still check [isDeviceCurrent] before using device resources.
+  /// Listeners survive explicit teardown/reinitialization until removed.
+  void Function() onDeviceLost(void Function(int deviceEpoch) listener) {
+    final token = Object();
+    _deviceLostListeners[token] = listener;
+    return () => _deviceLostListeners.remove(token);
+  }
+
+  void _onPlatformDeviceLost(int epoch) {
+    if (_closing || !isInitialized || _deviceInvalidated ||
+        epoch != _deviceEpoch) return;
+    _deviceInvalidated = true;
+    _currentDeviceBufferLimits = null;
+    _coordinator?.drain().ignore();
+    // One faulty observer must not prevent other consumers from fencing their
+    // handles. Report errors only after every still-subscribed observer ran.
+    final failures = <(Object, StackTrace)>[];
+    void notify(void Function(int) callback) {
+      try {
+        callback(epoch);
+      } catch (error, stack) {
+        failures.add((error, stack));
+      }
+    }
+    final listeners = _deviceLostListeners.entries.toList(growable: false);
+    final legacy = _deviceLostCallback;
+    if (legacy != null) notify(legacy);
+    for (final entry in listeners) {
+      if (_deviceLostListeners.containsKey(entry.key)) notify(entry.value);
+    }
+    for (final (error, stack) in failures) {
+      scheduleMicrotask(() => Error.throwWithStackTrace(error, stack));
+    }
+  }
   Future<void>? _initializing;
+  Future<void>? _retiring;
+  Future<void>? _lostWorkRetirement;
+  Future<void>? _contextRetirement;
+  bool _closing = false;
 
   // Internal shader cache: code hash -> shader
   // Live allocation counters — incremented on createBuffer/createComputeShader
@@ -53,14 +296,28 @@ final class Minigpu {
   // in tests to catch per-frame allocation leaks without needing DXGI/VRAM
   // measurement (which only detects leaks after the D3D12 pool grows past its
   // high-water mark).
-  int _liveBufferCount = 0;
   int _liveShaderCount = 0;
+  int _bufferCreateCount = 0, _bufferRetireCount = 0;
+  int _textureCreateCount = 0, _textureRetireCount = 0;
+  int _textureViewCreateCount = 0, _textureViewRetireCount = 0;
+  int _samplerCreateCount = 0, _samplerRetireCount = 0;
+  int _shaderCreateCount = 0, _shaderRetireCount = 0;
+  int _renderPipelineCreateCount = 0, _renderPipelineRetireCount = 0;
+
+  final Map<WeakReference<Buffer>, GpuResourceRetirement> _liveBuffers = {};
+  final Map<WeakReference<GpuTexture>, GpuResourceRetirement> _liveTextures =
+      {};
+  final Map<WeakReference<GpuTextureView>, GpuResourceRetirement>
+  _liveTextureViews = {};
+  final Map<WeakReference<GpuSampler>, GpuResourceRetirement> _liveSamplers =
+      {};
 
   // Tracks all live shaders so they can be bulk-destroyed between test groups.
   // Dawn/D3D12 silently fails dispatch when too many compute pipelines are
   // active simultaneously. Destroying old shaders between tests (not during
   // active GPU work) is safe and frees D3D12 resources.
   final List<ComputeShader> _liveShaders = [];
+  final List<GpuRenderPipeline> _liveRenderPipelines = [];
 
   /// Number of GPU buffers currently alive (created but not yet destroyed).
   ///
@@ -72,10 +329,42 @@ final class Minigpu {
   /// await stage.process(inputs);   // run one frame
   /// expect(gpu.liveBufferCount, equals(before)); // must not grow
   /// ```
-  int get liveBufferCount => _liveBufferCount;
+  int get liveBufferCount {
+    return _liveBuffers.length;
+  }
+
+  /// Whether this device context created a still-live buffer. This proves
+  /// device provenance only; callers must separately check access authority.
+  bool ownsBuffer(Buffer buffer) =>
+      isInitialized &&
+      buffer.isValid &&
+      _liveBuffers.keys.any((reference) => identical(reference.target, buffer));
 
   /// Number of [ComputeShader]s currently alive (created but not yet destroyed).
   int get liveShaderCount => _liveShaderCount;
+
+  /// Resource lifecycle counters for residency diagnostics and focused tests.
+  GpuResourceAllocationSnapshot get resourceAllocationSnapshot =>
+      GpuResourceAllocationSnapshot(
+        buffersCreated: _bufferCreateCount,
+        buffersRetired: _bufferRetireCount,
+        buffersLive: _liveBuffers.length,
+        texturesCreated: _textureCreateCount,
+        texturesRetired: _textureRetireCount,
+        texturesLive: _liveTextures.length,
+        textureViewsCreated: _textureViewCreateCount,
+        textureViewsRetired: _textureViewRetireCount,
+        textureViewsLive: _liveTextureViews.length,
+        samplersCreated: _samplerCreateCount,
+        samplersRetired: _samplerRetireCount,
+        samplersLive: _liveSamplers.length,
+        computeShadersCreated: _shaderCreateCount,
+        computeShadersRetired: _shaderRetireCount,
+        computeShadersLive: _liveShaderCount,
+        renderPipelinesCreated: _renderPipelineCreateCount,
+        renderPipelinesRetired: _renderPipelineRetireCount,
+        renderPipelinesLive: _liveRenderPipelines.length,
+      );
 
   /// Initializes the minigpu context.
   ///
@@ -84,16 +373,63 @@ final class Minigpu {
   /// startup (tests + Tensor.create's DefaultMinigpu).  A second native
   /// init used to tear the live context down; now late callers simply await
   /// the in-flight initialization.
-  Future<void> init() {
+  Future<void> init() async {
+    final recovery = _recovery;
+    if (recovery != null && (recovery.pending || recovery.failed)) {
+      await recovery.done.future;
+      return;
+    }
+    final phase = _coordinator?.snapshot.phase;
+    if (phase == GpuDeviceDrainPhase.draining ||
+        phase == GpuDeviceDrainPhase.quarantined) {
+      throw StateError('GPU device owners have not retired');
+    }
+    final retiring = _retiring;
+    if (retiring != null) {
+      await retiring;
+      if (identical(_retiring, retiring)) _retiring = null;
+    }
     if (isInitialized) return Future.value();
-    return _initializing ??= () async {
-      try {
+    final initializing = _initializing;
+    if (initializing != null) return initializing;
+    final completer = Completer<void>();
+    _initializing = completer.future;
+    _completeInitialization(completer).ignore();
+    return completer.future;
+  }
+
+  Future<void> _completeInitialization(Completer<void> completer,
+      {DeviceRecoveryTarget? recoveryTarget}) async {
+    try {
+      final nextEpoch = _deviceEpoch + 1;
+      _platform.setDeviceLostCallback(() => _onPlatformDeviceLost(nextEpoch));
+      if (recoveryTarget == null) {
         await _platform.initializeContext();
+      } else {
+        await _platform.initializeContextForReplacement(recoveryTarget);
+      }
+      if (!_closing) {
         isInitialized = true;
-      } finally {
+        _deviceEpoch++;
+        _lostWorkRetirement = null;
+        _contextRetirement = null;
+        _coordinator?._initialized(_deviceEpoch);
+        _currentDeviceBufferLimits = null;
+        _deviceInvalidated = false;
+        _expectedPlatformDeviceGeneration =
+            _platform.currentDeviceBufferLimits?.deviceGeneration;
+        _creationAdapterIdentity = _platform.creationAdapterIdentity;
+        _creationRecoveryTarget = _platform.creationRecoveryTarget;
+      }
+      completer.complete();
+    } catch (error, stackTrace) {
+      _platform.setDeviceLostCallback(null);
+      completer.completeError(error, stackTrace);
+    } finally {
+      if (identical(_initializing, completer.future)) {
         _initializing = null;
       }
-    }();
+    }
   }
 
   /// One small buffer per context that lives as long as the context does.
@@ -105,17 +441,123 @@ final class Minigpu {
   Buffer get rebindSentinel =>
       _rebindSentinel ??= createBuffer(16, BufferDataType.uint32);
 
-  /// Destroys the minigpu context.
-  Future<void> destroy() async {
-    if (!isInitialized) throw MinigpuNotInitializedError();
+  /// Destroys the minigpu context and all owned buffer and shader wrappers.
+  Future<void> destroy() {
+    final recovery = _recovery;
+    if (!_recoveryDetach && recovery != null &&
+        (recovery.pending || (recovery.failed && !isInitialized) ||
+         (recovery.snapshot.phase == GpuRecoveryPhase.cancelled &&
+          !isInitialized && _initializing == null))) {
+      return recovery.cancelAndDrain();
+    }
+    final retiring = _retiring;
+    if (retiring != null) return retiring;
+    if (!isInitialized && _initializing == null) {
+      return Future<void>.error(MinigpuNotInitializedError());
+    }
 
-    _copyShader?.destroy();
+    final completer = Completer<void>();
+    _retiring = completer.future;
+    _retire(completer);
+    return completer.future;
+  }
+
+  Future<void> _retire(Completer<void> completer) async {
+    // External presenters and imported source borrows are not in _liveBuffers.
+    // Keep the old context intact when their actual retirement is unconfirmed.
+    try {
+      final coordinator = deviceCoordinator;
+      final hasOwners = coordinator._owners.isNotEmpty;
+      final draining = coordinator.drain();
+      if (hasOwners) await draining;
+    } catch (error, stack) {
+      completer.completeError(error, stack);
+      return;
+    }
+    _closing = true;
+    _currentDeviceBufferLimits = null;
+    _expectedPlatformDeviceGeneration = null;
+    _deviceInvalidated = true;
+    _platform.setDeviceLostCallback(null);
+    Object? failure;
+    StackTrace? failureStack;
+    void recordFailure(Object error, StackTrace stackTrace) {
+      failure ??= error;
+      failureStack ??= stackTrace;
+    }
+
+    final initializing = _initializing;
+    if (initializing != null) {
+      try {
+        await initializing;
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
+
+    final shaders = List<ComputeShader>.from(_liveShaders);
+    final copyShader = _copyShader;
     _copyShader = null;
-    _rebindSentinel?.destroy();
-    _rebindSentinel = null;
+    if (copyShader != null && !shaders.contains(copyShader)) {
+      shaders.add(copyShader);
+    }
+    for (final shader in shaders) {
+      try {
+        shader.destroy();
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
 
-    await _platform.destroyContext();
-    isInitialized = false;
+    for (final pipeline in List<GpuRenderPipeline>.from(_liveRenderPipelines)) {
+      try {
+        pipeline.destroy();
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
+
+    _retireResources(
+      _liveTextureViews,
+      (view) => view.destroy(),
+      recordFailure,
+    );
+    _retireResources(
+      _liveTextures,
+      (texture) => texture.destroy(),
+      recordFailure,
+    );
+    _retireResources(
+      _liveSamplers,
+      (sampler) => sampler.destroy(),
+      recordFailure,
+    );
+
+    final sentinel = _rebindSentinel;
+    _rebindSentinel = null;
+    _retireResources(_liveBuffers, (buffer) => buffer.destroy(), recordFailure);
+    if (sentinel != null && !sentinel.retirement.isRetired) {
+      try {
+        sentinel.destroy();
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
+
+    try {
+      await _platform.destroyContext();
+    } catch (error, stackTrace) {
+      recordFailure(error, stackTrace);
+    } finally {
+      isInitialized = false;
+      _closing = false;
+    }
+
+    if (failure != null) {
+      completer.completeError(failure!, failureStack);
+    } else {
+      completer.complete();
+    }
   }
 
   /// Install a log callback for the native minigpu/Dawn layer.
@@ -263,10 +705,167 @@ final class Minigpu {
   /// No-op on web and on a native binary predating the export.
   static void drainWorkQueue() => MinigpuPlatform.instance.drainWorkQueue();
 
+  /// Waits for work submitted before this call to complete on this instance's
+  /// device queue.
+  ///
+  /// Unlike [drainWorkQueue], this is a GPU completion point: it flushes
+  /// pending fire-and-forget batches and completes only after the queue has
+  /// retired them. This is the boundary for releasing resources used by an
+  /// already-submitted frame.
+  Future<void> waitForSubmittedWork() async {
+    if (!isInitialized) throw MinigpuNotInitializedError();
+    final epoch = _deviceEpoch;
+    bool current() => isInitialized && !_closing && !_deviceInvalidated &&
+        (_expectedPlatformDeviceGeneration == null || isDeviceCurrent);
+    // Older backends without limit discovery still provide their own queue
+    // fence. When discovery is supported, also detect silent native replacement.
+    if (!current()) throw StateError('GPU completion device is unavailable');
+    await _platform.waitForSubmittedWork();
+    if (_deviceEpoch != epoch || !current()) {
+      throw StateError('GPU completion belongs to a retired device');
+    }
+  }
+
+  /// Waits until this epoch's submitted GPU accesses have ended. Unlike
+  /// [waitForSubmittedWork], a positive native device-abortion receipt may
+  /// retire resources after observed loss. Use only for GPU resource cleanup,
+  /// never frame readiness, presentation, external readers or worker shutdown.
+  /// Failed/unsupported retirement remains failed; it does not reset owners.
+  Future<GpuWorkRetirement> retireSubmittedWork({required int deviceEpoch}) async {
+    void checkEpoch() {
+      if (!isInitialized || _deviceEpoch != deviceEpoch) {
+        throw StateError('GPU resource retirement belongs to another epoch');
+      }
+    }
+    checkEpoch();
+    try {
+      await waitForSubmittedWork();
+      return GpuWorkRetirement.completed;
+    } catch (_) {
+      checkEpoch();
+      // A plain queue/validation failure on a healthy device is not authority
+      // to destroy it. The current-device query also delivers observed loss.
+      if (!_deviceInvalidated) isDeviceCurrent;
+      final generation = _expectedPlatformDeviceGeneration;
+      if (!_deviceInvalidated || generation == null) rethrow;
+      final retired = _lostWorkRetirement ??= Future<void>.sync(
+        () => _platform.retireLostDevice(deviceGeneration: generation),
+      );
+      await retired;
+      checkEpoch();
+      return GpuWorkRetirement.deviceAborted;
+    }
+  }
+
+  /// Observe final backend context teardown without retaining another owner.
+  /// Register while attached, then retain this future across [destroy]. It
+  /// joins all module/native attachments to this exact generation, including workers
+  /// and exports. It neither stops them nor authorizes replacement/admission.
+  ///
+  /// Only the root recovery host should await this after local owners detach;
+  /// waiting inside a worker Stop that the root is joining would deadlock.
+  /// Failure remains failure. Backends without a final receipt refuse it.
+  Future<void> observeContextRetirement({required int deviceEpoch}) {
+    if (deviceEpoch != _deviceEpoch) {
+      return Future.error(StateError('Context retirement belongs to another epoch'));
+    }
+    final existing = _contextRetirement;
+    if (existing != null) return existing;
+    final generation = _expectedPlatformDeviceGeneration;
+    if (!isInitialized || _closing || generation == null) {
+      return Future.error(StateError('Context retirement must be observed before detach'));
+    }
+    final result = _contextRetirement = Future<void>.sync(
+      () => _platform.observeContextRetirement(deviceGeneration: generation),
+    );
+    // Observation may fail before the host has finished joining local owners.
+    // Awaiting the retained future still reports that failure.
+    result.ignore();
+    return result;
+  }
+
+  /// Local physical adapter/backend identity captured at initialization.
+  /// Unsupported platforms return null; names are never identity evidence.
+  DeviceAdapterIdentity? get adapterIdentity => _creationAdapterIdentity;
+
+  /// Exact host-local recovery scope. Browser targets promise compatible
+  /// capabilities on a browser-selected device, not the same physical adapter.
+  DeviceRecoveryTarget? get recoveryTarget => _creationRecoveryTarget;
+
+  GpuRecoverySnapshot get recoveryStatus => _recovery?.snapshot ??
+      GpuRecoverySnapshot(GpuRecoveryPhase.idle, deviceEpoch: _deviceEpoch);
+
+  /// Observes host recovery without granting authority to reset a device.
+  /// Listeners run after every consumer has been fenced on loss. They must
+  /// recheck their own mount, release, audience and source grants on recovery.
+  void Function() onRecoveryChanged(void Function(GpuRecoverySnapshot) listener) {
+    final token = Object();
+    _recoveryListeners[token] = listener;
+    return () => _recoveryListeners.remove(token);
+  }
+
+  /// Trusted root operation, not a per-fixture retry. Joins every registered
+  /// consumer and final context before replacing the original recovery target:
+  /// the same native physical adapter, or a capability-compatible browser device.
+  /// Never restarts capture or changes simulation authority.
+  /// Repeated calls for this lost epoch share the same outcome; failures remain
+  /// retained. Unsupported platforms and healthy/stale devices refuse.
+  Future<int> recoverLostDevice({required int deviceEpoch}) {
+    final previous = _recovery;
+    if (previous != null && previous.epoch == deviceEpoch) return previous.done.future;
+    if (previous != null && (previous.pending || previous.failed)) {
+      return Future.error(StateError('Previous GPU recovery has not succeeded'));
+    }
+    if (deviceEpoch != _deviceEpoch || !isInitialized || isDeviceCurrent) {
+      return Future.error(StateError('Recovery requires the current lost device'));
+    }
+    final operation = _recovery = _GpuDeviceRecovery(
+      this, deviceEpoch, _creationRecoveryTarget,
+    );
+    operation.start();
+    return operation.done.future;
+  }
+
+  /// Explicit root retry of a conclusively discarded replacement. Ordinary
+  /// [init] and [recoverLostDevice] retain failures. The epoch and failed
+  /// attempt fence stale UI actions; concurrent requests for the same attempt
+  /// share one result. No reader, worker or context retirement is skipped.
+  Future<int> retryLostDevice({
+    required int deviceEpoch,
+    required int failedAttempt,
+  }) {
+    final previous = _recovery;
+    if (previous == null || previous.epoch != deviceEpoch) {
+      return Future.error(StateError('GPU retry refers to a stale device'));
+    }
+    // Joining an already accepted retry is safe even after its completion.
+    if (previous.attempt > 1 && previous.attempt == failedAttempt + 1) {
+      return previous.done.future;
+    }
+    if (previous.pending || previous.attempt != failedAttempt ||
+        !previous.snapshot.canRetry || previous.cancelled ||
+        deviceEpoch != _deviceEpoch || isInitialized || _initializing != null) {
+      return Future.error(StateError('GPU replacement retirement is unconfirmed'));
+    }
+    final operation = _recovery = _GpuDeviceRecovery.retry(previous);
+    operation.start();
+    return operation.done.future;
+  }
+
   /// Name of the adapter THIS instance selected — meaningful for
   /// [Minigpu.forAdapter] contexts, where the process-global
   /// [selectedAdapterName] refers to the default context.
   String? get adapterName => _platform.selectedAdapterName;
+
+  /// Borrow this instance's backend for trusted host-native integration. The
+  /// host must not destroy the backend or bypass this instance's resource
+  /// lifetime. Native consumers retain their own exact context/device lease
+  /// inside the backend's synchronous start callback before moving work to a
+  /// thread. This is not an interface for shader/guest code or downloaded apps.
+  T withPlatformForHostInterop<T>(T Function(MinigpuPlatform) borrow) {
+    if (!isInitialized || _closing) throw MinigpuNotInitializedError();
+    return borrow(_platform);
+  }
 
   /// Enumerates hardware adapters with total/used dedicated VRAM (empty on
   /// platforms without adapter enumeration).  Static: this queries the OS,
@@ -278,30 +877,74 @@ final class Minigpu {
   /// teardown hooks where `await` is not available (e.g. inside
   /// [WidgetsBindingObserver.reassemble]).
   ///
-  /// The underlying C call (`mgpuDestroyContext`) is synchronous; the async
-  /// wrapper on [destroy] exists only for API consistency.  This method is
-  /// a no-op if the context is not initialized.
+  /// Begins the same teardown as [destroy] without waiting for completion.
+  ///
+  /// A following [init] waits for the pending teardown. Await [destroy] when
+  /// the caller needs its completion or cleanup error.
   void destroySync() {
-    if (!isInitialized) return;
-    _platform.destroyContext();
-    isInitialized = false;
+    if (!isInitialized && _initializing == null && _retiring == null &&
+        _recovery?.pending != true && _recovery?.snapshot.canRetry != true) return;
+    destroy().ignore();
   }
 
   /// Creates a compute shader.
   ComputeShader createComputeShader() {
+    _checkCanCreate();
     final platformShader = _platform.createComputeShader();
     final shader = CachedComputeShader(platformShader, this);
     _liveShaders.add(shader);
     _liveShaderCount++;
+    _shaderCreateCount++;
     return shader;
+  }
+
+  GpuTexture createTexture(TextureDescriptor descriptor) {
+    _checkCanCreate();
+    descriptor.validate();
+    return _registerTexture(_platform.createTexture(descriptor), descriptor);
+  }
+
+  GpuSampler createSampler(SamplerDescriptor descriptor) {
+    _checkCanCreate();
+    descriptor.validate();
+    return _registerSampler(_platform.createSampler(descriptor), descriptor);
+  }
+
+  Future<GpuRenderPipeline> createRenderPipeline(
+    RenderPipelineDescriptor descriptor,
+  ) async {
+    _checkCanCreate();
+    descriptor.validate();
+    late final GpuRenderPipeline pipeline;
+    pipeline = GpuRenderPipeline(
+      _platform.createRenderPipeline(descriptor),
+      descriptor,
+      () {
+        if (_liveRenderPipelines.remove(pipeline)) {
+          _renderPipelineRetireCount++;
+        }
+      },
+    );
+    _liveRenderPipelines.add(pipeline);
+    _renderPipelineCreateCount++;
+    try {
+      await pipeline.prepare();
+      if (!pipeline.isValid) throw StateError('Render pipeline was destroyed');
+      return pipeline;
+    } catch (_) {
+      pipeline.destroy();
+      rethrow;
+    }
   }
 
   /// Called by [ComputeShader.destroy] to decrement [liveShaderCount].
   // Accessed from compute_shader.dart (same package — library-private is fine).
   // ignore: use_setters_to_change_properties
   void onShaderDestroyed(ComputeShader shader) {
-    if (_liveShaderCount > 0) _liveShaderCount--;
-    _liveShaders.remove(shader);
+    if (_liveShaders.remove(shader) && _liveShaderCount > 0) {
+      _liveShaderCount--;
+      _shaderRetireCount++;
+    }
     if (identical(shader, _copyShader)) _copyShader = null;
   }
 
@@ -312,7 +955,6 @@ final class Minigpu {
   /// is pending.
   void destroyAllTrackedShaders() {
     final shaders = List<ComputeShader>.from(_liveShaders);
-    _liveShaders.clear();
     for (final shader in shaders) {
       try {
         shader.destroy();
@@ -322,18 +964,137 @@ final class Minigpu {
 
   /// Creates a buffer.
   Buffer createBuffer(int bufferSize, BufferDataType dataType) {
-    if (!isInitialized) throw MinigpuNotInitializedError();
+    _checkCanCreate();
 
     final platformBuffer = _platform.createBuffer(bufferSize, dataType);
-    final buff = Buffer(platformBuffer, _onBufferDestroyed);
-    _liveBufferCount++;
-    return buff;
+    return _registerBuffer(platformBuffer);
   }
 
-  /// Called by [Buffer.destroy] to decrement [liveBufferCount].
-  // ignore: use_setters_to_change_properties
-  void _onBufferDestroyed() {
-    if (_liveBufferCount > 0) _liveBufferCount--;
+  Buffer createBufferFromDescriptor(BufferDescriptor descriptor) {
+    _checkCanCreate();
+    descriptor.validate();
+    return _registerBuffer(
+      _platform.createBufferFromDescriptor(descriptor),
+      descriptor,
+    );
+  }
+
+  Buffer _registerBuffer(
+    PlatformBuffer platformBuffer, [
+    BufferDescriptor? descriptor,
+  ]) {
+    late final WeakReference<Buffer> registration;
+    final retirement = GpuResourceRetirement(platformBuffer.destroy, () {
+      if (_liveBuffers.remove(registration) != null) _bufferRetireCount++;
+    });
+    final buffer = Buffer(platformBuffer, null, descriptor, retirement);
+    registration = WeakReference(buffer);
+    _liveBuffers[registration] = retirement;
+    _bufferCreateCount++;
+    return buffer;
+  }
+
+  GpuTexture _registerTexture(
+    PlatformTexture platformTexture,
+    TextureDescriptor descriptor,
+  ) {
+    late final WeakReference<GpuTexture> registration;
+    final retirement = GpuResourceRetirement(platformTexture.destroy, () {
+      if (_liveTextures.remove(registration) != null) _textureRetireCount++;
+    });
+    final texture = GpuTexture(
+      platformTexture,
+      descriptor,
+      null,
+      _registerTextureView,
+      retirement,
+    );
+    registration = WeakReference(texture);
+    _liveTextures[registration] = retirement;
+    _textureOwnership[texture] = _deviceEpoch;
+    _textureCreateCount++;
+    return texture;
+  }
+
+  final _textureViewOwnership = Expando<bool>();
+  final _textureOwnership = Expando<int>();
+
+  /// Live texture created by this device epoch. This is not an audience grant.
+  bool ownsTexture(GpuTexture texture) => isDeviceCurrent && texture.isValid &&
+      _textureOwnership[texture] == _deviceEpoch;
+
+  /// Whether a live texture view was created by this device context. This is
+  /// process-local validation, not permission to consume another owner's data.
+  bool ownsTextureView(GpuTextureView view) =>
+      isInitialized && view.isValid && _textureViewOwnership[view] == true;
+
+  GpuTextureView _registerTextureView(
+    PlatformTextureView platformView,
+    GpuTexture texture,
+    TextureViewDescriptor descriptor,
+  ) {
+    late final WeakReference<GpuTextureView> registration;
+    final retirement = GpuResourceRetirement(platformView.destroy, () {
+      if (_liveTextureViews.remove(registration) != null) {
+        _textureViewRetireCount++;
+      }
+    });
+    final view = GpuTextureView(
+      platformView,
+      texture,
+      descriptor,
+      null,
+      retirement,
+    );
+    registration = WeakReference(view);
+    _liveTextureViews[registration] = retirement;
+    _textureViewCreateCount++;
+    _textureViewOwnership[view] = true;
+    return view;
+  }
+
+  GpuSampler _registerSampler(
+    PlatformSampler platformSampler,
+    SamplerDescriptor descriptor,
+  ) {
+    late final WeakReference<GpuSampler> registration;
+    final retirement = GpuResourceRetirement(platformSampler.destroy, () {
+      if (_liveSamplers.remove(registration) != null) _samplerRetireCount++;
+    });
+    final sampler = GpuSampler(platformSampler, descriptor, null, retirement);
+    registration = WeakReference(sampler);
+    _liveSamplers[registration] = retirement;
+    _samplerCreateCount++;
+    return sampler;
+  }
+
+  void _retireResources<T extends Object>(
+    Map<WeakReference<T>, GpuResourceRetirement> registrations,
+    void Function(T resource) destroy,
+    void Function(Object error, StackTrace stackTrace) recordFailure,
+  ) {
+    for (final entry
+        in List<MapEntry<WeakReference<T>, GpuResourceRetirement>>.from(
+          registrations.entries,
+        )) {
+      try {
+        final resource = entry.key.target;
+        if (resource == null) {
+          entry.value.retire();
+        } else {
+          destroy(resource);
+        }
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
+  }
+
+  void _checkCanCreate() {
+    if (!isInitialized || _closing) throw MinigpuNotInitializedError();
+    if (_deviceInvalidated || _coordinator?._accepting == false) {
+      throw StateError('GPU device is not accepting new resources');
+    }
   }
 
   /// Returns dedicated VRAM usage in bytes for the primary GPU (Windows D3D12
@@ -351,7 +1112,7 @@ final class Minigpu {
   /// Import an external video frame as a GPU texture.
   /// Returns null if unsupported or on failure.
   VideoTexture? importVideoFrame(ExternalVideoBuffer buf) {
-    if (!isInitialized) throw MinigpuNotInitializedError();
+    _checkCanCreate();
     final platformTex = _platform.importVideoFrame(buf);
     if (platformTex == null) return null;
     return VideoTexture(platformTex, this);
@@ -361,7 +1122,7 @@ final class Minigpu {
   /// hand-off to an external API (currently: Windows D3D12<->D3D11 via NT
   /// shared handle). Returns null if unsupported on this platform/backend.
   SharedOutputTexture? createSharedOutputTexture(int width, int height) {
-    if (!isInitialized) throw MinigpuNotInitializedError();
+    _checkCanCreate();
     final platformTex = _platform.createSharedOutputTexture(width, height);
     if (platformTex == null) return null;
     return SharedOutputTexture(platformTex, this);
@@ -372,7 +1133,7 @@ final class Minigpu {
   /// with Dawn's D3D12 backend.  Ownership is transferred to the caller —
   /// FFmpeg will call `Release()` when the AVHWDeviceContext is freed.
   int createD3D11DeviceOnDawnAdapter() {
-    if (!isInitialized) throw MinigpuNotInitializedError();
+    _checkCanCreate();
     return _platform.createD3D11DeviceOnDawnAdapter();
   }
 
@@ -412,6 +1173,18 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
     required int elementCount,
   }) async {
     if (!isInitialized) throw MinigpuNotInitializedError();
+    if (src.descriptor != null &&
+        src.descriptor!.usage & BufferUsage.storage == 0) {
+      throw UnsupportedError(
+        'Source buffer was not created with storage usage',
+      );
+    }
+    if (dst.descriptor != null &&
+        dst.descriptor!.usage & BufferUsage.storage == 0) {
+      throw UnsupportedError(
+        'Destination buffer was not created with storage usage',
+      );
+    }
 
     _copyShader ??= createComputeShader()..loadKernelString(_kCopyWgsl);
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "buffer.h"
+#include "minigpu_resources.h"
 #include "webgpu.h"
 #include <string>
 #include <vector>
@@ -21,8 +22,16 @@ struct BufferBinding {
 enum class BindingKind {
   kEmpty = 0,
   kStorageBuffer,
+  kReadOnlyStorageBuffer,
   kUniformBuffer,
   kTextureView,
+  kSampledTextureFloat,
+  kSampledTextureUnfilterable,
+  kDepthTexture,
+  kStorageTextureWriteOnly,
+  kFilteringSampler,
+  kNonFilteringSampler,
+  kComparisonSampler,
 };
 
 struct BindingEntry {
@@ -31,6 +40,11 @@ struct BindingEntry {
   size_t             size   = 0;
   size_t             offset = 0;
   WGPUTextureView    view   = nullptr;
+  WGPUSampler sampler = nullptr;
+  WGPUTextureViewDimension viewDimension = WGPUTextureViewDimension_Undefined;
+  WGPUTextureFormat textureFormat = WGPUTextureFormat_Undefined;
+  std::shared_ptr<OwnedTextureViewState> ownedTextureView;
+  std::shared_ptr<OwnedSamplerState> ownedSampler;
 };
 
 class ComputeShader {
@@ -52,8 +66,19 @@ public:
   // rebinding a shader between fire-and-forget dispatches (a plain setBuffer
   // mutates immediately and would race the still-queued earlier dispatch).
   void setBufferQueued(int tag, const Buffer &buffer);
+  void setBufferRangeQueued(int slot, WGPUBuffer buffer, size_t size,
+                            size_t offset, BindingKind kind);
+  void setOwnedTextureQueued(int slot,
+                             std::shared_ptr<OwnedTextureViewState> view,
+                             BindingKind kind);
+  void setOwnedSamplerQueued(int slot,
+                             std::shared_ptr<OwnedSamplerState> sampler,
+                             BindingKind kind);
   // Extended binding setters for video texture interop
   void setTextureView(int slot, WGPUTextureView view);
+  // Drop a completed input's cached view AND bind-group references, retaining
+  // its layout/pipeline so a later loan can bind without shader recompilation.
+  void releaseTextureBindingQueued(int slot);
   void setStorageBuffer(int slot, WGPUBuffer buf, size_t size, size_t offset);
   void setUniformBuffer(int slot, WGPUBuffer buf, size_t size);
 
@@ -70,6 +95,9 @@ public:
   // mgpuDestroyBuffer can delete immediately and this cannot.
   void destroyQueued();
 
+  MGPU &getMGPU() const { return mgpu; }
+  WGPUDevice getCreationDevice() const { return creationDevice; }
+
 private:
   MGPU &mgpu;
   std::string shaderCode;
@@ -82,6 +110,7 @@ private:
   WGPUPipelineLayout pipelineLayout = nullptr;
   WGPUComputePipeline computePipeline = nullptr;
   WGPUBindGroup bindGroup = nullptr;
+  WGPUDevice creationDevice = nullptr;
 
   // State tracking
   bool pipelineDirty = true;
@@ -91,6 +120,9 @@ private:
 
   // Helper methods
   void cleanup();
+  void applyBufferBinding(int slot, WGPUBuffer buffer, size_t size,
+                          size_t offset, BindingKind kind);
+  bool ownedBindingsAlive() const;
   size_t calculateBindingsHash() const;
   std::string kernelLabel() const;
   bool createShaderModule();

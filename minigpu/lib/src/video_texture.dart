@@ -30,9 +30,15 @@ final class VideoTexture {
   int get height => _platformTex!.height;
   ExternalPixelFormat get pixelFormat => _platformTex!.pixelFormat;
 
+  PlatformVideoTexture get platformTexture {
+    final texture = _platformTex;
+    if (!_isValid || texture == null) throw StateError('Video texture is destroyed');
+    return texture;
+  }
+
   /// Bind plane [planeIndex] to compute shader binding [slot].
   void setOnShader(ComputeShader shader, int slot, {int planeIndex = 0}) {
-    _platformTex!.setOnShader(shader.platformShader, slot, planeIndex);
+    shader.setVideoTexture(slot, this, planeIndex: planeIndex);
   }
 
   /// True when [landPackedRgba8] is the only way to consume this texture, so a

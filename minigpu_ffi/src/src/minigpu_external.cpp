@@ -500,7 +500,10 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     // Query the descriptor so we know dimensions / format.
     WGPUSharedTextureMemoryProperties props{};
     props.nextInChain = nullptr;
-    wgpuSharedTextureMemoryGetProperties(mem, &props);
+    if (wgpuSharedTextureMemoryGetProperties(mem, &props) != WGPUStatus_Success) {
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     WGPUTextureDescriptor td{};
     td.usage = WGPUTextureUsage_TextureBinding;
@@ -520,7 +523,11 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true; // producer (CopyResource) already wrote
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc) != WGPUStatus_Success) {
+        wgpuTextureRelease(texture);
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
@@ -745,6 +752,17 @@ static bool dawn_is_d3d12() {
     WGPUDevice dev = get_device();
     if (!dev) return false;
     return dawn::native::d3d12::GetD3D12Device(dev) != nullptr;
+}
+
+// Dawn's backend-specific GetD3D11Device helper casts without a backend check.
+// Inspect the public adapter metadata before using it on an import fast path.
+static bool dawn_is_d3d11(WGPUDevice device) {
+    WGPUAdapterInfo info{};
+    const auto status = wgpuDeviceGetAdapterInfo(device, &info);
+    const bool matches = status == WGPUStatus_Success &&
+                         info.backendType == WGPUBackendType_D3D11;
+    wgpuAdapterInfoFreeMembers(info);
+    return matches;
 }
 
 // Initialise the D3D12 + D3D11on12 state on `info`.
@@ -1124,6 +1142,39 @@ static MGPUVideoTexture* import_d3d11_same_adapter(const MGPUExternalVideoBuffer
 
     D3D11_TEXTURE2D_DESC sd{};
     srcOnDawnDev->GetDesc(&sd);
+    // Only a producer-certified, completed immutable snapshot may be shared
+    // directly. In particular, a WGC-acquired surface can be recycled when
+    // its frame is released and MUST retain the private-copy path below.
+    // The D3D11 texture descriptor requires Dawn's own D3D11 device; D3D12
+    // and every unrecognised/untagged input keep their existing path.
+    const bool immutableReady =
+        buf->content_type == MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE &&
+        buf->num_planes == 1 &&
+        buf->pixel_format == MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32 &&
+        buf->planes[0].drm_format_modifier == MGPU_D3D11_IMMUTABLE_READY_TAG &&
+        buf->planes[0].subresource_index == 0 &&
+        sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sd.Width == buf->width && sd.Height == buf->height &&
+        sd.ArraySize == 1 && sd.MipLevels == 1 && sd.SampleDesc.Count == 1 &&
+        (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 &&
+        dawn_is_d3d11(device) &&
+        dawn::native::d3d11::GetD3D11Device(device).Get() == d11;
+    if (immutableReady) {
+        dawn::native::d3d11::SharedTextureMemoryD3D11Texture2DDescriptor direct;
+        direct.texture = srcOnDawnDev;
+        WGPUSharedTextureMemoryDescriptor desc{};
+        desc.nextInChain = const_cast<WGPUChainedStruct*>(
+            reinterpret_cast<const WGPUChainedStruct*>(
+                static_cast<const wgpu::ChainedStruct*>(&direct)));
+        auto mem = wgpuDeviceImportSharedTextureMemory(device, &desc);
+        // SharedTextureMemory and its Texture retain the D3D11 resource.
+        // The producer's handle and COM reference may be released as soon
+        // as this import returns; queued GPU reads retain their own refs.
+        if (auto* imported = import_shared(mem, buf)) {
+            LOG_DEBUG("[minigpu_external] immutable D3D11 snapshot imported directly");
+            return imported;
+        }
+    }
     {
         static int s_probed = 0;
         if (s_probed++ < 2) {

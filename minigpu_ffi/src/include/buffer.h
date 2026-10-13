@@ -2,6 +2,7 @@
 #define BUFFER_H
 
 #include "webgpu.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -55,6 +56,7 @@ struct BufferData {
   WGPUBuffer buffer = nullptr;
   WGPUBufferUsage usage = WGPUBufferUsage_None;
   size_t size = 0;
+  WGPUDevice creationDevice = nullptr;
 };
 
 // no gpu library dependency
@@ -117,13 +119,41 @@ public:
 
 class MGPU {
 public:
+  struct DeviceReadinessState {
+    std::atomic<bool> initialized{false};
+    std::atomic<bool> lost{false};
+    // Receipts retain only this state, never MGPU/device/queue/worker ownership.
+    bool observeRetirement(std::function<void(bool)> complete);
+    void finishRetirement(bool succeeded) noexcept;
+
+  private:
+    std::mutex retirementMutex;
+    std::array<std::function<void(bool)>, 64> retirementObservers{};
+    size_t observerCount = 0;
+    bool retirementFinished = false, retirementSucceeded = false;
+  };
+  // The callback owns this generation's state independently of Context/MGPU.
+  // A late old-device loss can neither dereference a retired owner nor clear
+  // readiness on a replacement device. Loss is monotonic for this generation.
+  struct ContextReadyFlag {
+    std::shared_ptr<DeviceReadinessState> state =
+        std::make_shared<DeviceReadinessState>();
+    operator bool() const noexcept {
+      return state->initialized.load(std::memory_order_acquire) &&
+             !state->lost.load(std::memory_order_acquire);
+    }
+    ContextReadyFlag &operator=(bool ready) noexcept {
+      state->initialized.store(ready, std::memory_order_release);
+      return *this;
+    }
+  };
   // Define the Context struct here
   struct Context {
     WGPUDevice device = nullptr;
     WGPUQueue queue = nullptr;
     WGPUInstance instance = nullptr;
     WGPUAdapter adapter = nullptr;
-    bool initialized = false;
+    ContextReadyFlag initialized;
     // Owned dawn::native::Instance* (non-Emscripten only). Stored as void* so
     // buffer.h need not include dawn/native headers — the cast is done in
     // buffer.cpp where the include is available.
@@ -157,16 +187,16 @@ public:
   //      EXPLICIT consumers so teardown happens only when the last one leaves.
   //
   // State transitions are serialized; the work is not.
-  enum class CtxState { Uninitialized, Initializing, Ready, Destroying };
+  enum class CtxState { Uninitialized, Initializing, Ready, Destroying, Quarantined };
 
   // Idempotent, concurrency-safe.  Blocks while another thread is initializing
   // or destroying, then returns the resulting context (or does the work).
-  // Does NOT take a reference — this is the LAZY path (getDevice, getQueue,
-  // isDeviceValid, ensureDeviceValid).
+  // Does NOT take a reference. A lost generation refuses initialization until
+  // its owners have explicitly retired it; lazy access never repairs a device.
   void initializeContext();
   void initializeContextAsync(std::function<void()> callback);
-  // Unconditional teardown.  Ignores the reference count — internal use and
-  // ensureDeviceValid()'s device-loss recovery.  Blocks while an init is in
+  // Unconditional teardown. Ignores the reference count — internal owner use
+  // only, after consumer retirement. Blocks while an init is in
   // flight so it can never free a Context another thread is still building.
   void destroyContext();
 
@@ -180,8 +210,14 @@ public:
   // happened to be created before the device existed.
   void attachContext();
   void attachContextAsync(std::function<void()> callback);
+  // Carries the outcome of THIS attachment, not a later readiness sample.
+  // A positive receipt owns a reference even if loss races callback delivery.
+  void attachContextAsyncResult(std::function<void(bool)> callback);
   void detachContext();
   int attachCount() const;
+  // Retain an explicit attachment only if the existing context is ready and
+  // still attached. Never initializes, waits for initialization, or repairs it.
+  bool attachReadyContext() noexcept;
 
   bool isDeviceValid();
   void ensureDeviceValid();
@@ -196,6 +232,19 @@ public:
   WebGPUThread &getWebGPUThread() { return webgpuThread; }
 
   WGPUDevice getDevice() const;
+  // Returns an add-ref'd device only when this exact context generation is
+  // ready. It never initializes or repairs a context; the caller releases it.
+  WGPUDevice retainReadyDevice() const noexcept;
+  WGPUDevice retainReadyDeviceGeneration(uint64_t *generation) const noexcept;
+  bool matchesReadyDevice(WGPUDevice device, uint64_t generation) const noexcept;
+  // Fence only this exact generation before trusted native device retirement.
+  // Keeps the device/queue/worker alive and never affects a replacement.
+  bool invalidateDevice(WGPUDevice device, uint64_t generation) noexcept;
+  bool observeContextRetirement(WGPUDevice device, uint64_t generation,
+                                std::function<void(bool)> complete);
+  bool retainReadyContextSnapshot(WGPUDevice *device, WGPUQueue *queue,
+                                  WGPUInstance *instance,
+                                  uint64_t *generation) const noexcept;
   WGPUQueue getQueue() const;
   WGPUInstance getInstance() const;
   // Returns the instance without attempting to reinitialize the context.
@@ -440,6 +489,7 @@ private:
   mutable mgpu::mutex ctxStateMutex;
   std::condition_variable ctxStateCv;
   CtxState ctxState = CtxState::Uninitialized;
+  uint64_t readyDeviceGeneration = 0;
   // Thread currently performing the Initializing/Destroying work, so a
   // re-entrant call from that same thread returns instead of waiting on
   // itself.
@@ -457,7 +507,11 @@ public:
   Buffer(const Buffer &) = delete;
   Buffer &operator=(const Buffer &) = delete;
 
-  void createBuffer(size_t byteSize, BufferDataType dataType);
+  void createBuffer(
+      size_t byteSize, BufferDataType dataType,
+      WGPUBufferUsage usage = WGPUBufferUsage_Storage |
+                              WGPUBufferUsage_CopyDst |
+                              WGPUBufferUsage_CopySrc);
 
   void write(const float *inputData, size_t elementCount);
   void write(const int32_t *inputData, size_t elementCount);

@@ -2,6 +2,7 @@
 library;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/rendering.dart' show PlatformViewHitTestBehavior;
 import 'package:flutter/widgets.dart';
 
 import 'preview_controller.dart';
@@ -36,6 +37,35 @@ class MiniavGpuPreview extends StatelessWidget {
         if (id == null || size.isEmpty) {
           return placeholder ?? const SizedBox.shrink();
         }
+        if (kIsWeb && fit == BoxFit.contain) {
+          // Give the platform view its displayed layout size instead of
+          // scaling a pixel-sized HtmlElementView through FittedBox. Large
+          // scale factors nested in a wall's projective transform can place
+          // the DOM canvas outside the visible fixture.
+          return LayoutBuilder(
+            builder: (_, constraints) {
+              final canvas = HtmlElementView(
+                viewType: 'minigpu_view::$id',
+                hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+              );
+              if (!constraints.hasBoundedWidth &&
+                  !constraints.hasBoundedHeight) {
+                return SizedBox(
+                  width: size.width,
+                  height: size.height,
+                  child: canvas,
+                );
+              }
+              return Align(
+                alignment: alignment,
+                child: AspectRatio(
+                  aspectRatio: size.aspectRatio,
+                  child: canvas,
+                ),
+              );
+            },
+          );
+        }
         return FittedBox(
           fit: fit,
           alignment: alignment,
@@ -43,7 +73,12 @@ class MiniavGpuPreview extends StatelessWidget {
             width: size.width,
             height: size.height,
             child: kIsWeb
-                ? HtmlElementView(viewType: 'minigpu_view::$id')
+                // The registered web canvas is display-only.  Let Flutter
+                // continue hit testing the controls wrapped around a preview.
+                ? HtmlElementView(
+                    viewType: 'minigpu_view::$id',
+                    hitTestBehavior: PlatformViewHitTestBehavior.transparent,
+                  )
                 : Texture(
                     textureId: id,
                     filterQuality: filterQuality,

@@ -205,7 +205,7 @@ void main() {
 // Helpers
 // ---------------------------------------------------------------------------
 
-class _FakeShader implements PlatformComputeShader {
+class _FakeShader extends PlatformComputeShader {
   @override
   void loadKernelString(String k) {}
   @override

@@ -4,6 +4,9 @@
 #include "export.h"
 #include "stdint.h"
 #include "minigpu_external.h"
+#include "minigpu_resources.h"
+#include "minigpu_render.h"
+#include "minigpu_context_lifetime.h"
 #ifdef __cplusplus
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
@@ -24,6 +27,15 @@ typedef void (*MGPULogCallback)(int level, const char* message);
 EXPORT void mgpuInitializeContext();
 EXPORT void mgpuInitializeContextAsync(MGPUCallback callback);
 EXPORT void mgpuDestroyContext();
+
+#ifdef __EMSCRIPTEN__
+/// Non-owning, exact-creation-device observation. Zero means refused. Tokens
+/// never initialize a context or hold a device/attachment; release after use.
+EXPORT uint32_t mgpuWebObserveContextRetirement(uint32_t expectedDevice);
+/// -1 unknown/refused, 0 pending, 1 retired, 2 failed (quarantined).
+EXPORT int mgpuWebContextRetirementStatus(uint32_t token);
+EXPORT void mgpuWebReleaseContextObservation(uint32_t token);
+#endif
 /// Install a log callback. [callback] is invoked on the thread that produces
 /// the log line. Pass NULL to revert to the default stderr output.
 /// [level]: 0=DEBUG 1=INFO 2=WARN 3=ERROR  (-1 = silence all)
@@ -105,6 +117,13 @@ EXPORT void mgpuDispatchAsyncToPort(MGPUComputeShader *shader, int groupsX,
 EXPORT void mgpuReadAsyncToPort(MGPUBuffer *buffer, void *outputData,
                                 size_t elementCount, size_t elementOffset,
                                 int elementType, int64_t port, int64_t token);
+/* Completes only after work submitted before this call has retired from the
+ * owning device queue. It flushes pending fire-and-forget batches first. */
+EXPORT void mgpuWaitForSubmittedWorkAsyncToPort(int64_t port, int64_t token);
+/* A synchronous queue boundary for web callers before they use the JS queue
+ * completion promise. The async native entry point above performs this flush
+ * itself. */
+EXPORT void mgpuFlushBatch(void);
 
 /// Blocks until every task already queued on the WebGPU worker thread has
 /// run. Ordering aid for teardown: destroying a resource that an enqueued
@@ -254,14 +273,33 @@ EXPORT void mgpuDestroyContext();
 /// context (0 when it is torn down). Diagnostics and tests only; lazy internal
 /// re-initialization does not count.
 EXPORT int mgpuContextRefCount();
+/* Query the exact ready device. Returns 1 and writes both outputs only when
+ * the device is current and not lost; 0 otherwise. Never initializes a device. */
+EXPORT int mgpuGetCurrentDeviceBufferLimits(uint64_t *maxBufferSize,
+                                            uint64_t *maxStorageBufferBindingSize,
+                                           uint64_t *deviceGeneration);
+
+EXPORT int mgpuGetCurrentDeviceTextureLimits(uint64_t *maxDimension2D,
+                                            uint64_t *maxArrayLayers,
+                                            uint64_t *deviceGeneration);
+
 EXPORT MGPUComputeShader *mgpuCreateComputeShader();
 EXPORT void mgpuDestroyComputeShader(MGPUComputeShader *shader);
+/* Trusted host cleanup after the input's actual GPU reads finish. Drops cached
+ * bind-group/input refs on the GPU FIFO; shader/layout remain reusable. */
+EXPORT int mgpuReleaseTextureBinding(MGPUComputeShader *shader, int slot);
 EXPORT void mgpuLoadKernel(MGPUComputeShader *shader, const char *kernelString);
 EXPORT int mgpuHasKernel(MGPUComputeShader *shader);
 EXPORT MGPUBuffer *mgpuCreateBuffer(int bufferSize, int dataType);
+EXPORT uint32_t mgpuBufferDescriptorVersion(void);
+EXPORT MGPUBuffer *mgpuCreateBufferWithUsage(int sizeBytes, uint32_t usage);
 EXPORT void mgpuDestroyBuffer(MGPUBuffer *buffer);
 EXPORT void mgpuSetBuffer(MGPUComputeShader *shader, int tag,
                           MGPUBuffer *buffer);
+EXPORT uint32_t mgpuBufferBindingVersion(void);
+EXPORT int mgpuSetBufferRange(MGPUComputeShader *shader, int slot,
+                              MGPUBuffer *buffer, int kind, int offsetBytes,
+                              int sizeBytes);
 EXPORT void mgpuCreateKernel(MGPUComputeShader *shader, int groupsX,
                              int groupsY, int groupsZ);
 /* ── Multi-GPU context handles ─────────────────────────────────────────────
@@ -273,10 +311,14 @@ EXPORT void mgpuCreateKernel(MGPUComputeShader *shader, int groupsX,
  * historical global-context API is untouched and remains the default
  * context. */
 typedef struct MGPUContextHandle MGPUContextHandle;
+EXPORT int mgpuContextGetCurrentDeviceTextureLimits(
+    MGPUContextHandle *handle, uint64_t *maxDimension2D,
+    uint64_t *maxArrayLayers, uint64_t *deviceGeneration);
 
 /* Creates an UNINITIALIZED context bound to the adapter whose name contains
  * [adapterFilter] (case-insensitive substring; e.g. "3090").  Pass NULL or
- * "" for automatic selection (discrete > integrated > any). */
+ * "" for automatic selection (discrete > integrated > any). Returns NULL on
+ * allocation failure or the bound of 64 live/retiring owned contexts. */
 EXPORT MGPUContextHandle *mgpuCreateContextHandle(const char *adapterFilter);
 /* Initializes the context; [callback] fires from the context's WebGPU
  * thread when done. */
@@ -286,15 +328,28 @@ EXPORT void mgpuContextInitializeAsync(MGPUContextHandle *handle,
  * note above mgpuInitializeContextAsyncToPort. */
 EXPORT void mgpuContextInitializeAsyncToPort(MGPUContextHandle *handle,
                                              int64_t port, int64_t token);
-/* Destroys the context and frees the handle.  All buffers/shaders created
- * from it must already be destroyed. */
+/* Context-specific queue completion. This must be used for a secondary
+ * context so its own device queue, not the process-global queue, is fenced. */
+EXPORT void mgpuContextWaitForSubmittedWorkAsyncToPort(
+    MGPUContextHandle *handle, int64_t port, int64_t token);
+/* Retires the handle immediately; no subsequent handle calls are allowed.
+ * All ordinary buffers/shaders must already be destroyed. Registered native
+ * consumers retain explicit creation-device leases through actual completion.
+ * A bounded native worker drains/frees the owner after its last lease, without
+ * joining the WebGPU worker from itself or blocking the caller/UI thread. */
 EXPORT void mgpuDestroyContextHandle(MGPUContextHandle *handle);
 /* Name of the adapter this context selected (empty until initialized).
  * Returns the full name length; writes up to cap-1 chars + NUL. */
 EXPORT int mgpuContextGetAdapterName(MGPUContextHandle *handle, char *out,
                                      int cap);
+/* Same query for an independently owned context. */
+EXPORT int mgpuContextGetCurrentDeviceBufferLimits(
+    MGPUContextHandle *handle, uint64_t *maxBufferSize,
+    uint64_t *maxStorageBufferBindingSize, uint64_t *deviceGeneration);
 EXPORT MGPUBuffer *mgpuContextCreateBuffer(MGPUContextHandle *handle,
                                            int bufferSize, int dataType);
+EXPORT MGPUBuffer *mgpuContextCreateBufferWithUsage(
+    MGPUContextHandle *handle, int sizeBytes, uint32_t usage);
 EXPORT MGPUComputeShader *
 mgpuContextCreateComputeShader(MGPUContextHandle *handle);
 

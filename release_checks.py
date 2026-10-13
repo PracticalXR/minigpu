@@ -29,7 +29,12 @@ import urllib.request
 # because the family releases together and a lagging pin blocks every consumer
 # of both halves -- cross-REPO is the case that bites, since no single release.py
 # sees both sides of it.
-FAMILY_PREFIXES = ("miniav", "minigpu", "gpu_tensor", "gpu_pipeline", "gpu_ml")
+# `spawn` is first-party and cross-repo: every worker seam in miniav_tools
+# depends on it, so a pin that stops admitting the published version breaks
+# the same way a miniav one does — and until it was listed here nothing
+# checked, because the check keys off these prefixes.
+FAMILY_PREFIXES = ("miniav", "minigpu", "gpu_tensor", "gpu_pipeline",
+                   "gpu_ml", "spawn")
 
 _cache = {}
 

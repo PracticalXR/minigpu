@@ -627,7 +627,15 @@ bool MGPU::waitMapReadLocked(WGPUBuffer buf, size_t size) {
   WGPUInstance instance = tryGetInstance();
   WGPUFutureWaitInfo waitInfo = {};
   waitInfo.future = future;
-  if (instance) wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+  if (instance) {
+#ifdef __EMSCRIPTEN__
+    // Asyncify awaits the GPU map promise directly. Polling through
+    // emscripten_sleep(0) adds a browser timer wake after the GPU is ready.
+    wgpuInstanceWaitAny(instance, 1, &waitInfo, UINT64_MAX);
+#else
+    wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+#endif
+  }
   if (!waitInfo.completed) {
     // Same hot-poll as Buffer::readDirect: Sleep(1) actually sleeps ~15 ms
     // under the default Windows timer resolution, which would dominate.
@@ -838,10 +846,14 @@ void MGPU::initializeContext() {
       }
       ctxStateCv.wait(lk);
     }
-    // Ready AND actually usable -> nothing to do. `ctx->initialized` can be
-    // false while the state is Ready when the device-lost callback fired; that
-    // falls through and re-initializes, exactly as before.
-    if (ctxState == CtxState::Ready && ctx && ctx->initialized) return;
+    if (ctxState == CtxState::Quarantined)
+      throw std::runtime_error("GPU context teardown failed; context quarantined");
+    // Loss does not retire live buffers, exports, callbacks or worker owners.
+    // Do not replace their Context behind the host's lifetime coordinator.
+    if (ctxState == CtxState::Ready && ctx) {
+      if (ctx->initialized) return;
+      throw std::runtime_error("Lost GPU device requires explicit retirement");
+    }
     ctxState = CtxState::Initializing;
     ctxOwner = self;
   }
@@ -854,6 +866,7 @@ void MGPU::initializeContext() {
     ~Publish() {
       mgpu::lock_guard<mgpu::mutex> lk(m->ctxStateMutex);
       m->ctxState = *ok ? MGPU::CtxState::Ready : MGPU::CtxState::Uninitialized;
+      if (*ok) ++m->readyDeviceGeneration;
       m->ctxOwner = std::thread::id();
       m->ctxStateCv.notify_all();
     }
@@ -893,6 +906,12 @@ void MGPU::initializeContextUnlocked() {
     wgpuInstanceAddRef(c->instance);
   }
 #else
+  // Enables Asyncify's promise-backed WaitAny for map readbacks below. With
+  // UINT64_MAX emdawn waits on the GPU future without scheduling a timer.
+  constexpr WGPUInstanceFeatureName timedWaitAny =
+      WGPUInstanceFeatureName_TimedWaitAny;
+  instanceDesc.requiredFeatureCount = 1;
+  instanceDesc.requiredFeatures = &timedWaitAny;
   c->instance = wgpuCreateInstance(&instanceDesc);
 #endif
 
@@ -1512,12 +1531,18 @@ void MGPU::initializeContextUnlocked() {
   }
 
   // Set up device lost callback info
+  auto lostCallbackState =
+      std::make_unique<std::shared_ptr<DeviceReadinessState>>(c->initialized.state);
   WGPUDeviceLostCallbackInfo deviceLostCallbackInfo = {};
   deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
   deviceLostCallbackInfo.callback =
       [](WGPUDevice const *device, WGPUDeviceLostReason reason,
          WGPUStringView message, void *userdata1, void *userdata2) {
-        MGPU *mgpu = static_cast<MGPU *>(userdata1);
+        // Dawn's one-shot DeviceLostEvent owns the userdata until completion,
+        // including failed creation/shutdown. No MGPU pointer or reentrant lock.
+        std::unique_ptr<std::shared_ptr<DeviceReadinessState>> state(
+            static_cast<std::shared_ptr<DeviceReadinessState> *>(userdata1));
+        (*state)->lost.store(true, std::memory_order_release);
         const char *reasonStr = "Unknown";
 
         switch (reason) {
@@ -1539,15 +1564,8 @@ void MGPU::initializeContextUnlocked() {
             reasonStr, (int)message.length,
             message.data ? message.data : "");
 
-        // Mark context as uninitialized so it can be recreated. Reads the
-        // PUBLISHED context deliberately: this callback can fire long after
-        // this function returned, and `c` (the private build-time pointer)
-        // may by then belong to a Context that was replaced.
-        if (mgpu->ctx) {
-          mgpu->ctx->initialized = false;
-        }
       };
-  deviceLostCallbackInfo.userdata1 = this;
+  deviceLostCallbackInfo.userdata1 = lostCallbackState.get();
 
   // Add the device lost callback to the device descriptor
   deviceDesc.deviceLostCallbackInfo = deviceLostCallbackInfo;
@@ -1573,7 +1591,7 @@ void MGPU::initializeContextUnlocked() {
 
   struct DeviceRequestState {
     WGPUDevice device = nullptr;
-    bool completed = false;
+    std::atomic<bool> completed{false};
     mgpu::mutex mutex;
     std::condition_variable cv;
   };
@@ -1599,6 +1617,8 @@ void MGPU::initializeContextUnlocked() {
 
   LOG_INFO("Requesting WebGPU device...");
 
+  // Transfer the one-shot loss callback state before the API can invoke it.
+  lostCallbackState.release();
   WGPUFuture deviceFuture =
       wgpuAdapterRequestDevice(c->adapter, &deviceDesc, deviceCallbackInfo);
 
@@ -1694,8 +1714,16 @@ void MGPU::attachContext() {
 }
 
 void MGPU::attachContextAsync(std::function<void()> callback) {
+  attachContextAsyncResult([callback](bool) {
+    if (callback) callback();
+  });
+}
+
+void MGPU::attachContextAsyncResult(std::function<void(bool)> callback) {
   if (ctxLockBypassEnabled()) {
-    initializeContextAsync(std::move(callback));
+    initializeContextAsync([this, callback]() {
+      if (callback) callback(ctx && ctx->initialized);
+    });
     return;
   }
   {
@@ -1716,7 +1744,7 @@ void MGPU::attachContextAsync(std::function<void()> callback) {
       mgpu::lock_guard<mgpu::mutex> lk(ctxStateMutex);
       if (ctxAttachCount > 0) --ctxAttachCount;
     }
-    if (callback) callback();
+    if (callback) callback(ok);
   };
 #ifdef __EMSCRIPTEN__
   body();
@@ -1753,6 +1781,18 @@ int MGPU::attachCount() const {
   return ctxAttachCount;
 }
 
+bool MGPU::attachReadyContext() noexcept {
+  // Bypass mode does not count attachments and cannot provide this lifetime
+  // guarantee. A zero count also fences the final-detach/teardown window.
+  if (ctxLockBypassEnabled()) return false;
+  mgpu::lock_guard<mgpu::mutex> lk(ctxStateMutex);
+  if (ctxState != CtxState::Ready || !ctx || !ctx->initialized ||
+      !ctx->device || !ctx->queue || !ctx->instance || ctxAttachCount <= 0 ||
+      ctxAttachCount >= 0x7fffffff) return false;
+  ++ctxAttachCount;
+  return true;
+}
+
 void MGPU::destroyContext() {
   if (ctxLockBypassEnabled()) {
     destroyContextUnlocked();
@@ -1760,6 +1800,7 @@ void MGPU::destroyContext() {
   }
 
   const std::thread::id self = std::this_thread::get_id();
+  std::shared_ptr<DeviceReadinessState> retiringState;
   {
     mgpu::unique_lock<mgpu::mutex> lk(ctxStateMutex);
     for (;;) {
@@ -1768,27 +1809,37 @@ void MGPU::destroyContext() {
       if (ctxOwner == self) return; // re-entrant; the owner will finish
       ctxStateCv.wait(lk);
     }
+    if (ctxState == CtxState::Quarantined)
+      throw std::runtime_error("GPU context teardown is quarantined");
     if (ctxState != CtxState::Ready || !ctx) return;
+    retiringState = ctx->initialized.state;
     ctxState = CtxState::Destroying;
     ctxOwner = self;
   }
 
   // ── Teardown, NO lock held (it joins the WebGPU thread) ───────────────────
+  bool completed = false;
   struct Publish {
     MGPU *m;
+    const bool *completed;
+    std::shared_ptr<DeviceReadinessState> state;
     ~Publish() {
-      mgpu::lock_guard<mgpu::mutex> lk(m->ctxStateMutex);
-      m->ctxState = MGPU::CtxState::Uninitialized;
-      m->ctxOwner = std::thread::id();
-      // ctxAttachCount is deliberately NOT cleared: ensureDeviceValid()'s
-      // device-loss recovery calls destroyContext() directly and then
-      // re-initializes, and the consumers attached across that recovery are
-      // still attached afterwards.
-      m->ctxStateCv.notify_all();
+      {
+        mgpu::lock_guard<mgpu::mutex> lk(m->ctxStateMutex);
+        m->ctxState = *completed ? MGPU::CtxState::Uninitialized
+                                : MGPU::CtxState::Quarantined;
+        m->ctxOwner = std::thread::id();
+        // Attachment accounting belongs to attach/detach. Raw teardown must not
+        // silently drop another explicit consumer's reference.
+        m->ctxStateCv.notify_all();
+      }
+      // Never invoke a host while holding either context or retirement locks.
+      state->finishRetirement(*completed);
     }
-  } publish{this};
+  } publish{this, &completed, std::move(retiringState)};
 
   destroyContextUnlocked();
+  completed = true;
 }
 
 void MGPU::destroyContextUnlocked() {
@@ -1865,18 +1916,116 @@ void MGPU::destroyContextUnlocked() {
 }
 
 WGPUDevice MGPU::getDevice() const {
-  if (!ctx || !ctx->initialized || !ctx->device) {
-    LOG_WARN("Device invalid, attempting to reinitialize context");
-    // Cast away const to allow reinitialization
+  if (!ctx || !ctx->device) {
     const_cast<MGPU *>(this)->initializeContext();
   }
+  // A lost device is still the creation device of outstanding resources.
+  // Dawn rejects its commands; creation paths additionally require readiness.
   return ctx ? ctx->device : nullptr;
 }
 
+WGPUDevice MGPU::retainReadyDevice() const noexcept {
+  return retainReadyDeviceGeneration(nullptr);
+}
+
+WGPUDevice MGPU::retainReadyDeviceGeneration(uint64_t *generation) const noexcept {
+  if (generation) *generation = 0;
+  mgpu::lock_guard<mgpu::mutex> lock(ctxStateMutex);
+  if (ctxState != CtxState::Ready || !ctx || !ctx->initialized ||
+      !ctx->device) {
+    return nullptr;
+  }
+  wgpuDeviceAddRef(ctx->device);
+  if (generation) *generation = readyDeviceGeneration;
+  return ctx->device;
+}
+
+bool MGPU::matchesReadyDevice(WGPUDevice device, uint64_t generation) const noexcept {
+  mgpu::lock_guard<mgpu::mutex> lock(ctxStateMutex);
+  return ctxState == CtxState::Ready && ctx && ctx->initialized &&
+         ctx->device == device && readyDeviceGeneration == generation;
+}
+
+bool MGPU::invalidateDevice(WGPUDevice device, uint64_t generation) noexcept {
+  mgpu::lock_guard<mgpu::mutex> lock(ctxStateMutex);
+  if (ctxState != CtxState::Ready || !ctx || !device ||
+      ctx->device != device || readyDeviceGeneration != generation) return false;
+  ctx->initialized.state->lost.store(true, std::memory_order_release);
+  return true;
+}
+
+bool MGPU::DeviceReadinessState::observeRetirement(
+    std::function<void(bool)> complete) {
+  bool result;
+  {
+    std::lock_guard<std::mutex> lock(retirementMutex);
+    if (!retirementFinished) {
+      if (observerCount == retirementObservers.size()) return false;
+      retirementObservers[observerCount++] = std::move(complete);
+      return true;
+    }
+    result = retirementSucceeded;
+  }
+  complete(result);
+  return true;
+}
+
+void MGPU::DeviceReadinessState::finishRetirement(bool succeeded) noexcept {
+  std::array<std::function<void(bool)>, 64> callbacks{};
+  size_t count;
+  {
+    std::lock_guard<std::mutex> lock(retirementMutex);
+    if (retirementFinished) return;
+    retirementFinished = true;
+    retirementSucceeded = succeeded;
+    count = observerCount;
+    observerCount = 0;
+    callbacks.swap(retirementObservers);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    try { callbacks[i](succeeded); } catch (...) {
+      // A faulty observer cannot skip other receipts or reopen this state.
+    }
+  }
+}
+
+bool MGPU::observeContextRetirement(WGPUDevice device, uint64_t generation,
+                                     std::function<void(bool)> complete) {
+  if (ctxLockBypassEnabled()) return false;
+  std::shared_ptr<DeviceReadinessState> state;
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(ctxStateMutex);
+    // A creation pin prevents ordinary final teardown during registration.
+    // Lost-but-retained is valid. Registration never acquires a new attachment.
+    if (ctxState != CtxState::Ready || !ctx || !device ||
+        ctx->device != device || readyDeviceGeneration != generation) return false;
+    state = ctx->initialized.state;
+  }
+  return state->observeRetirement(std::move(complete));
+}
+
+bool MGPU::retainReadyContextSnapshot(WGPUDevice *device, WGPUQueue *queue,
+                                    WGPUInstance *instance,
+                                    uint64_t *generation) const noexcept {
+  *device = nullptr;
+  *queue = nullptr;
+  *instance = nullptr;
+  *generation = 0;
+  mgpu::lock_guard<mgpu::mutex> lock(ctxStateMutex);
+  if (ctxState != CtxState::Ready || !ctx || !ctx->initialized ||
+      !ctx->device || !ctx->queue || !ctx->instance) return false;
+  wgpuDeviceAddRef(ctx->device);
+  wgpuQueueAddRef(ctx->queue);
+  wgpuInstanceAddRef(ctx->instance);
+  *device = ctx->device;
+  *queue = ctx->queue;
+  *instance = ctx->instance;
+  *generation = readyDeviceGeneration;
+  return true;
+}
+
 WGPUQueue MGPU::getQueue() const {
-  if (!ctx || !ctx->initialized || !ctx->queue) {
-    LOG_WARN("Queue invalid, attempting to reinitialize context");
-    // Cast away const to allow reinitialization
+  if (!ctx || !ctx->queue) {
     const_cast<MGPU *>(this)->initializeContext();
   }
   return ctx ? ctx->queue : nullptr;
@@ -1884,33 +2033,19 @@ WGPUQueue MGPU::getQueue() const {
 
 WGPUInstance MGPU::getInstance() const {
   if (!ctx || !ctx->instance) {
-    LOG_WARN("Instance invalid, attempting to reinitialize context");
-    // Cast away const to allow reinitialization
     const_cast<MGPU *>(this)->initializeContext();
   }
   return ctx ? ctx->instance : nullptr;
 }
 
 bool MGPU::isDeviceValid() {
-  if (!ctx || !ctx->initialized || !ctx->device || !ctx->queue) {
-    LOG_WARN("Device/context invalid, attempting to reinitialize");
-    initializeContext();
-    return ctx && ctx->initialized && ctx->device && ctx->queue;
-  }
-  return true;
+  if (!ctx || !ctx->device || !ctx->queue) initializeContext();
+  return ctx && ctx->initialized && ctx->device && ctx->queue;
 }
 
 void MGPU::ensureDeviceValid() {
   if (!isDeviceValid()) {
-    LOG_INFO("Device lost or uninitialized, attempting to recreate...");
-    destroyContext();
-    try {
-      initializeContext();
-      LOG_INFO("Device successfully recreated");
-    } catch (const std::exception &e) {
-      LOG_ERROR("Failed to recreate device: %s", e.what());
-      throw;
-    }
+    throw std::runtime_error("Lost GPU device requires explicit retirement");
   }
 }
 
@@ -1926,6 +2061,8 @@ Buffer::Buffer(Buffer &&other) noexcept
       _readStagingBufferSize(other._readStagingBufferSize) {
   other.bufferData.buffer = nullptr;
   other.bufferData.size = 0;
+  other.bufferData.usage = WGPUBufferUsage_None;
+  other.bufferData.creationDevice = nullptr;
   other.elementCount = 0;
   other._readStagingBuffer = nullptr;
   other._readStagingBufferSize = 0;
@@ -1942,6 +2079,8 @@ Buffer &Buffer::operator=(Buffer &&other) noexcept {
     _readStagingBufferSize = other._readStagingBufferSize;
     other.bufferData.buffer = nullptr;
     other.bufferData.size = 0;
+    other.bufferData.usage = WGPUBufferUsage_None;
+    other.bufferData.creationDevice = nullptr;
     other.elementCount = 0;
     other._readStagingBuffer = nullptr;
     other._readStagingBufferSize = 0;
@@ -1949,16 +2088,24 @@ Buffer &Buffer::operator=(Buffer &&other) noexcept {
   return *this;
 }
 
-void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
+void Buffer::createBuffer(size_t byteSize, BufferDataType dataType,
+                          WGPUBufferUsage usage) {
   LOG_INFO("createBuffer called: byteSize=%zu, dataType=%d", byteSize,
            (int)dataType);
 
+  WGPUDevice retainedDevice = nullptr;
   try {
 
     // Validate device before proceeding
     WGPUDevice device = mgpu.getDevice();
     if (!device) {
       throw std::runtime_error("WebGPU device not initialized");
+    }
+    retainedDevice = mgpu.retainReadyDevice();
+    if (!retainedDevice || retainedDevice != device) {
+      if (retainedDevice) wgpuDeviceRelease(retainedDevice);
+      retainedDevice = nullptr;
+      throw std::runtime_error("WebGPU device generation is not ready");
     }
 
     this->dataType = dataType;
@@ -2012,8 +2159,7 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
              bufferData.size);
 
     // Create the buffer
-    bufferData.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst |
-                       WGPUBufferUsage_CopySrc;
+    bufferData.usage = usage;
 
     WGPUBufferDescriptor bufferDesc = {};
     bufferDesc.nextInChain = nullptr;
@@ -2024,8 +2170,12 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
     try {
       bufferData.buffer = wgpuDeviceCreateBuffer(device, &bufferDesc);
       if (!bufferData.buffer) {
+        wgpuDeviceRelease(retainedDevice);
+        retainedDevice = nullptr;
         throw std::runtime_error("Failed to create WebGPU buffer");
       }
+      bufferData.creationDevice = retainedDevice;
+      retainedDevice = nullptr;
       LOG_INFO("Buffer created successfully: buffer=%p, size=%zu",
                bufferData.buffer, bufferData.size);
     } catch (const std::exception &e) {
@@ -2036,9 +2186,11 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType) {
       throw std::runtime_error("Failed to create WebGPU buffer");
     }
   } catch (const std::exception &e) {
+    if (retainedDevice) wgpuDeviceRelease(retainedDevice);
     LOG_ERROR("Exception in createBuffer: %s", e.what());
     throw;
   } catch (...) {
+    if (retainedDevice) wgpuDeviceRelease(retainedDevice);
     LOG_ERROR("Unknown exception in createBuffer");
     throw std::runtime_error("Failed to create WebGPU buffer");
   }
@@ -2050,11 +2202,12 @@ void Buffer::release() {
     WGPUBuffer stagingHandle = _readStagingBuffer;
     WGPUInstance instance = mgpu.tryGetInstance();
     WGPUQueue queue = mgpu.tryGetQueue();
+    WGPUDevice creationDevice = bufferData.creationDevice;
     mgpu::mutex &gpuMutex = mgpu.getGpuMutex();
     MGPU *owner = &mgpu;
 
     auto cleanupTask = [bufferHandle, stagingHandle, queue, instance, &gpuMutex,
-                        owner]() {
+                        owner, creationDevice]() {
       LOG_INFO("Releasing buffer on WebGPU thread: %p", bufferHandle);
       {
         mgpu::lock_guard<mgpu::mutex> lock(gpuMutex);
@@ -2073,6 +2226,7 @@ void Buffer::release() {
       if (instance) {
         wgpuInstanceProcessEvents(instance);
       }
+      if (creationDevice) wgpuDeviceRelease(creationDevice);
       LOG_INFO("Buffer released and events processed");
     };
 
@@ -2086,10 +2240,13 @@ void Buffer::release() {
         wgpuBufferDestroy(stagingHandle);
         wgpuBufferRelease(stagingHandle);
       }
+      if (creationDevice) wgpuDeviceRelease(creationDevice);
     }
 
     bufferData.buffer = nullptr;
     bufferData.size = 0;
+    bufferData.usage = WGPUBufferUsage_None;
+    bufferData.creationDevice = nullptr;
     elementCount = 0;
     dataType = kUnknownType;
     isPacked = false;
@@ -2117,6 +2274,10 @@ void Buffer::releaseInternal() {
 
   bufferData.size = 0;
   bufferData.usage = WGPUBufferUsage_None;
+  if (bufferData.creationDevice) {
+    wgpuDeviceRelease(bufferData.creationDevice);
+    bufferData.creationDevice = nullptr;
+  }
   elementCount = 0;
   dataType = kUnknownType;
   isPacked = false;
@@ -2697,7 +2858,13 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     WaitScope wpMap(WP_RD_MAP);
     WGPUFutureWaitInfo waitInfo = {};
     waitInfo.future = future;
+#ifdef __EMSCRIPTEN__
+    // Await the map itself rather than polling it via setTimeout(0). The
+    // instance enables TimedWaitAny only on this Asyncify browser backend.
+    wgpuInstanceWaitAny(instance, 1, &waitInfo, UINT64_MAX);
+#else
     wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+#endif
     if (!waitInfo.completed) {
       // Hot-poll: Sleep(1) on Windows actually sleeps ~15ms under the default
       // timer resolution which makes per-frame read-back dominate encoder

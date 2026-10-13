@@ -16,7 +16,8 @@ const char *kDefLog = "ComputeShader";
 
 namespace mgpu {
 
-ComputeShader::ComputeShader(MGPU &mgpu) : mgpu(mgpu) {}
+ComputeShader::ComputeShader(MGPU &mgpu)
+    : mgpu(mgpu), creationDevice(mgpu.retainReadyDevice()) {}
 
 ComputeShader::~ComputeShader() {
   // safe to do immediately since it's on the right
@@ -25,7 +26,8 @@ ComputeShader::~ComputeShader() {
                       bindGroup = this->bindGroup,
                       bindGroupLayout = this->bindGroupLayout,
                       pipelineLayout = this->pipelineLayout,
-                      shaderModule = this->shaderModule]() {
+                      shaderModule = this->shaderModule,
+                      creationDevice = this->creationDevice]() {
     if (computePipeline) {
       wgpuComputePipelineRelease(computePipeline);
     }
@@ -41,12 +43,16 @@ ComputeShader::~ComputeShader() {
     if (shaderModule) {
       wgpuShaderModuleRelease(shaderModule);
     }
+    if (creationDevice) {
+      wgpuDeviceRelease(creationDevice);
+    }
   };
 
   try {
     mgpu.getWebGPUThread().enqueueAsync(cleanupTask);
   } catch (...) {
-    // If GPU thread is shutdown, ignore cleanup
+    // The queue is already closed, so release retained handles here instead.
+    cleanupTask();
   }
 }
 
@@ -100,25 +106,8 @@ void ComputeShader::setBuffer(int tag, const Buffer &buffer) {
   // Synchronize with dispatch/update on GPU thread
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
-  // Resize if needed
-  if (tag >= static_cast<int>(buffers.size())) {
-    buffers.resize(tag + 1);
-  }
-
-  // only check pointer, not size
-  if (buffers[tag].buffer == buffer.bufferData.buffer) {
-    return; // No change
-  }
-
-  buffers[tag] =
-      BufferBinding{buffer.bufferData.buffer, buffer.bufferData.size, 0};
-
-  // Sync into unified bindings vector
-  if (tag >= static_cast<int>(bindings.size())) bindings.resize(tag + 1);
-  bindings[tag] = BindingEntry{BindingKind::kStorageBuffer,
-                               buffer.bufferData.buffer,
-                               buffer.bufferData.size, 0, nullptr};
-  bindingsDirty = true;
+  applyBufferBinding(tag, buffer.bufferData.buffer, buffer.bufferData.size, 0,
+                     BindingKind::kStorageBuffer);
 }
 
 void ComputeShader::setBufferQueued(int tag, const Buffer &buffer) {
@@ -133,46 +122,168 @@ void ComputeShader::setBufferQueued(int tag, const Buffer &buffer) {
   }
   mgpu.getWebGPUThread().enqueueAsync([this, tag, handle, size]() {
     mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
-    if (tag >= static_cast<int>(buffers.size())) {
-      buffers.resize(tag + 1);
-    }
-    if (buffers[tag].buffer == handle) {
-      return; // No change
-    }
-    buffers[tag] = BufferBinding{handle, size, 0};
-    if (tag >= static_cast<int>(bindings.size())) bindings.resize(tag + 1);
-    bindings[tag] =
-        BindingEntry{BindingKind::kStorageBuffer, handle, size, 0, nullptr};
-    bindingsDirty = true;
+    applyBufferBinding(tag, handle, size, 0, BindingKind::kStorageBuffer);
   });
+}
+
+void ComputeShader::setBufferRangeQueued(int slot, WGPUBuffer buffer,
+                                         size_t size, size_t offset,
+                                         BindingKind kind) {
+  mgpu.getWebGPUThread().enqueueAsync(
+      [this, slot, buffer, size, offset, kind]() {
+        mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+        applyBufferBinding(slot, buffer, size, offset, kind);
+        // Explicit range binds are also the Dart wrapper's rebind boundary.
+        // A destroyed WebGPU buffer may later be assigned the same raw handle,
+        // so identical-looking metadata must still replace the bind group.
+        bindingsDirty = true;
+      });
+}
+
+void ComputeShader::applyBufferBinding(int slot, WGPUBuffer buffer, size_t size,
+                                       size_t offset, BindingKind kind) {
+  if (slot >= static_cast<int>(buffers.size())) buffers.resize(slot + 1);
+  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+
+  const BindingEntry &current = bindings[slot];
+  if (current.kind == kind && current.buffer == buffer &&
+      current.size == size && current.offset == offset) {
+    return;
+  }
+
+  const bool layoutChanged = current.kind != kind;
+  buffers[slot] = BufferBinding{buffer, size, offset};
+  bindings[slot] = BindingEntry{kind, buffer, size, offset, nullptr};
+  bindingsDirty = true;
+  if (layoutChanged) pipelineDirty = true;
+}
+
+void ComputeShader::setOwnedTextureQueued(
+    int slot, std::shared_ptr<OwnedTextureViewState> view, BindingKind kind) {
+  mgpu.getWebGPUThread().enqueueAsync([this, slot, view = std::move(view), kind]() {
+    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+    WGPUDevice currentDevice = mgpu.retainReadyDevice();
+    const bool usable = currentDevice && creationDevice &&
+                        currentDevice == creationDevice && view->isAlive() &&
+                        view->textureState->owner == &mgpu &&
+                        view->textureState->creationDevice == creationDevice;
+    if (currentDevice) wgpuDeviceRelease(currentDevice);
+    if (!usable) return;
+    if (slot >= static_cast<int>(buffers.size())) buffers.resize(slot + 1);
+    if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+    const BindingEntry &current = bindings[slot];
+    const WGPUTextureFormat format = view->textureState->format;
+    const bool layoutChanged = current.kind != kind ||
+                               current.viewDimension != view->dimension ||
+                               current.textureFormat != format;
+    BindingEntry next;
+    next.kind = kind;
+    next.view = view->view;
+    next.viewDimension = view->dimension;
+    next.textureFormat = format;
+    next.ownedTextureView = view;
+    bindings[slot] = std::move(next);
+    buffers[slot] = BufferBinding{};
+    bindingsDirty = true;
+    if (layoutChanged) pipelineDirty = true;
+  });
+}
+
+void ComputeShader::setOwnedSamplerQueued(
+    int slot, std::shared_ptr<OwnedSamplerState> sampler, BindingKind kind) {
+  mgpu.getWebGPUThread().enqueueAsync(
+      [this, slot, sampler = std::move(sampler), kind]() {
+        mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+        WGPUDevice currentDevice = mgpu.retainReadyDevice();
+        const bool usable =
+            currentDevice && creationDevice && currentDevice == creationDevice &&
+            sampler->alive.load(std::memory_order_acquire) &&
+            sampler->owner == &mgpu &&
+            sampler->creationDevice == creationDevice;
+        if (currentDevice) wgpuDeviceRelease(currentDevice);
+        if (!usable) return;
+        if (slot >= static_cast<int>(buffers.size())) buffers.resize(slot + 1);
+        if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
+        const bool layoutChanged = bindings[slot].kind != kind;
+        BindingEntry next;
+        next.kind = kind;
+        next.sampler = sampler->sampler;
+        next.ownedSampler = sampler;
+        bindings[slot] = std::move(next);
+        buffers[slot] = BufferBinding{};
+        bindingsDirty = true;
+        if (layoutChanged) pipelineDirty = true;
+      });
+}
+
+bool ComputeShader::ownedBindingsAlive() const {
+  bool hasOwned = false;
+  for (const BindingEntry &binding : bindings) {
+    hasOwned = hasOwned || binding.ownedTextureView || binding.ownedSampler;
+  }
+  if (!hasOwned) return true;
+
+  WGPUDevice currentDevice = mgpu.retainReadyDevice();
+  if (!currentDevice) return false;
+  bool valid = creationDevice && currentDevice == creationDevice;
+  for (const BindingEntry &binding : bindings) {
+    if (binding.ownedTextureView) {
+      const auto &view = binding.ownedTextureView;
+      valid = valid && view->isAlive() &&
+              view->textureState->creationDevice == creationDevice &&
+              view->textureState->owner == &mgpu;
+    }
+    if (binding.ownedSampler) {
+      const auto &sampler = binding.ownedSampler;
+      valid = valid && sampler->alive.load(std::memory_order_acquire) &&
+              sampler->creationDevice == creationDevice &&
+              sampler->owner == &mgpu;
+    }
+  }
+  wgpuDeviceRelease(currentDevice);
+  return valid;
 }
 
 void ComputeShader::setTextureView(int slot, WGPUTextureView view) {
   if (slot < 0 || !view) return;
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
   if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
-  bindings[slot] = BindingEntry{BindingKind::kTextureView,
-                                nullptr, 0, 0, view};
+  const bool layoutChanged = bindings[slot].kind != BindingKind::kTextureView ||
+                             bindings[slot].viewDimension !=
+                                 WGPUTextureViewDimension_2D;
+  BindingEntry next;
+  next.kind = BindingKind::kTextureView;
+  next.view = view;
+  next.viewDimension = WGPUTextureViewDimension_2D;
+  bindings[slot] = std::move(next);
   bindingsDirty = true;
+  if (layoutChanged) pipelineDirty = true;
 }
 
 void ComputeShader::setStorageBuffer(int slot, WGPUBuffer buf,
                                      size_t size, size_t offset) {
   if (slot < 0 || !buf) return;
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
-  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
-  bindings[slot] = BindingEntry{BindingKind::kStorageBuffer,
-                                buf, size, offset, nullptr};
-  bindingsDirty = true;
+  applyBufferBinding(slot, buf, size, offset, BindingKind::kStorageBuffer);
+}
+void ComputeShader::releaseTextureBindingQueued(int slot) {
+  mgpu.getWebGPUThread().enqueueAsync([this, slot]() {
+    mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+    if (slot < 0 || slot >= static_cast<int>(bindings.size())) return;
+    bindings[slot].view = nullptr;
+    bindings[slot].ownedTextureView.reset();
+    if (bindGroup) {
+      wgpuBindGroupRelease(bindGroup);
+      bindGroup = nullptr;
+    }
+    bindingsDirty = true;
+  });
 }
 
 void ComputeShader::setUniformBuffer(int slot, WGPUBuffer buf, size_t size) {
   if (slot < 0 || !buf) return;
   mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
-  if (slot >= static_cast<int>(bindings.size())) bindings.resize(slot + 1);
-  bindings[slot] = BindingEntry{BindingKind::kUniformBuffer,
-                                buf, size, 0, nullptr};
-  bindingsDirty = true;
+  applyBufferBinding(slot, buf, size, 0, BindingKind::kUniformBuffer);
 }
 
 size_t ComputeShader::calculateBindingsHash() const {
@@ -265,15 +376,50 @@ bool ComputeShader::createBindGroupLayout() {
         entry.buffer.minBindingSize = 0;
         layoutEntries.push_back(entry);
         break;
+      case BindingKind::kReadOnlyStorageBuffer:
+        entry.buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
+        entry.buffer.minBindingSize = 0;
+        layoutEntries.push_back(entry);
+        break;
       case BindingKind::kUniformBuffer:
         entry.buffer.type = WGPUBufferBindingType_Uniform;
         entry.buffer.minBindingSize = 0;
         layoutEntries.push_back(entry);
         break;
       case BindingKind::kTextureView:
-        entry.texture.sampleType    = WGPUTextureSampleType_Float;
-        entry.texture.viewDimension = WGPUTextureViewDimension_2D;
+        entry.texture.sampleType    = WGPUTextureSampleType_UnfilterableFloat;
+        entry.texture.viewDimension = b.viewDimension;
         entry.texture.multisampled  = false;
+        layoutEntries.push_back(entry);
+        break;
+      case BindingKind::kSampledTextureFloat:
+      case BindingKind::kSampledTextureUnfilterable:
+      case BindingKind::kDepthTexture:
+        entry.texture.sampleType =
+            b.kind == BindingKind::kSampledTextureFloat
+                ? WGPUTextureSampleType_Float
+                : (b.kind == BindingKind::kSampledTextureUnfilterable
+                       ? WGPUTextureSampleType_UnfilterableFloat
+                       : WGPUTextureSampleType_Depth);
+        entry.texture.viewDimension = b.viewDimension;
+        entry.texture.multisampled = false;
+        layoutEntries.push_back(entry);
+        break;
+      case BindingKind::kStorageTextureWriteOnly:
+        entry.storageTexture.access = WGPUStorageTextureAccess_WriteOnly;
+        entry.storageTexture.format = b.textureFormat;
+        entry.storageTexture.viewDimension = b.viewDimension;
+        layoutEntries.push_back(entry);
+        break;
+      case BindingKind::kFilteringSampler:
+      case BindingKind::kNonFilteringSampler:
+      case BindingKind::kComparisonSampler:
+        entry.sampler.type =
+            b.kind == BindingKind::kFilteringSampler
+                ? WGPUSamplerBindingType_Filtering
+                : (b.kind == BindingKind::kNonFilteringSampler
+                       ? WGPUSamplerBindingType_NonFiltering
+                       : WGPUSamplerBindingType_Comparison);
         layoutEntries.push_back(entry);
         break;
       default:
@@ -297,11 +443,57 @@ bool ComputeShader::createBindGroupLayout() {
 
   if (layoutEntries.empty()) return false;
 
+  WGPULimits limits = {};
+  WGPUDevice device = mgpu.getDevice();
+  if (!device || wgpuDeviceGetLimits(device, &limits) != WGPUStatus_Success)
+    return false;
+  uint32_t sampledTextures = 0;
+  uint32_t storageTextures = 0;
+  uint32_t samplers = 0;
+  uint32_t storageBuffers = 0;
+  uint32_t uniformBuffers = 0;
+  for (const BindingEntry &binding : bindings) {
+    switch (binding.kind) {
+    case BindingKind::kTextureView:
+    case BindingKind::kSampledTextureFloat:
+    case BindingKind::kSampledTextureUnfilterable:
+    case BindingKind::kDepthTexture:
+      ++sampledTextures;
+      break;
+    case BindingKind::kStorageTextureWriteOnly:
+      ++storageTextures;
+      break;
+    case BindingKind::kFilteringSampler:
+    case BindingKind::kNonFilteringSampler:
+    case BindingKind::kComparisonSampler:
+      ++samplers;
+      break;
+    case BindingKind::kStorageBuffer:
+    case BindingKind::kReadOnlyStorageBuffer:
+      ++storageBuffers;
+      break;
+    case BindingKind::kUniformBuffer:
+      ++uniformBuffers;
+      break;
+    default:
+      break;
+    }
+  }
+  if (layoutEntries.size() > limits.maxBindingsPerBindGroup ||
+      sampledTextures > limits.maxSampledTexturesPerShaderStage ||
+      storageTextures > limits.maxStorageTexturesPerShaderStage ||
+      samplers > limits.maxSamplersPerShaderStage ||
+      storageBuffers > limits.maxStorageBuffersPerShaderStage ||
+      uniformBuffers > limits.maxUniformBuffersPerShaderStage) {
+    LOG_ERROR("bind group layout exceeds device binding limits");
+    return false;
+  }
+
   WGPUBindGroupLayoutDescriptor layoutDesc = {};
   layoutDesc.entryCount = static_cast<uint32_t>(layoutEntries.size());
   layoutDesc.entries    = layoutEntries.data();
 
-  bindGroupLayout = wgpuDeviceCreateBindGroupLayout(mgpu.getDevice(), &layoutDesc);
+  bindGroupLayout = wgpuDeviceCreateBindGroupLayout(device, &layoutDesc);
   return bindGroupLayout != nullptr;
 }
 
@@ -385,6 +577,7 @@ bool ComputeShader::createBindGroup() {
       entry.binding = static_cast<uint32_t>(i);
       switch (b.kind) {
       case BindingKind::kStorageBuffer:
+      case BindingKind::kReadOnlyStorageBuffer:
       case BindingKind::kUniformBuffer:
         entry.buffer = b.buffer;
         entry.offset = b.offset;
@@ -392,7 +585,17 @@ bool ComputeShader::createBindGroup() {
         bindGroupEntries.push_back(entry);
         break;
       case BindingKind::kTextureView:
+      case BindingKind::kSampledTextureFloat:
+      case BindingKind::kSampledTextureUnfilterable:
+      case BindingKind::kDepthTexture:
+      case BindingKind::kStorageTextureWriteOnly:
         entry.textureView = b.view;
+        bindGroupEntries.push_back(entry);
+        break;
+      case BindingKind::kFilteringSampler:
+      case BindingKind::kNonFilteringSampler:
+      case BindingKind::kComparisonSampler:
+        entry.sampler = b.sampler;
         bindGroupEntries.push_back(entry);
         break;
       default:
@@ -460,6 +663,11 @@ void ComputeShader::dispatch(int groupsX, int groupsY, int groupsZ) {
     // Ensure consistency with concurrent setBuffer/loadKernelString calls.
     mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
 
+    if (!ownedBindingsAlive()) {
+      LOG_ERROR("dispatch skipped: owned texture or sampler is stale");
+      return;
+    }
+
     if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
       LOG_ERROR("dispatch skipped: no kernel loaded or bad workgroup counts "
                 "(%d,%d,%d)",
@@ -521,7 +729,10 @@ void ComputeShader::dispatchAsync(int groupsX, int groupsY, int groupsZ,
       // fire-and-forget work first to preserve execution order.
       mgpu.flushBatchLocked();
 
-      if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 || groupsZ <= 0) {
+      if (!ownedBindingsAlive()) {
+        LOG_ERROR("dispatchAsync skipped: owned texture or sampler is stale");
+      } else if (shaderCode.empty() || groupsX <= 0 || groupsY <= 0 ||
+                 groupsZ <= 0) {
         LOG_ERROR("dispatchAsync skipped: no kernel loaded or bad workgroup "
                   "counts (%d,%d,%d)",
                   groupsX, groupsY, groupsZ);

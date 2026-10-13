@@ -36,11 +36,14 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:minigpu/src/buffer.dart';
 import 'package:minigpu/src/compute_shader.dart';
 import 'package:minigpu/src/minigpu.dart';
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
+
+part 'shader_warm_device.dart';
 
 /// One kernel to precompile.
 class KernelWarmSpec {
@@ -74,9 +77,9 @@ class KernelWarmSpec {
   /// slots are assigned in first-seen order.
   final Map<String, int> buffers;
 
-  /// Give up on this kernel after this long. A timeout fails THIS spec only —
-  /// the set carries on — because "this one kernel is too big for this driver"
-  /// is both common and survivable.
+  /// Stop waiting for this kernel after this long. The set stops admitting new
+  /// work; device-owned scratch remains alive until the submitted dispatch
+  /// finishes or the device is torn down.
   final Duration timeout;
 }
 
@@ -149,7 +152,8 @@ class WarmProgress {
       phase == WarmPhase.cancelled;
 
   @override
-  String toString() => 'WarmProgress(${phase.name} $completed/$total'
+  String toString() =>
+      'WarmProgress(${phase.name} $completed/$total'
       '${failed > 0 ? ", $failed failed" : ""}'
       '${label != null ? ", building $label" : ""})';
 }
@@ -222,16 +226,12 @@ class _Warmer implements ShaderWarmer {
   late WarmProgress _value;
   var _cancelled = false;
 
-  /// Sources already built in this process. The backend caches pipelines
-  /// globally, so re-warming the same text is pointless — and a caller warming
-  /// per-stream would otherwise pay it per stream.
-  static final Set<String> _built = <String>{};
-
   @override
-  Stream<WarmProgress> get progress async* {
-    yield _value;
-    yield* _ctrl.stream;
-  }
+  Stream<WarmProgress> get progress => Stream.multi((sink) {
+    final subscription = _ctrl.stream.listen(sink.add, onDone: sink.close);
+    sink.add(_value);
+    sink.onCancel = subscription.cancel;
+  });
 
   @override
   WarmProgress get value => _value;
@@ -248,14 +248,16 @@ class _Warmer implements ShaderWarmer {
   }
 
   void _finish(WarmPhase phase) {
-    _emit(WarmProgress(
-      phase: phase,
-      completed: _value.completed,
-      total: _specs.length,
-      failed: _errors.length,
-      elapsed: _stopwatch.elapsed,
-      errors: List.unmodifiable(_errors),
-    ));
+    _emit(
+      WarmProgress(
+        phase: phase,
+        completed: _value.completed,
+        total: _specs.length,
+        failed: _errors.length,
+        elapsed: _stopwatch.elapsed,
+        errors: List.unmodifiable(_errors),
+      ),
+    );
     if (!_done.isCompleted) _done.complete(_value);
     unawaited(_ctrl.close());
   }
@@ -271,14 +273,16 @@ class _Warmer implements ShaderWarmer {
     // letting each discover that separately would cost one timeout apiece.
     final ready = _ensureReady;
     if (ready != null) {
-      _emit(WarmProgress(
-        phase: WarmPhase.running,
-        completed: 0,
-        total: _specs.length,
-        failed: 0,
-        elapsed: _stopwatch.elapsed,
-        label: 'device',
-      ));
+      _emit(
+        WarmProgress(
+          phase: WarmPhase.running,
+          completed: 0,
+          total: _specs.length,
+          failed: 0,
+          elapsed: _stopwatch.elapsed,
+          label: 'device',
+        ),
+      );
       try {
         await ready();
       } catch (e) {
@@ -293,86 +297,56 @@ class _Warmer implements ShaderWarmer {
         _finish(WarmPhase.cancelled);
         return;
       }
-      _emit(WarmProgress(
-        phase: WarmPhase.running,
-        completed: completed,
-        total: _specs.length,
-        failed: _errors.length,
-        elapsed: _stopwatch.elapsed,
-        label: spec.label,
-        errors: List.unmodifiable(_errors),
-      ));
+      _emit(
+        WarmProgress(
+          phase: WarmPhase.running,
+          completed: completed,
+          total: _specs.length,
+          failed: _errors.length,
+          elapsed: _stopwatch.elapsed,
+          label: spec.label,
+          errors: List.unmodifiable(_errors),
+        ),
+      );
       final err = await _warmOne(spec);
       if (err != null) {
         _errors.add(err);
         // 🔴 A LOST DEVICE IS TERMINAL FOR THE SET. Everything after it would
         // fail the same way, each costing its own timeout — which is exactly
         // how a warm turns a bad device into a multi-minute hang.
-        if (err.stage == WarmStage.deviceLost) {
+        if (err.stage == WarmStage.deviceLost ||
+            err.stage == WarmStage.timeout) {
           completed++;
-          _emit(WarmProgress(
-            phase: WarmPhase.running,
-            completed: completed,
-            total: _specs.length,
-            failed: _errors.length,
-            elapsed: _stopwatch.elapsed,
-            errors: List.unmodifiable(_errors),
-          ));
+          _emit(
+            WarmProgress(
+              phase: WarmPhase.running,
+              completed: completed,
+              total: _specs.length,
+              failed: _errors.length,
+              elapsed: _stopwatch.elapsed,
+              errors: List.unmodifiable(_errors),
+            ),
+          );
           _finish(WarmPhase.failed);
           return;
         }
       }
       completed++;
-      _emit(WarmProgress(
-        phase: WarmPhase.running,
-        completed: completed,
-        total: _specs.length,
-        failed: _errors.length,
-        elapsed: _stopwatch.elapsed,
-        errors: List.unmodifiable(_errors),
-      ));
+      _emit(
+        WarmProgress(
+          phase: WarmPhase.running,
+          completed: completed,
+          total: _specs.length,
+          failed: _errors.length,
+          elapsed: _stopwatch.elapsed,
+          errors: List.unmodifiable(_errors),
+        ),
+      );
     }
     _finish(_errors.isEmpty ? WarmPhase.ready : WarmPhase.failed);
   }
 
-  /// Build one kernel. Returns null on success, or why it failed.
-  Future<WarmError?> _warmOne(KernelWarmSpec spec) async {
-    if (_built.contains(spec.source)) return null;
-    final scratch = <Buffer>[];
-    ComputeShader? shader;
-    try {
-      shader = _gpu.createComputeShader();
-      shader.loadKernelString(spec.source);
-      spec.buffers.forEach((tag, count) {
-        final b = _gpu.createBuffer(count <= 0 ? 1 : count, BufferDataType.float32);
-        scratch.add(b);
-        shader!.setBuffer(tag, b);
-      });
-      // THE COMPILE IS THE DISPATCH. One workgroup, so the kernel runs on
-      // whatever the scratch buffers contain and nobody reads the result —
-      // building the pipeline is the entire point.
-      await shader.dispatch(1, 1, 1).timeout(spec.timeout);
-      _built.add(spec.source);
-      return null;
-    } on TimeoutException {
-      return WarmError(spec.label, WarmStage.timeout,
-          'did not finish within ${spec.timeout.inSeconds}s');
-    } catch (e) {
-      final msg = '$e';
-      // "device lost" is the one failure that poisons everything after it.
-      final lost = msg.toLowerCase().contains('device lost') ||
-          msg.toLowerCase().contains('devicelost');
-      return WarmError(spec.label,
-          lost ? WarmStage.deviceLost : WarmStage.dispatch, msg);
-    } finally {
-      for (final b in scratch) {
-        try {
-          b.destroy();
-        } catch (_) {}
-      }
-      try {
-        shader?.destroy();
-      } catch (_) {}
-    }
-  }
+  /// Build one kernel on the device-scoped serialized warm lane.
+  Future<WarmError?> _warmOne(KernelWarmSpec spec) =>
+      (_warmDevices[_gpu] ??= _WarmDevice(_gpu)).warm(spec);
 }

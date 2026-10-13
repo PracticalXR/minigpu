@@ -1912,6 +1912,42 @@ async function createWasm() {
     };
 
   
+  
+  
+  
+  var _emwgpuDeviceCreateRenderPipelineAsync = function(devicePtr, futureId, descriptor, pipelinePtr) {
+    futureId = bigintToI53Checked(futureId);
+  
+  
+      var desc = WebGPU.makeRenderPipelineDesc(descriptor);
+      var device = WebGPU.getJsObject(devicePtr);
+       // createRenderPipelineAsync
+      WebGPU.Internals.futureInsert(futureId, device.createRenderPipelineAsync(desc).then((pipeline) => {
+         // createRenderPipelineAsync fulfilled
+        callUserCallback(() => {
+          WebGPU.Internals.jsObjectInsert(pipelinePtr, pipeline);
+          _emwgpuOnCreateRenderPipelineCompleted(futureId, 1,
+            pipelinePtr, 0);
+        });
+      }, (pipelineError) => {
+         // createRenderPipelineAsync rejected
+        callUserCallback(() => {
+          var sp = stackSave();
+          var messagePtr = stringToUTF8OnStack(pipelineError.message);
+          var status =
+            pipelineError.reason === 'validation' ? 3 :
+            pipelineError.reason === 'internal' ? 4 :
+            0;
+          
+          _emwgpuOnCreateRenderPipelineCompleted(futureId, status,
+            pipelinePtr, messagePtr);
+          stackRestore(sp);
+        });
+      }));
+    ;
+  };
+
+  
   var _emwgpuDeviceCreateShaderModule = (devicePtr, descriptor, shaderModulePtr) => {
       
       var nextInChainPtr = HEAPU32[((descriptor)>>2)];
@@ -2008,6 +2044,26 @@ async function createWasm() {
       }));
     ;
   }
+
+  
+  
+  
+  
+  var _emwgpuQueueOnSubmittedWorkDone = function(queuePtr, futureId) {
+    futureId = bigintToI53Checked(futureId);
+  
+  
+      var queue = WebGPU.getJsObject(queuePtr);
+  
+       // onSubmittedWorkDone
+      WebGPU.Internals.futureInsert(futureId, queue.onSubmittedWorkDone().then(() => {
+         // onSubmittedWorkDone fulfilled (assumed not to reject)
+        callUserCallback(() => {
+          _emwgpuOnWorkDoneCompleted(futureId, 1);
+        });
+      }));
+    ;
+  };
 
   
   var _emwgpuWaitAny = (futurePtr, futureCount, timeoutMSPtr) => Asyncify.handleAsync(async () => {
@@ -2198,6 +2254,97 @@ async function createWasm() {
       var commandEncoder = WebGPU.getJsObject(encoderPtr);
       var ptr = _emwgpuCreateComputePassEncoder(0);
       WebGPU.Internals.jsObjectInsert(ptr, commandEncoder.beginComputePass(desc));
+      return ptr;
+    };
+
+  
+  
+  var _wgpuCommandEncoderBeginRenderPass = (encoderPtr, descriptor) => {
+      
+  
+      function makeColorAttachment(caPtr) {
+        var viewPtr = HEAPU32[(((caPtr)+(4))>>2)];
+        if (viewPtr === 0) {
+          // Null `view` means no attachment in this slot.
+          return undefined;
+        }
+  
+        var depthSlice = HEAPU32[(((caPtr)+(8))>>2)];
+        if (depthSlice == 0xFFFFFFFF) depthSlice = undefined;
+  
+        return {
+          "view": WebGPU.getJsObject(viewPtr),
+          "depthSlice": depthSlice,
+          "resolveTarget": WebGPU.getJsObject(
+            HEAPU32[(((caPtr)+(12))>>2)]),
+          "clearValue": WebGPU.makeColor(caPtr + 24),
+          "loadOp": WebGPU.LoadOp[HEAP32[(((caPtr)+(16))>>2)]],
+          "storeOp": WebGPU.StoreOp[HEAP32[(((caPtr)+(20))>>2)]],
+        };
+      }
+  
+      function makeColorAttachments(count, caPtr) {
+        var attachments = [];
+        for (var i = 0; i < count; ++i) {
+          attachments.push(makeColorAttachment(caPtr + 56 * i));
+        }
+        return attachments;
+      }
+  
+      function makeDepthStencilAttachment(dsaPtr) {
+        if (dsaPtr === 0) return undefined;
+  
+        return {
+          "view": WebGPU.getJsObject(
+            HEAPU32[(((dsaPtr)+(4))>>2)]),
+          "depthClearValue": HEAPF32[(((dsaPtr)+(16))>>2)],
+          "depthLoadOp": WebGPU.LoadOp[HEAP32[(((dsaPtr)+(8))>>2)]],
+          "depthStoreOp": WebGPU.StoreOp[HEAP32[(((dsaPtr)+(12))>>2)]],
+          "depthReadOnly": !!(HEAPU32[(((dsaPtr)+(20))>>2)]),
+          "stencilClearValue": HEAPU32[(((dsaPtr)+(32))>>2)],
+          "stencilLoadOp": WebGPU.LoadOp[HEAP32[(((dsaPtr)+(24))>>2)]],
+          "stencilStoreOp": WebGPU.StoreOp[HEAP32[(((dsaPtr)+(28))>>2)]],
+          "stencilReadOnly": !!(HEAPU32[(((dsaPtr)+(36))>>2)]),
+        };
+      }
+  
+      function makeRenderPassDescriptor(descriptor) {
+        
+        var nextInChainPtr = HEAPU32[((descriptor)>>2)];
+  
+        var maxDrawCount = undefined;
+        if (nextInChainPtr !== 0) {
+          var sType = HEAP32[(((nextInChainPtr)+(4))>>2)];
+          var renderPassMaxDrawCount = nextInChainPtr;
+          
+          // Note: The user could have passed a really huge value here, which is technically valid in
+          // C but will not be allowed by WebGPU in JS because of [EnforceRange]. We intentionally
+          // ignore that case because it's not useful - apps can just pick a smaller maxDrawCount.
+          maxDrawCount = readI53FromI64((renderPassMaxDrawCount)+(8));
+        }
+  
+        var desc = {
+          "label": WebGPU.makeStringFromOptionalStringView(
+            descriptor + 4),
+          "colorAttachments": makeColorAttachments(
+            HEAPU32[(((descriptor)+(12))>>2)],
+            HEAPU32[(((descriptor)+(16))>>2)]),
+          "depthStencilAttachment": makeDepthStencilAttachment(
+            HEAPU32[(((descriptor)+(20))>>2)]),
+          "occlusionQuerySet": WebGPU.getJsObject(
+            HEAPU32[(((descriptor)+(24))>>2)]),
+          "timestampWrites": WebGPU.makePassTimestampWrites(
+            HEAPU32[(((descriptor)+(28))>>2)]),
+          "maxDrawCount": maxDrawCount,
+        };
+        return desc;
+      }
+  
+      var desc = makeRenderPassDescriptor(descriptor);
+  
+      var commandEncoder = WebGPU.getJsObject(encoderPtr);
+      var ptr = _emwgpuCreateRenderPassEncoder(0);
+      WebGPU.Internals.jsObjectInsert(ptr, commandEncoder.beginRenderPass(desc));
       return ptr;
     };
 
@@ -2476,6 +2623,35 @@ async function createWasm() {
 
   
   
+  var _wgpuDeviceCreateSampler = (devicePtr, descriptor) => {
+      var desc;
+      if (descriptor) {
+        
+  
+        desc = {
+          "label": WebGPU.makeStringFromOptionalStringView(
+            descriptor + 4),
+          "addressModeU": WebGPU.AddressMode[HEAP32[(((descriptor)+(12))>>2)]],
+          "addressModeV": WebGPU.AddressMode[HEAP32[(((descriptor)+(16))>>2)]],
+          "addressModeW": WebGPU.AddressMode[HEAP32[(((descriptor)+(20))>>2)]],
+          "magFilter": WebGPU.FilterMode[HEAP32[(((descriptor)+(24))>>2)]],
+          "minFilter": WebGPU.FilterMode[HEAP32[(((descriptor)+(28))>>2)]],
+          "mipmapFilter": WebGPU.MipmapFilterMode[HEAP32[(((descriptor)+(32))>>2)]],
+          "lodMinClamp": HEAPF32[(((descriptor)+(36))>>2)],
+          "lodMaxClamp": HEAPF32[(((descriptor)+(40))>>2)],
+          "compare": WebGPU.CompareFunction[HEAP32[(((descriptor)+(44))>>2)]],
+          "maxAnisotropy": HEAPU16[(((descriptor)+(48))>>1)],
+        };
+      }
+  
+      var device = WebGPU.getJsObject(devicePtr);
+      var ptr = _emwgpuCreateSampler(0);
+      WebGPU.Internals.jsObjectInsert(ptr, device.createSampler(desc));
+      return ptr;
+    };
+
+  
+  
   var _wgpuDeviceCreateTexture = (devicePtr, descriptor) => {
       
       var nextInChainPtr = HEAPU32[((descriptor)>>2)];
@@ -2515,6 +2691,20 @@ async function createWasm() {
     };
 
   
+  var _wgpuDeviceGetAdapterInfo = (devicePtr, adapterInfo) => {
+      var device = WebGPU.getJsObject(devicePtr);
+      WebGPU.fillAdapterInfoStruct(device.adapterInfo, adapterInfo);
+      return 1;
+    };
+
+  
+  var _wgpuDeviceGetLimits = (devicePtr, limitsOutPtr) => {
+      var device = WebGPU.getJsObject(devicePtr);
+      WebGPU.fillLimitStruct(device.limits, limitsOutPtr);
+      return 1;
+    };
+
+  
   var _wgpuQueueSubmit = (queuePtr, commandCount, commands) => {
       var queue = WebGPU.getJsObject(queuePtr);
       var cmds = Array.from(HEAP32.subarray((((commands)>>2)), ((commands + commandCount * 4)>>2)),
@@ -2548,6 +2738,96 @@ async function createWasm() {
       // where Chromium makes a copy of the entire heap. crbug.com/1134457
       var subarray = HEAPU8.subarray(data, data + dataSize);
       queue.writeTexture(destination, subarray, dataLayout, writeSize);
+    };
+
+  
+  var _wgpuRenderPassEncoderDraw = (passPtr, vertexCount, instanceCount, firstVertex, firstInstance) => {
+      
+      
+      firstVertex >>>= 0;
+      firstInstance >>>= 0;
+      var pass = WebGPU.getJsObject(passPtr);
+      pass.draw(vertexCount, instanceCount, firstVertex, firstInstance);
+    };
+
+  
+  var _wgpuRenderPassEncoderDrawIndexed = (passPtr, indexCount, instanceCount, firstIndex, baseVertex, firstInstance) => {
+      
+      
+      firstIndex >>>= 0;
+      firstInstance >>>= 0;
+      var pass = WebGPU.getJsObject(passPtr);
+      pass.drawIndexed(indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+    };
+
+  
+  var _wgpuRenderPassEncoderEnd = (encoderPtr) => {
+      var encoder = WebGPU.getJsObject(encoderPtr);
+      encoder.end();
+    };
+
+  
+  var _wgpuRenderPassEncoderSetBindGroup = (passPtr, groupIndex, groupPtr, dynamicOffsetCount, dynamicOffsetsPtr) => {
+      
+      var pass = WebGPU.getJsObject(passPtr);
+      var group = WebGPU.getJsObject(groupPtr);
+      if (dynamicOffsetCount == 0) {
+        pass.setBindGroup(groupIndex, group);
+      } else {
+        pass.setBindGroup(groupIndex, group, HEAPU32, ((dynamicOffsetsPtr)>>2), dynamicOffsetCount);
+      }
+    };
+
+  
+  
+  function _wgpuRenderPassEncoderSetIndexBuffer(passPtr, bufferPtr, format, offset, size) {
+    offset = bigintToI53Checked(offset);
+    size = bigintToI53Checked(size);
+  
+  
+      var pass = WebGPU.getJsObject(passPtr);
+      var buffer = WebGPU.getJsObject(bufferPtr);
+      if (size == -1) size = undefined;
+      pass.setIndexBuffer(buffer, WebGPU.IndexFormat[format], offset, size);
+    ;
+  }
+
+  
+  var _wgpuRenderPassEncoderSetPipeline = (passPtr, pipelinePtr) => {
+      var pass = WebGPU.getJsObject(passPtr);
+      var pipeline = WebGPU.getJsObject(pipelinePtr);
+      pass.setPipeline(pipeline);
+    };
+
+  
+  var _wgpuRenderPassEncoderSetScissorRect = (passPtr, x, y, w, h) => {
+      
+      
+      
+      
+      var pass = WebGPU.getJsObject(passPtr);
+      pass.setScissorRect(x, y, w, h);
+    };
+
+  
+  
+  function _wgpuRenderPassEncoderSetVertexBuffer(passPtr, slot, bufferPtr, offset, size) {
+    offset = bigintToI53Checked(offset);
+    size = bigintToI53Checked(size);
+  
+  
+      
+      var pass = WebGPU.getJsObject(passPtr);
+      var buffer = WebGPU.getJsObject(bufferPtr);
+      if (size == -1) size = undefined;
+      pass.setVertexBuffer(slot, buffer, offset, size);
+    ;
+  }
+
+  
+  var _wgpuRenderPassEncoderSetViewport = (passPtr, x, y, w, h, minDepth, maxDepth) => {
+      var pass = WebGPU.getJsObject(passPtr);
+      pass.setViewport(x, y, w, h, minDepth, maxDepth);
     };
 
   
@@ -2960,7 +3240,7 @@ if (Module['wasmBinary']) wasmBinary = Module['wasmBinary'];
 // end include: postlibrary.js
 
 var ASM_CONSTS = {
-  32940: ($0) => { globalThis.gpuDevice = WebGPU.getJsObject($0); }
+  40780: ($0) => { globalThis.gpuDevice = WebGPU.getJsObject($0); }
 };
 
 // Imports from the Wasm binary.
@@ -2977,18 +3257,35 @@ var _malloc,
   _mgpuInitializeContextAsync,
   _mgpuDestroyContext,
   _mgpuContextRefCount,
+  _mgpuWebObserveContextRetirement,
+  _mgpuWebReleaseContextObservation,
+  _mgpuWebContextRetirementStatus,
+  _mgpuGetCurrentDeviceBufferLimits,
+  _mgpuGetCurrentDeviceTextureLimits,
+  _mgpuDefaultContextRetainLease,
   _mgpuCreateComputeShader,
   _mgpuDestroyComputeShader,
   _mgpuLoadKernel,
   _mgpuHasKernel,
   _mgpuCreateBuffer,
+  _mgpuBufferDescriptorVersion,
+  _mgpuCreateBufferWithUsage,
   _mgpuDestroyBuffer,
   _mgpuCreateContextHandle,
   _mgpuContextInitializeAsync,
   _mgpuContextInitializeAsyncToPort,
+  _mgpuContextWaitForSubmittedWorkAsyncToPort,
+  _mgpuContextLeaseWaitForSubmittedWorkAsyncToPort,
+  _mgpuContextLeaseRetireDeviceAsync,
+  _mgpuContextLeaseRetireDeviceAsyncToPort,
+  _mgpuContextLeaseObserveRetirementAsync,
+  _mgpuContextLeaseObserveRetirementAsyncToPort,
   _mgpuDestroyContextHandle,
   _mgpuContextGetAdapterName,
   _mgpuContextCreateBuffer,
+  _mgpuContextGetCurrentDeviceBufferLimits,
+  _mgpuContextCreateBufferWithUsage,
+  _mgpuContextGetCurrentDeviceTextureLimits,
   _mgpuContextCreateComputeShader,
   _mgpuSetBuffer,
   _mgpuSetBufferFire,
@@ -2997,6 +3294,10 @@ var _malloc,
   _mgpuDispatchAsyncToPort,
   _mgpuReadAsyncToPort,
   _mgpuInitializeContextAsyncToPort,
+  _mgpuBufferBindingVersion,
+  _mgpuSetBufferRange,
+  _mgpuWaitForSubmittedWorkAsyncToPort,
+  _mgpuFlushBatch,
   _mgpuDrainWorkQueue,
   _mgpuReadSync,
   _mgpuReadAsyncFloat,
@@ -3048,6 +3349,10 @@ var _malloc,
   _mgpuWriteDouble,
   _mgpuEnumAdapters,
   _mgpuQueryVramBytes,
+  _mgpuContextRetainLease,
+  _mgpuContextLeaseGetInfo,
+  _mgpuContextReleaseLease,
+  _mgpuContextGetLifetimeStats,
   _mgpuDrainSpinBudgetMs,
   _mgpuIsExternalContentTypeSupported,
   _mgpuIsExternalPixelFormatSupported,
@@ -3074,6 +3379,55 @@ var _malloc,
   _mgpuDestroySharedOutputTexture,
   _mgpuGetWGPUDeviceHandle,
   _mgpuGetWGPUBufferHandle,
+  _mgpuContextLeaseGetAdapterIdentity,
+  _mgpuExternalPoolQueryCapabilities,
+  _mgpuExternalPoolQueryLeaseCapabilities,
+  _mgpuExternalPoolNowMicros,
+  _mgpuExternalPoolGetLimits,
+  _mgpuExternalPoolCreate,
+  _mgpuExternalPoolCreateIssued,
+  _mgpuExternalPoolCreateIssuedFromLease,
+  _mgpuExternalPoolAcquireProducer,
+  _mgpuExternalPoolReleaseProducerAfterPeerRelease,
+  _mgpuExternalPoolRegisterTexture,
+  _mgpuExternalPoolRegisterFence,
+  _mgpuExternalPoolCreateHostConsumerFence,
+  _mgpuExternalPoolSignalHostConsumerFence,
+  _mgpuExternalPoolUnregisterTexture,
+  _mgpuExternalPoolUnregisterFence,
+  _mgpuExternalPoolSubmit,
+  _mgpuExternalPoolCancel,
+  _mgpuExternalPoolPoll,
+  _mgpuExternalPoolAcquireOutput,
+  _mgpuExternalPoolRetainOutput,
+  _mgpuExternalPoolReleaseOutputConsumer,
+  _mgpuExternalPoolBindOutput,
+  _mgpuExternalPoolGetStats,
+  _mgpuExternalPoolRetire,
+  _mgpuExternalPoolRelease,
+  _mgpuRasterResourceVersion,
+  _mgpuCreateRenderPipeline,
+  _mgpuContextCreateRenderPipeline,
+  _mgpuRenderPipelineStatus,
+  _mgpuRenderPipelineDiagnostic,
+  _mgpuRenderPipelineBindingStat,
+  _mgpuDestroyRenderPipeline,
+  _mgpuSubmitRender,
+  _mgpuTextureResourceVersion,
+  _mgpuCreateTexture2D,
+  _mgpuContextCreateTexture2D,
+  _mgpuCreateTextureView,
+  _mgpuCreateSampler,
+  _mgpuContextCreateSampler,
+  _mgpuTextureRegionUploadVersion,
+  _mgpuWriteTextureRegion2D,
+  _mgpuWriteTexture2D,
+  _mgpuSetOwnedTexture,
+  _mgpuSetOwnedSampler,
+  _mgpuReleaseTextureBinding,
+  _mgpuDestroyTexture,
+  _mgpuDestroyTextureView,
+  _mgpuDestroySampler,
   _mgpuShaderCacheSetEnabled,
   _mgpuShaderCacheSetDirectory,
   _mgpuShaderCacheSetCapBytes,
@@ -3128,6 +3482,7 @@ var _malloc,
   dynCall_viiiii,
   dynCall_iii,
   dynCall_vii,
+  dynCall_iiij,
   dynCall_viji,
   dynCall_iidiiii,
   dynCall_iiii,
@@ -3154,18 +3509,35 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuInitializeContextAsync'] = _mgpuInitializeContextAsync = wasmExports['mgpuInitializeContextAsync'];
   Module['_mgpuDestroyContext'] = _mgpuDestroyContext = wasmExports['mgpuDestroyContext'];
   Module['_mgpuContextRefCount'] = _mgpuContextRefCount = wasmExports['mgpuContextRefCount'];
+  Module['_mgpuWebObserveContextRetirement'] = _mgpuWebObserveContextRetirement = wasmExports['mgpuWebObserveContextRetirement'];
+  Module['_mgpuWebReleaseContextObservation'] = _mgpuWebReleaseContextObservation = wasmExports['mgpuWebReleaseContextObservation'];
+  Module['_mgpuWebContextRetirementStatus'] = _mgpuWebContextRetirementStatus = wasmExports['mgpuWebContextRetirementStatus'];
+  Module['_mgpuGetCurrentDeviceBufferLimits'] = _mgpuGetCurrentDeviceBufferLimits = wasmExports['mgpuGetCurrentDeviceBufferLimits'];
+  Module['_mgpuGetCurrentDeviceTextureLimits'] = _mgpuGetCurrentDeviceTextureLimits = wasmExports['mgpuGetCurrentDeviceTextureLimits'];
+  Module['_mgpuDefaultContextRetainLease'] = _mgpuDefaultContextRetainLease = wasmExports['mgpuDefaultContextRetainLease'];
   Module['_mgpuCreateComputeShader'] = _mgpuCreateComputeShader = wasmExports['mgpuCreateComputeShader'];
   Module['_mgpuDestroyComputeShader'] = _mgpuDestroyComputeShader = wasmExports['mgpuDestroyComputeShader'];
   Module['_mgpuLoadKernel'] = _mgpuLoadKernel = wasmExports['mgpuLoadKernel'];
   Module['_mgpuHasKernel'] = _mgpuHasKernel = wasmExports['mgpuHasKernel'];
   Module['_mgpuCreateBuffer'] = _mgpuCreateBuffer = wasmExports['mgpuCreateBuffer'];
+  Module['_mgpuBufferDescriptorVersion'] = _mgpuBufferDescriptorVersion = wasmExports['mgpuBufferDescriptorVersion'];
+  Module['_mgpuCreateBufferWithUsage'] = _mgpuCreateBufferWithUsage = wasmExports['mgpuCreateBufferWithUsage'];
   Module['_mgpuDestroyBuffer'] = _mgpuDestroyBuffer = wasmExports['mgpuDestroyBuffer'];
   Module['_mgpuCreateContextHandle'] = _mgpuCreateContextHandle = wasmExports['mgpuCreateContextHandle'];
   Module['_mgpuContextInitializeAsync'] = _mgpuContextInitializeAsync = wasmExports['mgpuContextInitializeAsync'];
   Module['_mgpuContextInitializeAsyncToPort'] = _mgpuContextInitializeAsyncToPort = wasmExports['mgpuContextInitializeAsyncToPort'];
+  Module['_mgpuContextWaitForSubmittedWorkAsyncToPort'] = _mgpuContextWaitForSubmittedWorkAsyncToPort = wasmExports['mgpuContextWaitForSubmittedWorkAsyncToPort'];
+  Module['_mgpuContextLeaseWaitForSubmittedWorkAsyncToPort'] = _mgpuContextLeaseWaitForSubmittedWorkAsyncToPort = wasmExports['mgpuContextLeaseWaitForSubmittedWorkAsyncToPort'];
+  Module['_mgpuContextLeaseRetireDeviceAsync'] = _mgpuContextLeaseRetireDeviceAsync = wasmExports['mgpuContextLeaseRetireDeviceAsync'];
+  Module['_mgpuContextLeaseRetireDeviceAsyncToPort'] = _mgpuContextLeaseRetireDeviceAsyncToPort = wasmExports['mgpuContextLeaseRetireDeviceAsyncToPort'];
+  Module['_mgpuContextLeaseObserveRetirementAsync'] = _mgpuContextLeaseObserveRetirementAsync = wasmExports['mgpuContextLeaseObserveRetirementAsync'];
+  Module['_mgpuContextLeaseObserveRetirementAsyncToPort'] = _mgpuContextLeaseObserveRetirementAsyncToPort = wasmExports['mgpuContextLeaseObserveRetirementAsyncToPort'];
   Module['_mgpuDestroyContextHandle'] = _mgpuDestroyContextHandle = wasmExports['mgpuDestroyContextHandle'];
   Module['_mgpuContextGetAdapterName'] = _mgpuContextGetAdapterName = wasmExports['mgpuContextGetAdapterName'];
   Module['_mgpuContextCreateBuffer'] = _mgpuContextCreateBuffer = wasmExports['mgpuContextCreateBuffer'];
+  Module['_mgpuContextGetCurrentDeviceBufferLimits'] = _mgpuContextGetCurrentDeviceBufferLimits = wasmExports['mgpuContextGetCurrentDeviceBufferLimits'];
+  Module['_mgpuContextCreateBufferWithUsage'] = _mgpuContextCreateBufferWithUsage = wasmExports['mgpuContextCreateBufferWithUsage'];
+  Module['_mgpuContextGetCurrentDeviceTextureLimits'] = _mgpuContextGetCurrentDeviceTextureLimits = wasmExports['mgpuContextGetCurrentDeviceTextureLimits'];
   Module['_mgpuContextCreateComputeShader'] = _mgpuContextCreateComputeShader = wasmExports['mgpuContextCreateComputeShader'];
   Module['_mgpuSetBuffer'] = _mgpuSetBuffer = wasmExports['mgpuSetBuffer'];
   Module['_mgpuSetBufferFire'] = _mgpuSetBufferFire = wasmExports['mgpuSetBufferFire'];
@@ -3174,6 +3546,10 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuDispatchAsyncToPort'] = _mgpuDispatchAsyncToPort = wasmExports['mgpuDispatchAsyncToPort'];
   Module['_mgpuReadAsyncToPort'] = _mgpuReadAsyncToPort = wasmExports['mgpuReadAsyncToPort'];
   Module['_mgpuInitializeContextAsyncToPort'] = _mgpuInitializeContextAsyncToPort = wasmExports['mgpuInitializeContextAsyncToPort'];
+  Module['_mgpuBufferBindingVersion'] = _mgpuBufferBindingVersion = wasmExports['mgpuBufferBindingVersion'];
+  Module['_mgpuSetBufferRange'] = _mgpuSetBufferRange = wasmExports['mgpuSetBufferRange'];
+  Module['_mgpuWaitForSubmittedWorkAsyncToPort'] = _mgpuWaitForSubmittedWorkAsyncToPort = wasmExports['mgpuWaitForSubmittedWorkAsyncToPort'];
+  Module['_mgpuFlushBatch'] = _mgpuFlushBatch = wasmExports['mgpuFlushBatch'];
   Module['_mgpuDrainWorkQueue'] = _mgpuDrainWorkQueue = wasmExports['mgpuDrainWorkQueue'];
   Module['_mgpuReadSync'] = _mgpuReadSync = wasmExports['mgpuReadSync'];
   Module['_mgpuReadAsyncFloat'] = _mgpuReadAsyncFloat = wasmExports['mgpuReadAsyncFloat'];
@@ -3225,6 +3601,10 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuWriteDouble'] = _mgpuWriteDouble = wasmExports['mgpuWriteDouble'];
   Module['_mgpuEnumAdapters'] = _mgpuEnumAdapters = wasmExports['mgpuEnumAdapters'];
   Module['_mgpuQueryVramBytes'] = _mgpuQueryVramBytes = wasmExports['mgpuQueryVramBytes'];
+  Module['_mgpuContextRetainLease'] = _mgpuContextRetainLease = wasmExports['mgpuContextRetainLease'];
+  Module['_mgpuContextLeaseGetInfo'] = _mgpuContextLeaseGetInfo = wasmExports['mgpuContextLeaseGetInfo'];
+  Module['_mgpuContextReleaseLease'] = _mgpuContextReleaseLease = wasmExports['mgpuContextReleaseLease'];
+  Module['_mgpuContextGetLifetimeStats'] = _mgpuContextGetLifetimeStats = wasmExports['mgpuContextGetLifetimeStats'];
   Module['_mgpuDrainSpinBudgetMs'] = _mgpuDrainSpinBudgetMs = wasmExports['mgpuDrainSpinBudgetMs'];
   Module['_mgpuIsExternalContentTypeSupported'] = _mgpuIsExternalContentTypeSupported = wasmExports['mgpuIsExternalContentTypeSupported'];
   Module['_mgpuIsExternalPixelFormatSupported'] = _mgpuIsExternalPixelFormatSupported = wasmExports['mgpuIsExternalPixelFormatSupported'];
@@ -3251,6 +3631,55 @@ function assignWasmExports(wasmExports) {
   Module['_mgpuDestroySharedOutputTexture'] = _mgpuDestroySharedOutputTexture = wasmExports['mgpuDestroySharedOutputTexture'];
   Module['_mgpuGetWGPUDeviceHandle'] = _mgpuGetWGPUDeviceHandle = wasmExports['mgpuGetWGPUDeviceHandle'];
   Module['_mgpuGetWGPUBufferHandle'] = _mgpuGetWGPUBufferHandle = wasmExports['mgpuGetWGPUBufferHandle'];
+  Module['_mgpuContextLeaseGetAdapterIdentity'] = _mgpuContextLeaseGetAdapterIdentity = wasmExports['mgpuContextLeaseGetAdapterIdentity'];
+  Module['_mgpuExternalPoolQueryCapabilities'] = _mgpuExternalPoolQueryCapabilities = wasmExports['mgpuExternalPoolQueryCapabilities'];
+  Module['_mgpuExternalPoolQueryLeaseCapabilities'] = _mgpuExternalPoolQueryLeaseCapabilities = wasmExports['mgpuExternalPoolQueryLeaseCapabilities'];
+  Module['_mgpuExternalPoolNowMicros'] = _mgpuExternalPoolNowMicros = wasmExports['mgpuExternalPoolNowMicros'];
+  Module['_mgpuExternalPoolGetLimits'] = _mgpuExternalPoolGetLimits = wasmExports['mgpuExternalPoolGetLimits'];
+  Module['_mgpuExternalPoolCreate'] = _mgpuExternalPoolCreate = wasmExports['mgpuExternalPoolCreate'];
+  Module['_mgpuExternalPoolCreateIssued'] = _mgpuExternalPoolCreateIssued = wasmExports['mgpuExternalPoolCreateIssued'];
+  Module['_mgpuExternalPoolCreateIssuedFromLease'] = _mgpuExternalPoolCreateIssuedFromLease = wasmExports['mgpuExternalPoolCreateIssuedFromLease'];
+  Module['_mgpuExternalPoolAcquireProducer'] = _mgpuExternalPoolAcquireProducer = wasmExports['mgpuExternalPoolAcquireProducer'];
+  Module['_mgpuExternalPoolReleaseProducerAfterPeerRelease'] = _mgpuExternalPoolReleaseProducerAfterPeerRelease = wasmExports['mgpuExternalPoolReleaseProducerAfterPeerRelease'];
+  Module['_mgpuExternalPoolRegisterTexture'] = _mgpuExternalPoolRegisterTexture = wasmExports['mgpuExternalPoolRegisterTexture'];
+  Module['_mgpuExternalPoolRegisterFence'] = _mgpuExternalPoolRegisterFence = wasmExports['mgpuExternalPoolRegisterFence'];
+  Module['_mgpuExternalPoolCreateHostConsumerFence'] = _mgpuExternalPoolCreateHostConsumerFence = wasmExports['mgpuExternalPoolCreateHostConsumerFence'];
+  Module['_mgpuExternalPoolSignalHostConsumerFence'] = _mgpuExternalPoolSignalHostConsumerFence = wasmExports['mgpuExternalPoolSignalHostConsumerFence'];
+  Module['_mgpuExternalPoolUnregisterTexture'] = _mgpuExternalPoolUnregisterTexture = wasmExports['mgpuExternalPoolUnregisterTexture'];
+  Module['_mgpuExternalPoolUnregisterFence'] = _mgpuExternalPoolUnregisterFence = wasmExports['mgpuExternalPoolUnregisterFence'];
+  Module['_mgpuExternalPoolSubmit'] = _mgpuExternalPoolSubmit = wasmExports['mgpuExternalPoolSubmit'];
+  Module['_mgpuExternalPoolCancel'] = _mgpuExternalPoolCancel = wasmExports['mgpuExternalPoolCancel'];
+  Module['_mgpuExternalPoolPoll'] = _mgpuExternalPoolPoll = wasmExports['mgpuExternalPoolPoll'];
+  Module['_mgpuExternalPoolAcquireOutput'] = _mgpuExternalPoolAcquireOutput = wasmExports['mgpuExternalPoolAcquireOutput'];
+  Module['_mgpuExternalPoolRetainOutput'] = _mgpuExternalPoolRetainOutput = wasmExports['mgpuExternalPoolRetainOutput'];
+  Module['_mgpuExternalPoolReleaseOutputConsumer'] = _mgpuExternalPoolReleaseOutputConsumer = wasmExports['mgpuExternalPoolReleaseOutputConsumer'];
+  Module['_mgpuExternalPoolBindOutput'] = _mgpuExternalPoolBindOutput = wasmExports['mgpuExternalPoolBindOutput'];
+  Module['_mgpuExternalPoolGetStats'] = _mgpuExternalPoolGetStats = wasmExports['mgpuExternalPoolGetStats'];
+  Module['_mgpuExternalPoolRetire'] = _mgpuExternalPoolRetire = wasmExports['mgpuExternalPoolRetire'];
+  Module['_mgpuExternalPoolRelease'] = _mgpuExternalPoolRelease = wasmExports['mgpuExternalPoolRelease'];
+  Module['_mgpuRasterResourceVersion'] = _mgpuRasterResourceVersion = wasmExports['mgpuRasterResourceVersion'];
+  Module['_mgpuCreateRenderPipeline'] = _mgpuCreateRenderPipeline = wasmExports['mgpuCreateRenderPipeline'];
+  Module['_mgpuContextCreateRenderPipeline'] = _mgpuContextCreateRenderPipeline = wasmExports['mgpuContextCreateRenderPipeline'];
+  Module['_mgpuRenderPipelineStatus'] = _mgpuRenderPipelineStatus = wasmExports['mgpuRenderPipelineStatus'];
+  Module['_mgpuRenderPipelineDiagnostic'] = _mgpuRenderPipelineDiagnostic = wasmExports['mgpuRenderPipelineDiagnostic'];
+  Module['_mgpuRenderPipelineBindingStat'] = _mgpuRenderPipelineBindingStat = wasmExports['mgpuRenderPipelineBindingStat'];
+  Module['_mgpuDestroyRenderPipeline'] = _mgpuDestroyRenderPipeline = wasmExports['mgpuDestroyRenderPipeline'];
+  Module['_mgpuSubmitRender'] = _mgpuSubmitRender = wasmExports['mgpuSubmitRender'];
+  Module['_mgpuTextureResourceVersion'] = _mgpuTextureResourceVersion = wasmExports['mgpuTextureResourceVersion'];
+  Module['_mgpuCreateTexture2D'] = _mgpuCreateTexture2D = wasmExports['mgpuCreateTexture2D'];
+  Module['_mgpuContextCreateTexture2D'] = _mgpuContextCreateTexture2D = wasmExports['mgpuContextCreateTexture2D'];
+  Module['_mgpuCreateTextureView'] = _mgpuCreateTextureView = wasmExports['mgpuCreateTextureView'];
+  Module['_mgpuCreateSampler'] = _mgpuCreateSampler = wasmExports['mgpuCreateSampler'];
+  Module['_mgpuContextCreateSampler'] = _mgpuContextCreateSampler = wasmExports['mgpuContextCreateSampler'];
+  Module['_mgpuTextureRegionUploadVersion'] = _mgpuTextureRegionUploadVersion = wasmExports['mgpuTextureRegionUploadVersion'];
+  Module['_mgpuWriteTextureRegion2D'] = _mgpuWriteTextureRegion2D = wasmExports['mgpuWriteTextureRegion2D'];
+  Module['_mgpuWriteTexture2D'] = _mgpuWriteTexture2D = wasmExports['mgpuWriteTexture2D'];
+  Module['_mgpuSetOwnedTexture'] = _mgpuSetOwnedTexture = wasmExports['mgpuSetOwnedTexture'];
+  Module['_mgpuSetOwnedSampler'] = _mgpuSetOwnedSampler = wasmExports['mgpuSetOwnedSampler'];
+  Module['_mgpuReleaseTextureBinding'] = _mgpuReleaseTextureBinding = wasmExports['mgpuReleaseTextureBinding'];
+  Module['_mgpuDestroyTexture'] = _mgpuDestroyTexture = wasmExports['mgpuDestroyTexture'];
+  Module['_mgpuDestroyTextureView'] = _mgpuDestroyTextureView = wasmExports['mgpuDestroyTextureView'];
+  Module['_mgpuDestroySampler'] = _mgpuDestroySampler = wasmExports['mgpuDestroySampler'];
   Module['_mgpuShaderCacheSetEnabled'] = _mgpuShaderCacheSetEnabled = wasmExports['mgpuShaderCacheSetEnabled'];
   Module['_mgpuShaderCacheSetDirectory'] = _mgpuShaderCacheSetDirectory = wasmExports['mgpuShaderCacheSetDirectory'];
   Module['_mgpuShaderCacheSetCapBytes'] = _mgpuShaderCacheSetCapBytes = wasmExports['mgpuShaderCacheSetCapBytes'];
@@ -3305,6 +3734,7 @@ function assignWasmExports(wasmExports) {
   dynCalls['viiiii'] = dynCall_viiiii = wasmExports['dynCall_viiiii'];
   dynCalls['iii'] = dynCall_iii = wasmExports['dynCall_iii'];
   dynCalls['vii'] = dynCall_vii = wasmExports['dynCall_vii'];
+  dynCalls['iiij'] = dynCall_iiij = wasmExports['dynCall_iiij'];
   dynCalls['viji'] = dynCall_viji = wasmExports['dynCall_viji'];
   dynCalls['iidiiii'] = dynCall_iidiiii = wasmExports['dynCall_iidiiii'];
   dynCalls['iiii'] = dynCall_iiii = wasmExports['dynCall_iiii'];
@@ -3354,11 +3784,15 @@ var wasmImports = {
   /** @export */
   emwgpuDeviceCreateBuffer: _emwgpuDeviceCreateBuffer,
   /** @export */
+  emwgpuDeviceCreateRenderPipelineAsync: _emwgpuDeviceCreateRenderPipelineAsync,
+  /** @export */
   emwgpuDeviceCreateShaderModule: _emwgpuDeviceCreateShaderModule,
   /** @export */
   emwgpuDeviceDestroy: _emwgpuDeviceDestroy,
   /** @export */
   emwgpuInstanceRequestAdapter: _emwgpuInstanceRequestAdapter,
+  /** @export */
+  emwgpuQueueOnSubmittedWorkDone: _emwgpuQueueOnSubmittedWorkDone,
   /** @export */
   emwgpuWaitAny: _emwgpuWaitAny,
   /** @export */
@@ -3379,6 +3813,8 @@ var wasmImports = {
   wgpuAdapterGetLimits: _wgpuAdapterGetLimits,
   /** @export */
   wgpuCommandEncoderBeginComputePass: _wgpuCommandEncoderBeginComputePass,
+  /** @export */
+  wgpuCommandEncoderBeginRenderPass: _wgpuCommandEncoderBeginRenderPass,
   /** @export */
   wgpuCommandEncoderCopyBufferToBuffer: _wgpuCommandEncoderCopyBufferToBuffer,
   /** @export */
@@ -3402,13 +3838,37 @@ var wasmImports = {
   /** @export */
   wgpuDeviceCreatePipelineLayout: _wgpuDeviceCreatePipelineLayout,
   /** @export */
+  wgpuDeviceCreateSampler: _wgpuDeviceCreateSampler,
+  /** @export */
   wgpuDeviceCreateTexture: _wgpuDeviceCreateTexture,
+  /** @export */
+  wgpuDeviceGetAdapterInfo: _wgpuDeviceGetAdapterInfo,
+  /** @export */
+  wgpuDeviceGetLimits: _wgpuDeviceGetLimits,
   /** @export */
   wgpuQueueSubmit: _wgpuQueueSubmit,
   /** @export */
   wgpuQueueWriteBuffer: _wgpuQueueWriteBuffer,
   /** @export */
   wgpuQueueWriteTexture: _wgpuQueueWriteTexture,
+  /** @export */
+  wgpuRenderPassEncoderDraw: _wgpuRenderPassEncoderDraw,
+  /** @export */
+  wgpuRenderPassEncoderDrawIndexed: _wgpuRenderPassEncoderDrawIndexed,
+  /** @export */
+  wgpuRenderPassEncoderEnd: _wgpuRenderPassEncoderEnd,
+  /** @export */
+  wgpuRenderPassEncoderSetBindGroup: _wgpuRenderPassEncoderSetBindGroup,
+  /** @export */
+  wgpuRenderPassEncoderSetIndexBuffer: _wgpuRenderPassEncoderSetIndexBuffer,
+  /** @export */
+  wgpuRenderPassEncoderSetPipeline: _wgpuRenderPassEncoderSetPipeline,
+  /** @export */
+  wgpuRenderPassEncoderSetScissorRect: _wgpuRenderPassEncoderSetScissorRect,
+  /** @export */
+  wgpuRenderPassEncoderSetVertexBuffer: _wgpuRenderPassEncoderSetVertexBuffer,
+  /** @export */
+  wgpuRenderPassEncoderSetViewport: _wgpuRenderPassEncoderSetViewport,
   /** @export */
   wgpuTextureCreateView: _wgpuTextureCreateView
 };

@@ -1,7 +1,14 @@
 #include "../include/minigpu.h"
+#include "../include/minigpu_context_owner.h"
 #include "../include/dart_port.h"
 #include "../include/log.h"
+#include <atomic>
+#include <chrono>
 #include <exception>
+#include <thread>
+#ifdef __EMSCRIPTEN__
+#include <unordered_map>
+#endif
 #ifdef MINIGPU_HAVE_DART_DL
 // Vendored Dart SDK dynamic-linking API (third_party/dart_dl).
 #include "dart_api_dl.h"
@@ -121,6 +128,201 @@ bool dartApiReady() {
 
 } // namespace mgpu
 
+namespace {
+#ifdef __EMSCRIPTEN__
+// Browser callbacks must not suspend an Asyncify stack while another call
+// detaches the context. Polling these inert receipts from JS avoids both that
+// reentrancy and a Dart function-pointer lifetime. No receipt owns a GPU ref.
+std::mutex webObservationMutex;
+std::unordered_map<uint32_t, std::shared_ptr<std::atomic<int>>> webObservations;
+uint32_t nextWebObservation = 1;
+#endif
+
+// Ownership remains with the worker task until Dawn invokes the callback. A
+// driver hang is therefore an intentionally pending Future, never a timeout
+// that frees callback userdata while Dawn can still dereference it.
+struct SubmittedWorkWait {
+  int64_t port = 0;
+  int64_t token = 0;
+  std::atomic<bool> completed{false};
+};
+
+void finishSubmittedWorkWait(WGPUQueueWorkDoneStatus status, WGPUStringView,
+                             void *userdata1, void *) {
+  auto *wait = static_cast<SubmittedWorkWait *>(userdata1);
+  const bool ok = status == WGPUQueueWorkDoneStatus_Success;
+  mgpu::completionPost(wait->port, wait->token, ok);
+  wait->completed.store(true, std::memory_order_release);
+}
+
+void rejectSubmittedWorkWait(int64_t port, int64_t token) {
+  mgpu::completionPost(port, token, false);
+}
+
+void waitForSubmittedWork(mgpu::MGPU *gpu, int64_t port, int64_t token,
+                         std::shared_ptr<mgpu::ContextPin> pin = {}) {
+  if (!gpu) {
+    rejectSubmittedWorkWait(port, token);
+    return;
+  }
+
+  gpu->getWebGPUThread().enqueueAsync([gpu, port, token, pin]() {
+    WGPUQueue queue = nullptr;
+    WGPUInstance instance = nullptr;
+    {
+      mgpu::lock_guard<mgpu::mutex> lock(gpu->getGpuMutex());
+      queue = pin ? pin->queue() : gpu->tryGetQueue();
+      instance = pin ? pin->instance() : gpu->tryGetInstance();
+      if (!queue || !instance) {
+        rejectSubmittedWorkWait(port, token);
+        return;
+      }
+      // Fire-and-forget dispatches remain in an open compute batch until a
+      // queue boundary. Submit them before this callback becomes the fence.
+      if (!pin || gpu->matchesReadyDevice(pin->device(), pin->deviceGeneration()))
+        gpu->flushBatchLocked();
+    }
+
+    auto *wait = new SubmittedWorkWait{port, token};
+    WGPUQueueWorkDoneCallbackInfo info{};
+    info.mode = WGPUCallbackMode_AllowProcessEvents;
+    info.callback = finishSubmittedWorkWait;
+    info.userdata1 = wait;
+    wgpuQueueOnSubmittedWorkDone(queue, info);
+
+    // Dawn invokes this callback while its instance is pumped. This whole
+    // loop is on this context's WebGPU worker, never the Dart UI thread.
+    const auto spinUntil = std::chrono::steady_clock::now() +
+                           std::chrono::milliseconds(8);
+    while (!wait->completed.load(std::memory_order_acquire)) {
+      wgpuInstanceProcessEvents(instance);
+      if (!wait->completed.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() < spinUntil) {
+          std::this_thread::yield();
+        } else {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      }
+    }
+    delete wait;
+  });
+}
+
+void retireCreationDevice(std::shared_ptr<mgpu::ContextPin> pin,
+                          std::function<void(int)> complete) {
+#ifdef __EMSCRIPTEN__
+  // WebGPU loss promises resolve before GPU work necessarily finishes. Never
+  // export native Dawn's synchronous-destruction guarantee to this backend.
+  complete(MGPU_CONTEXT_LEASE_UNSUPPORTED);
+#else
+  if (!pin) {
+    complete(MGPU_CONTEXT_LEASE_INVALID);
+    return;
+  }
+  if (!pin->gpu().invalidateDevice(pin->device(), pin->deviceGeneration())) {
+    complete(MGPU_CONTEXT_LEASE_RETIRED);
+    return;
+  }
+  try {
+    pin->gpu().getWebGPUThread().enqueueAsync([pin, complete]() {
+      int result = MGPU_CONTEXT_LEASE_INTERNAL;
+      try {
+        // Dawn DeviceBase::Destroy drains pending tasks and the native GPU
+        // timeline before returning. Its loss callback can run much earlier;
+        // only this return is the retirement evidence for this creation pin.
+        wgpuDeviceDestroy(pin->device());
+        result = MGPU_CONTEXT_LEASE_OK;
+      } catch (...) {
+        // A failed destruction is never a successful completion receipt.
+        mgpu::quarantineContextPin(pin);
+      }
+      complete(result);
+    });
+  } catch (...) {
+    mgpu::quarantineContextPin(pin);
+    complete(MGPU_CONTEXT_LEASE_INTERNAL);
+  }
+#endif
+}
+
+constexpr uint32_t kBufferDescriptorUsageMask = 0xfc;
+constexpr int kMaxBufferDescriptorSize = 2147483644;
+
+bool validBufferDescriptor(int sizeBytes, uint32_t usage) {
+  return sizeBytes >= 4 && sizeBytes <= kMaxBufferDescriptorSize &&
+         (sizeBytes & 3) == 0 && usage != 0 &&
+         (usage & ~kBufferDescriptorUsageMask) == 0;
+}
+
+MGPUBuffer *createBufferWithUsage(mgpu::MGPU &gpu, int sizeBytes,
+                                  uint32_t usage) {
+  if (!validBufferDescriptor(sizeBytes, usage)) return nullptr;
+
+  try {
+    WGPUDevice device = gpu.getDevice();
+    if (!device) return nullptr;
+
+    WGPULimits limits = {};
+    if (wgpuDeviceGetLimits(device, &limits) == WGPUStatus_Success &&
+        static_cast<uint64_t>(sizeBytes) > limits.maxBufferSize) {
+      return nullptr;
+    }
+
+    auto *buf = new mgpu::Buffer(gpu);
+    try {
+      buf->createBuffer(static_cast<size_t>(sizeBytes), mgpu::kUInt32,
+                        static_cast<WGPUBufferUsage>(usage));
+    } catch (...) {
+      delete buf;
+      throw;
+    }
+    return reinterpret_cast<MGPUBuffer *>(buf);
+  } catch (...) {
+    return nullptr;
+  }
+}
+
+int currentDeviceBufferLimits(mgpu::MGPU &gpu, uint64_t *maxBufferSize,
+                              uint64_t *maxStorageBufferBindingSize,
+                              uint64_t *deviceGeneration) {
+  if (!maxBufferSize || !maxStorageBufferBindingSize || !deviceGeneration)
+    return 0;
+  uint64_t generation = 0;
+  WGPUDevice device = gpu.retainReadyDeviceGeneration(&generation);
+  if (!device) return 0;
+  WGPULimits limits = {};
+  const bool queried = wgpuDeviceGetLimits(device, &limits) == WGPUStatus_Success;
+  const bool current = gpu.matchesReadyDevice(device, generation);
+  wgpuDeviceRelease(device);
+  if (!queried || !current || !limits.maxBufferSize ||
+      !limits.maxStorageBufferBindingSize) return 0;
+  *maxBufferSize = limits.maxBufferSize;
+  *maxStorageBufferBindingSize = limits.maxStorageBufferBindingSize;
+  *deviceGeneration = generation;
+  return 1;
+}
+
+int currentDeviceTextureLimits(mgpu::MGPU &gpu, uint64_t *maxDimension2D,
+                               uint64_t *maxArrayLayers,
+                               uint64_t *deviceGeneration) {
+  if (!maxDimension2D || !maxArrayLayers || !deviceGeneration) return 0;
+  uint64_t generation = 0;
+  WGPUDevice device = gpu.retainReadyDeviceGeneration(&generation);
+  if (!device) return 0;
+  WGPULimits limits = {};
+  const bool queried = wgpuDeviceGetLimits(device, &limits) == WGPUStatus_Success;
+  const bool current = gpu.matchesReadyDevice(device, generation);
+  wgpuDeviceRelease(device);
+  if (!queried || !current || !limits.maxTextureDimension2D ||
+      !limits.maxTextureArrayLayers) return 0;
+  *maxDimension2D = limits.maxTextureDimension2D;
+  *maxArrayLayers = limits.maxTextureArrayLayers;
+  *deviceGeneration = generation;
+  return 1;
+}
+
+} // namespace
+
 #ifdef __cplusplus
 using namespace mgpu;
 extern "C" {
@@ -172,16 +374,91 @@ int mgpuGetSelectedAdapterName(char* out, int cap) {
 // count) is what stops isolate A's teardown from destroying the device isolate
 // B is still dispatching on.
 void mgpuInitializeContext() {
-  minigpu.attachContext();
+  try {
+    minigpu.attachContext();
+  } catch (...) {
+    // This legacy void ABI reports failure through readiness. Never let a
+    // lost-generation refusal unwind across C/FFI.
+    LOG_ERROR("%s", "mgpuInitializeContext: initialization refused");
+  }
 }
 
 void mgpuInitializeContextAsync(MGPUCallback callback) {
   minigpu.attachContextAsync(callback);
 }
 
-void mgpuDestroyContext() { minigpu.detachContext(); }
+void mgpuDestroyContext() {
+  try { minigpu.detachContext(); } catch (...) {
+    // The context remains quarantined and its final observer reports failure.
+    // C++ teardown errors must not unwind through a C/FFI caller.
+    MGPU_LOG(mgpu::LOG_ERROR, "Native context teardown failed; retained in quarantine");
+  }
+}
 
 int mgpuContextRefCount() { return minigpu.attachCount(); }
+
+#ifdef __EMSCRIPTEN__
+uint32_t mgpuWebObserveContextRetirement(uint32_t expectedDevice) {
+  uint64_t generation = 0;
+  WGPUDevice device = minigpu.retainReadyDeviceGeneration(&generation);
+  if (!device) return 0;
+  struct ReleaseDevice {
+    WGPUDevice device;
+    ~ReleaseDevice() { wgpuDeviceRelease(device); }
+  } release{device};
+  if (reinterpret_cast<uintptr_t>(device) != expectedDevice) return 0;
+  uint32_t token = 0;
+  try {
+    auto observation = std::make_shared<std::atomic<int>>(0);
+    {
+      std::lock_guard<std::mutex> lock(webObservationMutex);
+      if (webObservations.size() >= 64 || nextWebObservation >= 0x7fffffffu)
+        return 0;
+      token = nextWebObservation++;
+      webObservations.emplace(token, observation);
+    }
+    if (minigpu.observeContextRetirement(device, generation,
+        [observation](bool succeeded) {
+          observation->store(succeeded ? 1 : 2, std::memory_order_release);
+        })) return token;
+  } catch (...) {
+    // Refusal cannot certify successful teardown or charge another attachment.
+  }
+  if (token) mgpuWebReleaseContextObservation(token);
+  return 0;
+}
+
+int mgpuWebContextRetirementStatus(uint32_t token) {
+  std::lock_guard<std::mutex> lock(webObservationMutex);
+  const auto found = webObservations.find(token);
+  return found == webObservations.end() ? -1
+      : found->second->load(std::memory_order_acquire);
+}
+
+void mgpuWebReleaseContextObservation(uint32_t token) {
+  std::lock_guard<std::mutex> lock(webObservationMutex);
+  webObservations.erase(token);
+}
+#endif
+
+int mgpuGetCurrentDeviceBufferLimits(uint64_t *maxBufferSize,
+                                     uint64_t *maxStorageBufferBindingSize,
+                                     uint64_t *deviceGeneration) {
+  return currentDeviceBufferLimits(minigpu, maxBufferSize,
+                                   maxStorageBufferBindingSize, deviceGeneration);
+}
+
+int mgpuGetCurrentDeviceTextureLimits(uint64_t *maxDimension2D,
+                                      uint64_t *maxArrayLayers,
+                                      uint64_t *deviceGeneration) {
+  return currentDeviceTextureLimits(minigpu, maxDimension2D, maxArrayLayers,
+                                    deviceGeneration);
+}
+
+int mgpuDefaultContextRetainLease(MGPUContextLease **outLease,
+                                 MGPUContextHandle **outContext) {
+  return mgpu::retainReadyDefaultContext(minigpu, outLease, outContext);
+}
 
 MGPUComputeShader *mgpuCreateComputeShader() {
   return reinterpret_cast<MGPUComputeShader *>(
@@ -311,6 +588,12 @@ MGPUBuffer *mgpuCreateBuffer(int byteSize, int dataType) {
   return reinterpret_cast<MGPUBuffer *>(buf);
 }
 
+uint32_t mgpuBufferDescriptorVersion(void) { return 1; }
+
+MGPUBuffer *mgpuCreateBufferWithUsage(int sizeBytes, uint32_t usage) {
+  return createBufferWithUsage(minigpu, sizeBytes, usage);
+}
+
 void mgpuDestroyBuffer(MGPUBuffer *buffer) {
   if (buffer) {
     reinterpret_cast<mgpu::Buffer *>(buffer)->release();
@@ -319,42 +602,111 @@ void mgpuDestroyBuffer(MGPUBuffer *buffer) {
 }
 
 // ── Multi-GPU context handles ───────────────────────────────────────────────
-// An MGPUContextHandle is simply a heap-allocated mgpu::MGPU instance.  All
+// An MGPUContextHandle identifies a registered heap-allocated MGPU owner. All
 // per-object entry points (setBuffer/dispatch/read/write/destroy/...) already
 // route through the MGPU& the object captured at creation, so only creation
-// needs these handle-aware variants.
+// needs these handle-aware variants. Explicit pins retain the creation device
+// and worker after logical retirement; physical teardown runs off that worker.
 
 MGPUContextHandle *mgpuCreateContextHandle(const char *adapterFilter) {
-  auto *m = new mgpu::MGPU();
-  if (adapterFilter && adapterFilter[0] != '\0') {
-    m->setAdapterFilter(adapterFilter);
-  }
-  return reinterpret_cast<MGPUContextHandle *>(m);
+  return mgpu::createOwnedContext(adapterFilter);
 }
 
 void mgpuContextInitializeAsync(MGPUContextHandle *handle,
                                 MGPUCallback callback) {
-  if (handle) {
-    reinterpret_cast<mgpu::MGPU *>(handle)->initializeContextAsync(callback);
+  if (auto owner = mgpu::retainContextOwner(handle)) {
+    owner->gpu().initializeContextAsync([owner, callback]() {
+      if (callback) callback();
+    });
   }
 }
 
 void mgpuContextInitializeAsyncToPort(MGPUContextHandle *handle, int64_t port,
                                       int64_t token) {
-  if (!handle) {
+  auto owner = mgpu::retainContextOwner(handle);
+  if (!owner) {
     mgpu::completionPost(port, token, false);
     return;
   }
-  reinterpret_cast<mgpu::MGPU *>(handle)->initializeContextAsync(
-      [port, token]() { mgpu::completionPost(port, token, true); });
+  owner->gpu().initializeContextAsync([owner, port, token]() {
+    auto device = owner->gpu().retainReadyDevice();
+    mgpu::completionPost(port, token, !owner->retired() && device);
+    if (device) wgpuDeviceRelease(device);
+  });
+}
+
+void mgpuContextWaitForSubmittedWorkAsyncToPort(MGPUContextHandle *handle,
+                                                int64_t port, int64_t token) {
+  std::shared_ptr<mgpu::ContextPin> pin;
+  mgpu::retainContextPin(handle, pin);
+  waitForSubmittedWork(pin ? &pin->gpu() : nullptr, port, token, pin);
+}
+
+void mgpuContextLeaseWaitForSubmittedWorkAsyncToPort(MGPUContextLease *lease,
+                                                   int64_t port, int64_t token) {
+  auto pin = mgpu::copyContextLeasePin(lease);
+  waitForSubmittedWork(pin ? &pin->gpu() : nullptr, port, token, pin);
+}
+
+void mgpuContextLeaseRetireDeviceAsync(
+    MGPUContextLease *lease, MGPUDeviceRetirementCallback callback,
+    void *userdata) {
+  retireCreationDevice(mgpu::copyContextLeasePin(lease),
+      [callback, userdata](int result) {
+        if (callback) callback(result, userdata);
+      });
+}
+
+void mgpuContextLeaseRetireDeviceAsyncToPort(MGPUContextLease *lease,
+                                           int64_t port, int64_t token) {
+  retireCreationDevice(mgpu::copyContextLeasePin(lease),
+      [port, token](int result) {
+        mgpu::completionPost(port, token, result == MGPU_CONTEXT_LEASE_OK);
+      });
+}
+
+void mgpuContextLeaseObserveRetirementAsync(
+    MGPUContextLease *lease, MGPUDeviceRetirementCallback callback,
+    void *userdata) {
+  if (!callback) return;
+#ifdef __EMSCRIPTEN__
+  callback(MGPU_CONTEXT_LEASE_UNSUPPORTED, userdata);
+#else
+  int refused = MGPU_CONTEXT_LEASE_INVALID;
+  try {
+    auto pin = mgpu::copyContextLeasePin(lease);
+    if (pin) {
+      if (pin->gpu().observeContextRetirement(
+              pin->device(), pin->deviceGeneration(),
+              [callback, userdata](bool succeeded) {
+                callback(succeeded ? MGPU_CONTEXT_LEASE_OK
+                                   : MGPU_CONTEXT_LEASE_INTERNAL, userdata);
+              })) return;
+      refused = MGPU_CONTEXT_LEASE_WOULD_BLOCK;
+    }
+  } catch (...) { refused = MGPU_CONTEXT_LEASE_INTERNAL; }
+  callback(refused, userdata);
+#endif
+}
+
+void mgpuContextLeaseObserveRetirementAsyncToPort(MGPUContextLease *lease,
+                                                int64_t port, int64_t token) {
+#ifdef __EMSCRIPTEN__
+  mgpu::completionPost(port, token, false);
+#else
+  try {
+    auto pin = mgpu::copyContextLeasePin(lease);
+    if (pin && pin->gpu().observeContextRetirement(
+          pin->device(), pin->deviceGeneration(), [port, token](bool succeeded) {
+            mgpu::completionPost(port, token, succeeded);
+          })) return;
+  } catch (...) {}
+  mgpu::completionPost(port, token, false);
+#endif
 }
 
 void mgpuDestroyContextHandle(MGPUContextHandle *handle) {
-  if (handle) {
-    auto *m = reinterpret_cast<mgpu::MGPU *>(handle);
-    m->destroyContext();
-    delete m;
-  }
+  mgpu::retireOwnedContext(handle);
 }
 
 int mgpuContextGetAdapterName(MGPUContextHandle *handle, char *out, int cap) {
@@ -383,6 +735,37 @@ MGPUBuffer *mgpuContextCreateBuffer(MGPUContextHandle *handle, int byteSize,
     return nullptr;
   }
   return reinterpret_cast<MGPUBuffer *>(buf);
+}
+
+int mgpuContextGetCurrentDeviceBufferLimits(
+    MGPUContextHandle *handle, uint64_t *maxBufferSize,
+    uint64_t *maxStorageBufferBindingSize, uint64_t *deviceGeneration) {
+  std::shared_ptr<mgpu::ContextPin> pin;
+  if (mgpu::retainContextPin(handle, pin) != MGPU_CONTEXT_LEASE_OK || !pin)
+    return 0;
+  if (!pin->current()) return 0;
+  const int result = currentDeviceBufferLimits(
+      pin->gpu(), maxBufferSize, maxStorageBufferBindingSize, deviceGeneration);
+  return pin->current() ? result : 0;
+}
+
+MGPUBuffer *mgpuContextCreateBufferWithUsage(MGPUContextHandle *handle,
+                                             int sizeBytes, uint32_t usage) {
+  if (!handle) return nullptr;
+  return createBufferWithUsage(*reinterpret_cast<mgpu::MGPU *>(handle),
+                               sizeBytes, usage);
+}
+
+int mgpuContextGetCurrentDeviceTextureLimits(
+    MGPUContextHandle *handle, uint64_t *maxDimension2D,
+    uint64_t *maxArrayLayers, uint64_t *deviceGeneration) {
+  std::shared_ptr<mgpu::ContextPin> pin;
+  if (mgpu::retainContextPin(handle, pin) != MGPU_CONTEXT_LEASE_OK || !pin)
+    return 0;
+  if (!pin->current()) return 0;
+  const int result = currentDeviceTextureLimits(
+      pin->gpu(), maxDimension2D, maxArrayLayers, deviceGeneration);
+  return pin->current() ? result : 0;
 }
 
 MGPUComputeShader *mgpuContextCreateComputeShader(MGPUContextHandle *handle) {
@@ -506,8 +889,78 @@ void mgpuReadAsyncToPort(MGPUBuffer *buffer, void *outputData,
 }
 
 void mgpuInitializeContextAsyncToPort(int64_t port, int64_t token) {
-  minigpu.attachContextAsync(
-      [port, token]() { mgpu::completionPost(port, token, true); });
+  minigpu.attachContextAsyncResult([port, token](bool attached) {
+    mgpu::completionPost(port, token, attached);
+  });
+}
+
+uint32_t mgpuBufferBindingVersion(void) { return 1; }
+
+int mgpuSetBufferRange(MGPUComputeShader *shader, int slot, MGPUBuffer *buffer,
+                       int kind, int offsetBytes, int sizeBytes) {
+  if (!shader || !buffer || slot < 0 || slot > 31 || kind < 0 || kind > 2 ||
+      offsetBytes < 0 || sizeBytes <= 0 || offsetBytes > 2147483644 ||
+      sizeBytes > 2147483644 || (offsetBytes & 3) != 0 ||
+      (sizeBytes & 3) != 0) {
+    return 1;
+  }
+
+  try {
+    auto *nativeShader = reinterpret_cast<mgpu::ComputeShader *>(shader);
+    auto *nativeBuffer = reinterpret_cast<mgpu::Buffer *>(buffer);
+    mgpu::MGPU &gpu = nativeShader->getMGPU();
+    if (&gpu != &nativeBuffer->getMGPU()) return 1;
+
+    WGPUBuffer handle = nativeBuffer->getWGPUBuffer();
+    const uint64_t bufferSize = nativeBuffer->getSize();
+    const uint64_t offset = static_cast<uint64_t>(offsetBytes);
+    const uint64_t size = static_cast<uint64_t>(sizeBytes);
+    if (!handle || offset > bufferSize || size > bufferSize - offset) return 1;
+
+    const WGPUBufferUsage usage = nativeBuffer->bufferData.usage;
+    mgpu::BindingKind bindingKind;
+    if (kind == 2) {
+      if ((usage & WGPUBufferUsage_Uniform) == 0) return 1;
+      bindingKind = mgpu::BindingKind::kUniformBuffer;
+    } else {
+      if ((usage & WGPUBufferUsage_Storage) == 0) return 1;
+      bindingKind = kind == 0 ? mgpu::BindingKind::kStorageBuffer
+                              : mgpu::BindingKind::kReadOnlyStorageBuffer;
+    }
+
+    if (!gpu.tryGetQueue()) return 2;
+    WGPUDevice device = gpu.getDevice();
+    if (!device) return 2;
+    WGPULimits limits = {};
+    if (wgpuDeviceGetLimits(device, &limits) != WGPUStatus_Success) return 3;
+    if (static_cast<uint32_t>(slot) >= limits.maxBindingsPerBindGroup) return 1;
+
+    const uint32_t alignment =
+        kind == 2 ? limits.minUniformBufferOffsetAlignment
+                  : limits.minStorageBufferOffsetAlignment;
+    const uint64_t maxBindingSize =
+        kind == 2 ? limits.maxUniformBufferBindingSize
+                  : limits.maxStorageBufferBindingSize;
+    if ((alignment != 0 && offset % alignment != 0) ||
+        size > maxBindingSize) {
+      return 1;
+    }
+
+    nativeShader->setBufferRangeQueued(slot, handle,
+                                       static_cast<size_t>(size),
+                                       static_cast<size_t>(offset), bindingKind);
+    return 0;
+  } catch (...) {
+    return 3;
+  }
+}
+
+void mgpuWaitForSubmittedWorkAsyncToPort(int64_t port, int64_t token) {
+  waitForSubmittedWork(&minigpu, port, token);
+}
+
+void mgpuFlushBatch() {
+  minigpu.flushBatch();
 }
 
 void mgpuDrainWorkQueue() {
