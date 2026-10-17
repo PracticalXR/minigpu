@@ -616,6 +616,58 @@ external int mgpuWriteTextureRegion2D(
   int arrayLayer,
 );
 
+/// The same C symbols as [mgpuWriteTexture2D] and [mgpuWriteTextureRegion2D],
+/// bound as LEAF calls so a `Uint8List.address` can be passed instead of a
+/// malloc'd duplicate of the whole frame (see [mgpuWriteBufferAtLeaf]).
+///
+/// LEAF IS SAFE HERE: the callee validates, copies the payload into its own
+/// vector before returning and only ENQUEUES the upload on the WebGPU thread.
+/// On the calling thread it never takes the device mutex, never waits on the
+/// GPU and never posts to a Dart port; its two locks (context state, task
+/// queue) are held for a few instructions.
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUTexture>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuWriteTexture2D', isLeaf: true)
+external int mgpuWriteTexture2DLeaf(
+  ffi.Pointer<MGPUTexture> texture,
+  ffi.Pointer<ffi.Uint8> bytes,
+  int byteCount,
+  int mipLevel,
+  int arrayLayer,
+);
+
+/// See [mgpuWriteTexture2DLeaf].
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<MGPUTexture>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+  )
+>(symbol: 'mgpuWriteTextureRegion2D', isLeaf: true)
+external int mgpuWriteTextureRegion2DLeaf(
+  ffi.Pointer<MGPUTexture> texture,
+  ffi.Pointer<ffi.Uint8> bytes,
+  int byteCount,
+  int x,
+  int y,
+  int width,
+  int height,
+  int mipLevel,
+  int arrayLayer,
+);
+
 @ffi.Native<
   ffi.Int Function(
     ffi.Pointer<MGPUComputeShader>,
@@ -855,17 +907,25 @@ external void mgpuWriteBufferAt(
 /// i.e. HALF the stage, spent duplicating bytes that `wgpuQueueWriteBuffer`
 /// immediately copies again into its own staging ring.
 ///
-/// LEAF IS SAFE HERE, and the reasoning matters because leaf calls block the
-/// isolate from reaching a GC safepoint for their whole duration:
-///   * the callee never re-enters Dart (no callbacks, no port posts), which is
-///     the hard requirement;
-///   * it is bounded work — a memcpy of at most one 32 MiB chunk;
-///   * it takes the device mutex, but no minigpu path holds that mutex across a
-///     GPU wait any more (see the read path's note on releasing it across the
-///     map), so the worst case is another thread's queue write, not a fence.
-/// The Dart-side memcpy it replaces was itself an uninterruptible intrinsic of
-/// the same length, so the safepoint exposure is not new — it is the same
-/// duration, minus one copy.
+/// WHY A LEAF CALL IS ACCEPTABLE, and the reasoning matters because a leaf
+/// call keeps the isolate group from reaching a GC safepoint until it returns:
+///   * the callee never calls back into Dart. Only its failure paths (a bad
+///     range, no ready device) post a log line to the Dart log port, a VM API
+///     the leaf contract formally excludes;
+///   * it is bounded work, one copy of at most one 32 MiB chunk: while the
+///     WebGPU worker has work queued, C copies the chunk and queues the write
+///     behind it without taking the device mutex; otherwise it takes the
+///     mutex, submits the pending batch and hands the chunk to
+///     `wgpuQueueWriteBuffer`. Once 64 MiB of such copies are queued on the
+///     context, it first waits for the worker to run earlier ones: back-
+///     pressure that waits on GPU progress only, never on Dart;
+///   * neither read path holds the device mutex across its map wait any more.
+///     The GPU waits still made under it are rare (the edge words of an
+///     unaligned write, the per-read fallback when a readback buffer cannot be
+///     allocated), so the usual worst case is another thread's submit.
+/// The Dart-side memcpy this replaces was itself an uninterruptible intrinsic
+/// of the same length, so the safepoint exposure is not new. A non-leaf
+/// binding cannot take `.address` and would bring that copy back.
 @ffi.Native<
   ffi.Void Function(
     ffi.Pointer<MGPUBuffer>,
@@ -897,10 +957,13 @@ external void mgpuWriteBufferAtLeaf(
 /// One scope per context at a time, begun and ended on the same thread;
 /// nested pairs are reference-counted. A scope MUST NOT span a dispatch that
 /// reads what it stages — the copies are recorded at End.
+///
+/// Returns the nesting depth (>= 1), or 0 when the scope could not be opened.
 @ffi.Native<ffi.Int Function()>()
 external int mgpuBeginUploads();
 
-/// Stages one range. 1 = batched, 0 = performed inline, -1 = bad arguments.
+/// Stages one range. 1 = batched, 0 = performed inline, -1 = bad arguments or
+/// the inline write failed.
 @ffi.Native<
   ffi.Int Function(
     ffi.Pointer<MGPUBuffer>,
@@ -920,7 +983,8 @@ external int mgpuStageWrite(
 @ffi.Native<ffi.Void Function(ffi.Size)>()
 external void mgpuStageReserve(int byteSize);
 
-/// Closes one nesting level; emits at depth 0. Returns the copies emitted.
+/// Closes one nesting level; emits at depth 0. Returns the copies emitted, or
+/// -1 when the emission failed.
 @ffi.Native<ffi.Int Function()>()
 external int mgpuEndUploads();
 
@@ -955,11 +1019,13 @@ external int mgpuUploadStats(ffi.Pointer<ffi.Int64> out, int n);
 /// then. And because the copies are recorded at End, every staged read
 /// observes its source as of End — a scope must not span a dispatch that
 /// overwrites something already staged.
+///
+/// Returns the nesting depth (>= 1), or 0 when the scope could not be opened.
 @ffi.Native<ffi.Int Function()>()
 external int mgpuBeginReadbacks();
 
 /// Stages one raw byte range. 1 = batched (filled at End), 0 = performed
-/// inline (already filled), -1 = bad arguments.
+/// inline (already filled), -1 = bad arguments or the inline read failed.
 @ffi.Native<
   ffi.Int Function(
     ffi.Pointer<MGPUBuffer>,
@@ -979,7 +1045,8 @@ external int mgpuStageRead(
 @ffi.Native<ffi.Void Function(ffi.Size)>()
 external void mgpuReadbackReserve(int byteSize);
 
-/// Closes one nesting level; resolves at depth 0. Returns the reads filled.
+/// Closes one nesting level; resolves at depth 0. Returns the reads filled,
+/// or -1 when none were (no device, failed map).
 @ffi.Native<ffi.Int Function()>()
 external int mgpuEndReadbacks();
 
@@ -1088,16 +1155,6 @@ external ffi.Pointer<MGPUBuffer> mgpuContextCreateBuffer(
 >()
 external ffi.Pointer<MGPUComputeShader> mgpuContextCreateComputeShader(
   ffi.Pointer<MGPUContextHandle> handle,
-);
-
-@ffi.Native<
-  ffi.Void Function(ffi.Pointer<MGPUComputeShader>, ffi.Int, ffi.Int, ffi.Int)
->()
-external void mgpuCreateKernel(
-  ffi.Pointer<MGPUComputeShader> shader,
-  int groupsX,
-  int groupsY,
-  int groupsZ,
 );
 
 @ffi.Native<

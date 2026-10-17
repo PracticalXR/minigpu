@@ -80,6 +80,13 @@ typedef enum {
     /**< I420/YV12 as three separate R8Unorm textures (Y, U, V) */
 } MGPUExternalPixelFormat;
 
+/** Colour matrix of a YUV frame; see mgpuVideoTextureSetYuvColor. */
+typedef enum {
+    MGPU_YUV_MATRIX_BT709  = 0,
+    MGPU_YUV_MATRIX_BT601  = 1,
+    MGPU_YUV_MATRIX_BT2020 = 2,
+} MGPUYuvMatrix;
+
 /* -------------------------------------------------------------------------
  * Structures
  * ---------------------------------------------------------------------- */
@@ -114,9 +121,13 @@ typedef struct {
 } MGPUExternalPlane;
 
 /** Optional GPU synchronisation fence.
- *  Zero-initialise if the producer has already waited (e.g. CPU copy). */
+ *  Zero-initialise if the producer has already waited (e.g. CPU copy).
+ *  Fences are not imported yet: mgpuImportVideoFrame refuses (returns NULL)
+ *  a frame whose fence is not empty, so the producer must have finished
+ *  writing before the import. sync_fd stays owned by the caller (never
+ *  closed here). */
 typedef struct {
-    int      sync_fd;             /**< Linux/Android: sync_file fd. -1 = none. */
+    int      sync_fd;             /**< Linux/Android: sync_file fd. -1 or 0 = none. */
     void    *d3d11_fence;         /**< Windows: ID3D11Fence*. NULL = none.     */
     void    *metal_shared_event;  /**< macOS/iOS: id<MTLSharedEvent> (bridged).
                                        NULL = none.                             */
@@ -191,8 +202,11 @@ EXPORT void mgpuSetVideoTexture(MGPUComputeShader* shader, int binding_slot,
  * fence), releases the WGPUTexture and WGPUSharedTextureMemory.
  * For CPU uploads: releases the WGPUTexture.
  *
- * MUST be called AFTER any dispatch that reads the texture has completed.
- * (i.e. after mgpuDispatch returns, or inside the mgpuDispatchAsync callback.)
+ * MUST be called AFTER actual completion of every GPU read of the texture.
+ * mgpuDispatch return and mgpuDispatchAsync callbacks are NOT GPU-completion
+ * evidence. Await submitted-work completion on the exact owning context/device
+ * queue, and retire cached shader bindings before destruction. A failed or
+ * missing completion result does not authorize release.
  */
 EXPORT void mgpuDestroyVideoTexture(MGPUVideoTexture* tex);
 
@@ -202,16 +216,54 @@ EXPORT void mgpuDestroyVideoTexture(MGPUVideoTexture* tex);
 
 /**
  * Convert a video texture (NV12 or YUV420P variants) to an RGBA8 MGPUBuffer
- * via an internal compute pass (BT.709 full-range color matrix).
+ * via an internal compute pass, with the texture's colour matrix and range
+ * (mgpuVideoTextureSetYuvColor; BT.709 full range unless set).
  *
- * For packed formats (RGBA32/BGRA32/GRAY8) this is a simple copy/expand.
+ * For packed formats (RGBA32/BGRA32/RGBA64_HALF) this is a copy clamped to
+ * [0, 1]; GRAY8 expands to opaque grey (limited range stretches 16-235).
  *
  * Returns a new MGPUBuffer* (caller owns; destroy with mgpuDestroyBuffer).
- * Returns NULL on failure.
+ * Returns NULL on failure, for MGPU_EXTERNAL_PIXEL_FORMAT_UNKNOWN, and for a
+ * texture missing a plane its format needs.
  *
  * Note: this call is synchronous — it blocks until the GPU work is done.
  */
 EXPORT MGPUBuffer* mgpuVideoTextureToRGBA(MGPUVideoTexture* tex);
+
+/**
+ * Port-delivered async form of mgpuVideoTextureToRGBA: the same conversion,
+ * recorded and submitted on the WebGPU worker without blocking any thread on
+ * the GPU.
+ *
+ * Returns the output buffer at once (caller owns it, as above); its contents
+ * are valid only after `(token << 1) | 1` arrives on [port] (wire format in
+ * minigpu.h). `(token << 1) | 0` means the conversion failed (lost device,
+ * worker gone) and the buffer holds nothing; destroy it either way. Exactly
+ * one post follows every non-NULL return. NULL means refused for the reasons
+ * mgpuVideoTextureToRGBA returns NULL, and then nothing is ever posted.
+ *
+ * Either post also means the conversion no longer reads [tex] (a failed one
+ * never ran or lost its device): the completion evidence
+ * mgpuDestroyVideoTexture asks for, so keep [tex] alive until it arrives.
+ * The colour setting is read at the call. On the web build nothing is posted
+ * (no Dart port); use the sync form there.
+ */
+EXPORT MGPUBuffer* mgpuVideoTextureToRGBAAsyncToPort(MGPUVideoTexture* tex,
+                                                     int64_t port,
+                                                     int64_t token);
+
+/**
+ * Set the colour interpretation the toRGBA conversions use for [tex]:
+ * [matrix] is an MGPUYuvMatrix; [full_range] non-zero for full-range samples
+ * (0-255), zero for limited/video range (luma 16-235, chroma 16-240).
+ * NV12 and YUV420P layouts use both; GRAY8 uses the range only; packed
+ * RGBA/BGRA formats ignore both. A new texture is BT.709 full range.
+ *
+ * Returns 0, or -1 for a NULL texture or an unknown matrix (then nothing
+ * changes).
+ */
+EXPORT int mgpuVideoTextureSetYuvColor(MGPUVideoTexture* tex, int matrix,
+                                       int full_range);
 
 /* -------------------------------------------------------------------------
  * Cross-API shared output texture (Windows D3D12 <-> D3D11 zero-copy)
@@ -232,10 +284,11 @@ EXPORT MGPUBuffer* mgpuVideoTextureToRGBA(MGPUVideoTexture* tex);
  *     struct.  No NT-handle round-trip is needed on the Dawn side.
  *
  * Synchronisation:
- *   mgpuVideoTextureBGRAToRGBASharedOutput() submits the compute pass and
- *   blocks (CPU-side) until the GPU work has completed.  The D3D11 client
- *   may then access the texture freely.  Future versions will expose Dawn
- *   SharedFences for true GPU-side cross-API synchronisation.
+ *   Every blit into the texture (sync or async variant) runs on the WebGPU
+ *   worker thread and reports success only once the GPU has finished the
+ *   copy; a timed-out or failed completion wait reports failure.  The D3D11
+ *   client may then access the texture freely.  Future versions will expose
+ *   Dawn SharedFences for true GPU-side cross-API synchronisation.
  *
  * Platform: Windows only.  Returns NULL / 0 on other platforms.
  */
@@ -309,6 +362,8 @@ EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
  * dispatch) into the shared output texture entirely on the GPU.  The
  * buffer must hold exactly width*height u32 pixels packed as RGBA8.
  *
+ * Blocks until the copy has completed on the GPU (see Synchronisation).
+ *
  * Returns 1 on success, 0 on failure.
  */
 EXPORT int mgpuCopyBufferToSharedOutputTexture(MGPUBuffer* buf,
@@ -337,10 +392,21 @@ EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
  * `array<f32>` with 4 floats per pixel (R,G,B,A in [0,1]).  Used by
  * visualizers (e.g. the spectrogram) that produce float colors directly.
  *
+ * Blocks until the copy has completed on the GPU (see Synchronisation).
+ *
  * Returns 1 on success, 0 on failure.
  */
 EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(MGPUBuffer* buf,
                                                   MGPUSharedOutputTexture* dst);
+
+/**
+ * Port-delivered async variant of mgpuCopyBufferF32ToSharedOutputTexture,
+ * with the same port wire format and worker-thread completion as
+ * mgpuCopyBufferToSharedOutputTextureAsyncToPort.
+ */
+EXPORT void mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort(
+        MGPUBuffer* buf, MGPUSharedOutputTexture* dst,
+        int64_t port, int64_t token);
 
 /**
  * Release all resources held by the shared output texture (WGPUTexture,

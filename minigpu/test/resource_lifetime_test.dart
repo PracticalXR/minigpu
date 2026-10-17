@@ -214,7 +214,7 @@ void main() {
   );
 
   test(
-    'cleanup failure attempts every child and detach, then stays closed',
+    'cleanup failure attempts every child and detach, then reopens',
     () async {
       final platform = _Platform()
         ..failBufferClose = true
@@ -230,8 +230,11 @@ void main() {
       expect(gpu.liveBufferCount, 0);
       expect(gpu.liveShaderCount, 0);
       expect(identical(retired, gpu.destroy()), isTrue);
-      await expectLater(gpu.init(), throwsStateError);
-      expect(platform.events.where((e) => e == 'open'), hasLength(1));
+      // The context was released: the cleanup error is destroy()'s alone.
+      await gpu.init();
+      expect(gpu.isInitialized, isTrue);
+      expect(platform.events.where((e) => e == 'open'), hasLength(2));
+      await gpu.destroy();
     },
   );
 

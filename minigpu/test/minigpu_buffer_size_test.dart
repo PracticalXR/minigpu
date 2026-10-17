@@ -286,8 +286,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(0) @binding(1) var<storage, read_write> buffer1: array<f32>;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) groups: vec3<u32>) {
+    let idx = gid.y * groups.x * 64u + gid.x;
     if (idx < arrayLength(&buffer0) && idx < arrayLength(&buffer1)) {
         buffer1[idx] = buffer0[idx] * 2.0;
     }
@@ -297,7 +298,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         shader.setBuffer('buffer0', buffers[0]);
         shader.setBuffer('buffer1', buffers[1]);
 
-        await shader.dispatch((bufferSize + 63) ~/ 64, 1, 1);
+        // More workgroups than WebGPU's 65535 per dimension: fold the overflow
+        // into y, and the kernel rebuilds the flat index.
+        final groups = (bufferSize + 63) ~/ 64;
+        final gx = groups < 65535 ? groups : 65535;
+        await shader.dispatch(gx, (groups + gx - 1) ~/ gx, 1);
         print('   Compute shader with multiple large buffers succeeded');
 
         shader.destroy();

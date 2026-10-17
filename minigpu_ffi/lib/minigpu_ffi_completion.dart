@@ -94,6 +94,12 @@ abstract final class GpuCompletion {
     return _viaIntCallback(viaCallback);
   }
 
+  /// Runs a port-only operation (one with no callback-completed twin), or
+  /// returns null when this build cannot deliver by port, so the caller can
+  /// take its synchronous route instead.
+  static Future<bool>? tryPort(PortIssue viaPort) =>
+      _portReady ? _viaPort(viaPort) : null;
+
   /// Whether completions are delivered by port (the safe path). False only on
   /// builds without the vendored Dart API.
   static bool get usesPort => _portReady;
@@ -360,6 +366,26 @@ external void mgpuDispatchAsyncToPort(
   int token,
 );
 
+/// Posts `(token << 1) | ok` once [shader]'s pipeline is compiled for its
+/// current kernel and bindings, without dispatching: ok when it exists.
+@Native<Void Function(Pointer<ffi.MGPUComputeShader>, Int64, Int64)>(
+  symbol: 'mgpuComputeShaderBuildPipelineAsyncToPort',
+)
+external void mgpuComputeShaderBuildPipelineAsyncToPort(
+  Pointer<ffi.MGPUComputeShader> shader,
+  int port,
+  int token,
+);
+
+/// The same build, blocking the caller until the GPU worker reaches it: 1 when
+/// the pipeline exists afterwards. Only for builds that cannot post to a port.
+@Native<Int32 Function(Pointer<ffi.MGPUComputeShader>)>(
+  symbol: 'mgpuComputeShaderBuildPipeline',
+)
+external int mgpuComputeShaderBuildPipeline(
+  Pointer<ffi.MGPUComputeShader> shader,
+);
+
 @Native<
   Void Function(
     Pointer<ffi.MGPUBuffer>,
@@ -396,6 +422,23 @@ external void mgpuCopyBufferToSharedOutputTextureAsyncToPort(
   int token,
 );
 
+/// The f32 twin of [mgpuCopyBufferToSharedOutputTextureAsyncToPort]. It has no
+/// callback-completed variant.
+@Native<
+  Void Function(
+    Pointer<ffi.MGPUBuffer>,
+    Pointer<ffi.MGPUSharedOutputTexture>,
+    Int64,
+    Int64,
+  )
+>(symbol: 'mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort')
+external void mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort(
+  Pointer<ffi.MGPUBuffer> buf,
+  Pointer<ffi.MGPUSharedOutputTexture> dst,
+  int port,
+  int token,
+);
+
 @Native<
   Void Function(
     Pointer<ffi.MGPUVideoTexture>,
@@ -409,6 +452,42 @@ external void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
   Pointer<ffi.MGPUSharedOutputTexture> dst,
   int port,
   int token,
+);
+
+/// Converts [tex] to a packed RGBA8 buffer without blocking the caller. The
+/// buffer comes back at once and holds the pixels after an ok post; it is the
+/// caller's to destroy either way. Null means refused, and nothing is posted.
+/// [tex] must stay alive until the post arrives.
+@Native<
+  Pointer<ffi.MGPUBuffer> Function(Pointer<ffi.MGPUVideoTexture>, Int64, Int64)
+>(symbol: 'mgpuVideoTextureToRGBAAsyncToPort')
+external Pointer<ffi.MGPUBuffer> mgpuVideoTextureToRGBAAsyncToPort(
+  Pointer<ffi.MGPUVideoTexture> tex,
+  int port,
+  int token,
+);
+
+/// Posts `(token << 1) | ok` once [pipeline] leaves status 0: ok when it became
+/// ready, not ok when it failed or was closed. One that has already settled
+/// posts at once.
+@Native<Void Function(Pointer<ffi.MGPURenderPipeline>, Int64, Int64)>(
+  symbol: 'mgpuRenderPipelineNotifySettledToPort',
+)
+external void mgpuRenderPipelineNotifySettledToPort(
+  Pointer<ffi.MGPURenderPipeline> pipeline,
+  int port,
+  int token,
+);
+
+/// Sets the YUV matrix (0 BT.709, 1 BT.601, 2 BT.2020) and range a YUV or gray
+/// texture is converted with. Returns 0, or -1 for an unknown matrix.
+@Native<Int32 Function(Pointer<ffi.MGPUVideoTexture>, Int32, Int32)>(
+  symbol: 'mgpuVideoTextureSetYuvColor',
+)
+external int mgpuVideoTextureSetYuvColor(
+  Pointer<ffi.MGPUVideoTexture> tex,
+  int matrix,
+  int fullRange,
 );
 
 /// Blocks until every task already queued on the WebGPU worker thread has run.

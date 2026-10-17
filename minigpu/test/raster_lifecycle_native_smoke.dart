@@ -11,6 +11,8 @@ Future<void> main() async {
     stdout.writeln('binding cache: ${jsonEncode(cache)}');
     final closed = await runRasterPendingCloseScenario();
     stdout.writeln('pending close: ${jsonEncode(closed)}');
+    final settle = await runRasterSettleSignalScenario();
+    stdout.writeln('settle signal: ${jsonEncode(settle)}');
     if (!await runRasterForeignOwnerScenario()) {
       throw StateError('No second context was available on this adapter');
     }

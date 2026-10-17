@@ -27,8 +27,9 @@ import 'package:miniav/miniav.dart'
         MiniAVBuffer,
         MiniAVBufferContentType,
         MiniAVPixelFormat,
-        MiniAVVideoBuffer;
-import 'package:minigpu/minigpu.dart' show Minigpu;
+        MiniAVVideoBuffer,
+        MiniAVYuvMatrix;
+import 'package:minigpu/minigpu.dart' show Minigpu, YuvMatrix;
 
 import '../gpu_frame.dart';
 import '../planar_convert.dart';
@@ -49,6 +50,17 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
 
     // GPU path first: nothing to upload, just import and blit.
     if (contentType != MiniAVBufferContentType.cpu) {
+      // The blit imports a D3D11 shared handle and converts BGRA/RGBA only.
+      // An NV12 camera handle (or any other format) bound to that kernel is a
+      // validation error per frame, which can poison the shared device; a
+      // planar handle needs the importer's own plane views, which is a
+      // separate frame type rather than a flag here.
+      if (contentType != MiniAVBufferContentType.gpuD3D11Handle) return null;
+      final pixelFormat = vb.pixelFormat;
+      if (pixelFormat != MiniAVPixelFormat.bgra32 &&
+          pixelFormat != MiniAVPixelFormat.rgba32) {
+        return null;
+      }
       final handle = vb.nativeHandles.isEmpty ? null : vb.nativeHandles[0];
       if (handle is! int || handle == 0) return null;
       return SharedHandleGpuFrame(
@@ -56,10 +68,7 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
         sharedHandle: handle,
         width: w,
         height: h,
-        // NV12 handles exist, but the shared-handle blit path converts BGRA/
-        // RGBA only; a planar handle needs the importer's own plane views,
-        // which is a separate frame type rather than a flag here.
-        bgra: vb.pixelFormat != MiniAVPixelFormat.rgba32,
+        bgra: pixelFormat == MiniAVPixelFormat.bgra32,
       );
     }
 
@@ -71,6 +80,17 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
     List<int>? planeAt(int i) =>
         i < vb.planes.length ? vb.planes[i] : null;
 
+    // The colour the capture reports, else the planar defaults.
+    final color = vb.color;
+    final range = color != null && color.fullRange
+        ? PlanarColorRange.full
+        : PlanarColorRange.limited;
+    final matrix = switch (color?.matrix) {
+      MiniAVYuvMatrix.bt601 => YuvMatrix.bt601,
+      MiniAVYuvMatrix.bt2020 => YuvMatrix.bt2020,
+      MiniAVYuvMatrix.bt709 || null => YuvMatrix.bt709,
+    };
+
     switch (vb.pixelFormat) {
       case MiniAVPixelFormat.nv12:
         final y = planeAt(0), uv = planeAt(1);
@@ -79,12 +99,17 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
           format: PlanarFormat.nv12,
           width: w,
           height: h,
+          range: range,
+          matrix: matrix,
           planes: [
             PlanarPlane(bytes: y, strideBytes: strideOf(0, w), height: h),
             // Chroma is half height, and its stride is the FULL width because
-            // U and V are interleaved — a common place to halve twice.
+            // U and V are interleaved — a common place to halve twice. Rounded
+            // up to whole UV pairs, which an odd width needs.
             PlanarPlane(
-                bytes: uv, strideBytes: strideOf(1, w), height: (h + 1) >> 1),
+                bytes: uv,
+                strideBytes: strideOf(1, (w + 1) & ~1),
+                height: (h + 1) >> 1),
           ],
         );
 
@@ -101,6 +126,8 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
           format: PlanarFormat.i420,
           width: w,
           height: h,
+          range: range,
+          matrix: matrix,
           planes: [
             PlanarPlane(bytes: y, strideBytes: strideOf(0, w), height: h),
             PlanarPlane(
@@ -121,9 +148,14 @@ extension MiniavGpuFrameAdapter on MiniAVBuffer {
           format: PlanarFormat.yuy2,
           width: w,
           height: h,
+          range: range,
+          matrix: matrix,
           planes: [
+            // Whole Y0 U Y1 V groups: an odd width still ends on a full one.
             PlanarPlane(
-                bytes: packed, strideBytes: strideOf(0, w * 2), height: h),
+                bytes: packed,
+                strideBytes: strideOf(0, ((w + 1) >> 1) * 4),
+                height: h),
           ],
         );
 

@@ -21,6 +21,7 @@ library;
 import 'dart:io';
 
 import 'package:minigpu/minigpu.dart';
+import 'package:minigpu_ffi/minigpu_ffi_bindings.dart' as ffi;
 import 'package:test/test.dart';
 
 void main() {
@@ -156,20 +157,18 @@ void main() {
         return;
       }
       // The native context is PROCESS-global and outlives any one isolate, so
-      // in a whole-package `dart test` run another suite may already have one
-      // live here. `preferDisplayAdapter` then correctly reports too-late, and
-      // "the hint lands" is simply not observable from this process — the
-      // assertion is only meaningful when this suite owns the context.
-      final contextAlreadyLive =
-          (Minigpu.selectedAdapterName ?? '').isNotEmpty;
+      // in a whole-package `dart test` run another suite may be initializing,
+      // using or tearing one down while this runs, and an adapter name alone
+      // does not say which (it is set mid-init, before the context is live).
+      // Whether the hint lands is knowable only in a quiet window: nobody
+      // attached and no adapter selected, both before and after the call.
+      // Too-late is asserted below, once this suite's own context is live.
+      bool quiet() =>
+          ffi.mgpuContextRefCount() == 0 &&
+          (Minigpu.selectedAdapterName ?? '').isEmpty;
+      final quietBefore = quiet();
       final applied = Minigpu.preferDisplayAdapter();
-      if (contextAlreadyLive) {
-        expect(
-          applied,
-          isFalse,
-          reason: 'a live context must make the pre-init hint report too-late',
-        );
-      } else {
+      if (quietBefore && quiet()) {
         expect(applied, isTrue, reason: 'hint must land before context init');
       }
       final gpu = Minigpu();

@@ -1,6 +1,28 @@
 # minigpu_web CHANGELOG
 
-## Unreleased
+## 1.9.0
+
+- Reads put the data at the start of the output list; it used to land at the
+  element offset.
+- Reads and writes take any typed list as bytes, including 64-bit lists and
+  `ByteData`, which used to be dropped or ignored.
+- A count past the input, the output or the GPU buffer throws `RangeError`.
+- Overlapping reads and context calls now run one at a time, and a destroy
+  waits for them. Before, they could hang or corrupt memory.
+- `writeRawBytes` uploads straight from the caller's bytes at every offset.
+- A failed module load is retried, and a page loads the loader script once.
+- `setLogCallback` defaults to warnings and errors, like native.
+- A read that fails throws `StateError` instead of returning stale data.
+- Render pipelines implement `settled`: the module reports when a pipeline
+  finishes compiling, so preparing one no longer polls.
+- Compute shaders implement `buildPipeline()`, which compiles without
+  dispatching.
+- `toRGBAAsync` throws `UnsupportedError`, like `toRGBA`.
+- A buffer bound without a binding kind takes the access its kernel
+  declares, as on native.
+- The bundled wasm module is rebuilt, so it carries the native fixes listed
+  for minigpu_ffi, with no fast-math and a 1 MB Asyncify stack instead of
+  64 MB.
 
 - Retire GPU-only resources after the exact creation device's observed WebGPU
   loss. Keep host-reader teardown separate and reject healthy, stale or merely
@@ -12,21 +34,17 @@
 
 ## 1.8.1
 
-- Implement `webBufferHandle` on `WebBuffer` via `mgpuGetWGPUBufferHandle`, exposing the WGPUBuffer handle for same-device zero-copy presentation.
+- Implement `webBufferHandle` on `WebBuffer` (via `mgpuGetWGPUBufferHandle`),
+  exposing the WebGPU buffer handle for zero-copy presentation on the same
+  device.
 
 ## 1.7.0
 
-- **`writeRawBytes` no longer allocates and fills a whole second list per
-  call.** It built a fresh `Uint32List` the size of the payload and memcpy'd
-  into it on every call, only to reinterpret the same bytes as words. On a
-  streaming path that is a whole-frame allocation plus a whole-frame copy per
-  frame — 33 MB at 4K — and the allocation is per-frame garbage large enough to
-  be a frame-time spike source in its own right, not just a copy. It now takes a
-  4-byte-aligned VIEW over the caller's bytes, which aliases the same store and
-  costs nothing. The copy remains only for the one case a view cannot describe
-  (a caller-supplied view whose `offsetInBytes` is not 4-aligned). This is the
-  web half of the same bug fixed natively in minigpu_ffi, and it matters more
-  here: the browser has no equivalent of the native path's escape hatches.
+- **`writeRawBytes` no longer allocates and copies a second list per call.**
+  It now uses a 4-byte-aligned view of the caller's bytes. At 4K the old copy
+  was a 33 MB allocation per frame, and the garbage it left could cause
+  frame-time spikes. A copy is still made when the caller's view does not start on a
+  4-byte boundary.
 
 ## 1.6.1
 
@@ -34,36 +52,33 @@
 
 ## 1.6.0
 
-- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
-  in this package (the fix is native-only and does not apply to the web build).
+- Version bump for the minigpu 1.6.0 family. No functional change (that fix is
+  native-only).
 
 ## 1.5.9
 
-- Version lockstep with minigpu 1.5.9; no behavior change. `setBufferFire`
-  aliases `setBuffer` on web, which stays correct now that the facade always
-  binds through it — single-threaded wasm executes GPU tasks in call order.
+- Version lockstep with minigpu 1.5.9; no behaviour change. `setBufferFire`
+  is an alias for `setBuffer` on web, which is correct because the browser
+  runs GPU work in call order.
 
 ## 1.5.8
 
-- Implement the new platform-interface members on web:
-  `setBufferFire` aliases `setBuffer` (single-threaded wasm runs GPU tasks in call
-  order, so the plain bind already has FIFO semantics); `dispatchFire` drops the
-  returned promise (`queue.submit` is synchronous in JS WebGPU — the promise only
-  covers call plumbing, so submission order holds); `writeRawBytes` writes at
-  offset 0 via the u32 path and throws `UnsupportedError` otherwise.
-- `listAdapters` / `createSecondaryPlatform` / `drainSpinBudgetMs` inherit the
-  interface's no-op defaults — no multi-adapter contexts on web, and the native
-  drain fix does not apply.
+- Implements the new platform-interface members. `setBufferFire` aliases
+  `setBuffer` and `dispatchFire` does not wait for the dispatch; on web both
+  already run in call order. `writeRawBytes` works at offset 0 and throws
+  `UnsupportedError` for any other offset.
+- `listAdapters`, `createSecondaryPlatform` and `drainSpinBudgetMs` keep the
+  interface's defaults: there are no multi-adapter contexts on web, and the
+  native GPU-wait fix does not apply.
 
 ## 1.5.7
 
-- Version lockstep with minigpu 1.5.7; no behavior change.
+- Version lockstep with minigpu 1.5.7; no behaviour change.
 
 ## 1.5.6
 
-- Version lockstep with minigpu 1.5.6 (new `preferDisplayAdapter` /
-  `selectedAdapterName` platform members inherit the interface's no-op
-  defaults on web — no behavior change).
+- Version lockstep with minigpu 1.5.6. The new `preferDisplayAdapter` /
+  `selectedAdapterName` members keep the interface's no-op defaults on web.
 
 ## 1.5.5
 
@@ -113,21 +128,24 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback.
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter; fixes the wrong adapter
+  being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -160,9 +178,9 @@
 
 ## 1.2.1
 
-- Fix: fresh builds need dawn find off
-- Change: 1.2.0 migrates minigpu to direct webgpu usage
 - Breaking: Changed setData and references to .write
+- Change: 1.2.0 migrates minigpu to direct webgpu usage
+- Fix: fresh builds need dawn find off
 - Fix: broken compute shader and buffer finalizers
 
 ## 1.2.0

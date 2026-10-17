@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -44,6 +45,8 @@ using LogCallback = void(*)(int level, const char* message);
 bool logPostToPort(int level, const char* message, size_t len);
 intptr_t logInitDartApi(void* initialize_api_dl_data);
 void logSetPort(int64_t port);
+/// Clears the registration only while it is still [port]; true if it did.
+bool logClearPortIf(int64_t port);
 
 class Logger {
 public:
@@ -53,8 +56,14 @@ public:
     }
 
     void setLevel(LogLevel level) {
-        mgpu::lock_guard<mgpu::mutex> lock(mutex_);
-        level_ = level;
+        level_.store(static_cast<int>(level), std::memory_order_relaxed);
+    }
+
+    /// True when a message at [level] would be emitted. Callers check this
+    /// before formatting so a filtered line costs one atomic load.
+    bool enabled(LogLevel level) const {
+        const int current = level_.load(std::memory_order_relaxed);
+        return current != LOG_NONE && static_cast<int>(level) >= current;
     }
 
     /// Install a callback that receives every log message (after level filter).
@@ -66,7 +75,7 @@ public:
 
     template<typename... Args>
     void log(LogLevel level, const char* file, int line, const char* format, Args... args) {
-        if (level_ == LOG_NONE || level < level_) return;
+        if (!enabled(level)) return;
 
         mgpu::lock_guard<mgpu::mutex> lock(mutex_);
 
@@ -102,7 +111,7 @@ public:
     /// Log a pre-formatted message at the given level (no file/line decoration).
     /// Used by the MGPU_LOG macro for raw fprintf-style messages.
     void logRaw(LogLevel level, const char* message) {
-        if (level_ == LOG_NONE || level < level_) return;
+        if (!enabled(level)) return;
         mgpu::lock_guard<mgpu::mutex> lock(mutex_);
         // Native port first — see log() above.
         if (logPostToPort(static_cast<int>(level), message, strlen(message))) return;
@@ -119,10 +128,12 @@ public:
     }
 
 private:
-    Logger() : level_(LOG_INFO), callback_(nullptr) {}
+    // WARN by default: the INFO/DEBUG lines sit on per-buffer hot paths.
+    Logger() : level_(LOG_WARN), callback_(nullptr) {}
     ~Logger() = default;
 
-    LogLevel level_;
+    // Atomic so the level check needs no lock (it runs on every call site).
+    std::atomic<int> level_;
     LogCallback callback_;
     mgpu::mutex mutex_;
 };
@@ -142,11 +153,14 @@ private:
 // MGPU_LOG — format a message into a stack buffer then forward to Logger::logRaw.
 // Use this in place of std::fprintf(stderr, "[mgpu ...] fmt", ...) so all
 // messages pass through the single Logger (and its optional Dart callback).
+// A filtered level is checked before formatting, so it costs no snprintf.
 // Level: 0=DEBUG 1=INFO 2=WARN 3=ERROR
 #define MGPU_LOG(lvl, ...) \
     do { \
-        char _mgpu_buf[1024]; \
-        snprintf(_mgpu_buf, sizeof(_mgpu_buf), __VA_ARGS__); \
-        mgpu::Logger::getInstance().logRaw( \
-            static_cast<mgpu::LogLevel>(lvl), _mgpu_buf); \
+        const mgpu::LogLevel _mgpu_lvl = static_cast<mgpu::LogLevel>(lvl); \
+        if (mgpu::Logger::getInstance().enabled(_mgpu_lvl)) { \
+            char _mgpu_buf[1024]; \
+            snprintf(_mgpu_buf, sizeof(_mgpu_buf), __VA_ARGS__); \
+            mgpu::Logger::getInstance().logRaw(_mgpu_lvl, _mgpu_buf); \
+        } \
     } while (0)

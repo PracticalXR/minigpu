@@ -95,8 +95,9 @@ Where the blobs go, and how to control it, is documented in the `minigpu`
 package README. The parts specific to this layer:
 
 - **One INFO line per device creation**, and nothing louder. Per-entry hit/miss
-  detail is DEBUG only — this log channel defaults to INFO and a line per blob
-  would bury real warnings, the same mistake per-buffer logging made once:
+  detail is DEBUG only — a line per blob would bury real warnings, the same
+  mistake per-buffer logging made once. The log channel defaults to WARN, so
+  pass `level: 1` to `Minigpu.setLogCallback` to see the INFO line:
 
   ```text
   [mgpu shadercache] C:\Users\you\AppData\Local\minigpu\shadercache\v1 entries=64 bytes=2311044 cap=256MB hits=64 misses=0 stores=0 evictions=0
@@ -213,11 +214,10 @@ a caller can route every transfer through these unconditionally.
 
 **Contract (read this — reads differ from writes):**
 
-- `End` runs **inline on the caller's thread**, under the same device mutex the
-  inline calls take. Ordering is identical to `writeBytesAt` / `readSync`; what
-  is removed is the submit. Nothing moves onto the WebGPU worker thread —
-  inline `mgpuReadSync*` / `mgpuWrite*` do **not** join that thread's FIFO, so
-  emitting there would be a race.
+- `End` keeps **call order**, like `mgpuWriteBufferAt` / `mgpuReadSync*`:
+  while minigpu's WebGPU thread has work queued (dispatches, render passes),
+  `End` runs behind that work; otherwise it runs on the caller's thread under
+  the device mutex. What is removed is the submit, not the ordering.
 - A staged **read is not filled until `End`**. Keep `dst` alive and do not
   inspect it early. Reads observe their source **as of `End`**.
 - A scope must **not** span a dispatch that reads what it stages.

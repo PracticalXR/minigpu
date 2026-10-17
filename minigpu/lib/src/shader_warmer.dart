@@ -6,7 +6,8 @@
 /// it; it lands on the first frame, the first inference, the first anything,
 /// and it looks like a hang rather than like work. Callers have been working
 /// around it for a while by dispatching a throwaway 1x1x1 job at startup and
-/// hoping.
+/// hoping. The warmer instead compiles each pipeline without running its
+/// kernel ([ComputeShader.buildPipeline]).
 ///
 /// This turns that idiom into an API with three properties the ad-hoc version
 /// cannot have:
@@ -69,17 +70,21 @@ class KernelWarmSpec {
   /// this API. minigpu builds an EXPLICIT bind-group layout from the buffers
   /// actually bound, and refuses to build a pipeline when none are — so a
   /// "compile this source" call with no bindings cannot produce the pipeline
-  /// the real dispatch will use. The counts only have to make the layout
-  /// legal; a handful of elements each is enough, and the real buffers replace
-  /// them later.
+  /// the real dispatch will use. Counts are f32 elements and are raised to 64
+  /// (256 bytes), which holds a typical parameter struct; give the real count
+  /// for a larger fixed-size struct, which must fit whole at dispatch.
   ///
   /// Tags and their ORDER must match the real binding session, because binding
-  /// slots are assigned in first-seen order.
+  /// slots are assigned in first-seen order: the i-th tag is `@binding(i)`.
+  /// Each binds as the kind its declaration in [source] names (`var<uniform>`,
+  /// `var<storage, read>`, `var<storage, read_write>`), the only layout the
+  /// real pipeline can have. Kernels with texture or sampler bindings cannot be
+  /// warmed.
   final Map<String, int> buffers;
 
   /// Stop waiting for this kernel after this long. The set stops admitting new
-  /// work; device-owned scratch remains alive until the submitted dispatch
-  /// finishes or the device is torn down.
+  /// work; device-owned scratch remains alive until the queued build finishes
+  /// or the device is torn down.
   final Duration timeout;
 }
 
@@ -101,9 +106,14 @@ enum WarmPhase {
   cancelled,
 }
 
-/// Which step of a build went wrong. The distinction matters: `pipeline` means
-/// this DRIVER gave up on a shader it had already accepted as valid, which is
-/// a statement about the device and not about the code.
+/// Which step of a build went wrong.
+///
+/// `create`: there was no initialized device to build on. `dispatch`: the
+/// pipeline did not build, or its shader or scratch bindings could not be made
+/// (the name dates from when a warm-up ran the kernel; it now only compiles).
+/// `timeout`: the build outlived [KernelWarmSpec.timeout]. `deviceLost`: the
+/// device went away mid-build, which is a statement about the device and not
+/// about the code.
 enum WarmStage { create, dispatch, timeout, deviceLost }
 
 /// One kernel's failure.
@@ -176,8 +186,11 @@ abstract class ShaderWarmer {
   /// [WarmProgress.phase] and [WarmProgress.errors] instead.
   Future<WarmProgress> get done;
 
-  /// Stop after the kernel currently building. Already-built pipelines stay
-  /// built — they are process-global in the backend.
+  /// Stop after the kernel currently building. Kernels already built stay
+  /// built: the warmer keeps each one's shader, and so its pipeline, until the
+  /// device epoch ends (counted in `Minigpu.liveShaderCount`). A backend that
+  /// shares live pipelines by content (Dawn does) hands that pipeline to a
+  /// real shader of the same source and bindings instead of compiling again.
   void cancel();
 }
 

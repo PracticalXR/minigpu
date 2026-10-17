@@ -65,6 +65,7 @@ export 'package:minigpu_platform_interface/minigpu_platform_interface.dart'
         ExternalPlane,
         ExternalFence,
         ExternalVideoBuffer,
+        YuvMatrix,
         kD3D11ImmutableReadyTag,
         PlatformVideoTexture,
         PlatformSharedOutputTexture,

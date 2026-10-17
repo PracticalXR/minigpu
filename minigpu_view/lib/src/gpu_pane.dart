@@ -41,6 +41,7 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:minigpu/minigpu.dart';
 
 import 'adapters/minigpu_adapter.dart';
@@ -80,6 +81,14 @@ class GpuPane implements GpuPaneTarget {
   MinigpuPreviewController _controller = MinigpuPreviewController();
 
   SharedOutputTexture? _texture;
+
+  /// Textures a resize replaced, each with the controller that registered it.
+  /// They stay registered and alive until nothing on screen can still show
+  /// them — see [_retireReplaced].
+  final _replaced =
+      <({SharedOutputTexture texture, MinigpuPreviewController controller})>[];
+  Future<void> _drops = Future<void>.value();
+
   Buffer? _upload;
   Buffer? _scratch;
   Buffer? _config;
@@ -154,14 +163,15 @@ class GpuPane implements GpuPaneTarget {
   }
 
   /// Show planar or subsampled host bytes — NV12, I420, YUY2, BGRA — unpacked
-  /// on the GPU. See [PlanarCpuGpuFrame] for the stride and colour-range
-  /// caveats, both of which fail silently when wrong.
+  /// on the GPU. See [PlanarCpuGpuFrame] for the stride and colour caveats,
+  /// all of which fail silently when wrong.
   Future<void> showPlanar({
     required PlanarFormat format,
     required List<PlanarPlane> planes,
     required int width,
     required int height,
     PlanarColorRange range = PlanarColorRange.limited,
+    YuvMatrix matrix = YuvMatrix.bt709,
   }) => show(
     PlanarCpuGpuFrame(
       format: format,
@@ -169,6 +179,7 @@ class GpuPane implements GpuPaneTarget {
       width: width,
       height: height,
       range: range,
+      matrix: matrix,
     ),
   );
 
@@ -259,19 +270,23 @@ class GpuPane implements GpuPaneTarget {
       if (!current()) {
         _hasContent = false;
         await _controller.clear();
+        await _dropReplaced();
         return false;
       }
       await _controller.present(_texture!.asPreviewSource());
       if (!current()) {
         _hasContent = false;
         await _controller.clear();
+        await _dropReplaced();
         return false;
       }
       _hasContent = true;
+      _retireReplaced().ignore();
       return true;
     } catch (error) {
       _hasContent = false;
       await _controller.clear();
+      await _dropReplaced();
       _report('present rejected: $error');
       return false;
     }
@@ -322,20 +337,67 @@ class GpuPane implements GpuPaneTarget {
   Future<bool> _ensure(int width, int height) async {
     if (_disposed || width <= 0 || height <= 0) return false;
     if (_texture != null && _width == width && _height == height) return true;
-    if (_texture != null) {
-      await _controller.clear();
-      await _gpu.waitForSubmittedWork();
-      _texture!.destroy();
+    final previous = _texture;
+    if (previous != null) {
+      // NOT hidden or destroyed here. The view keeps painting it until a
+      // frame showing its successor has been drawn, so a resize never puts an
+      // empty frame on screen; a blank per resize strobes while a window edge
+      // is dragged. The next successful present retires it.
+      _replaced.add((texture: previous, controller: _controller));
       _texture = null;
-      if (_disposed) return false;
     }
     _texture = _gpu.createSharedOutputTexture(width, height);
     _unsupported = _texture == null;
     _width = width;
     _height = height;
-    _hasContent = false;
     return _texture != null;
   }
+
+  /// Retires the textures the frame just presented supersedes, once a frame
+  /// showing it has been drawn: the host stops painting a retired texture at
+  /// once, so doing it sooner would put an empty frame on screen.
+  Future<void> _retireReplaced() async {
+    // Taken before waiting: a texture replaced after this call stays on
+    // screen until its own successor is presented.
+    final superseded = List.of(_replaced);
+    if (superseded.isEmpty) return;
+    // Waits while frames are off (app hidden). Dispose does not wait for it:
+    // disposing the controller drops every registration itself.
+    await SchedulerBinding.instance.endOfFrame;
+    await _dropReplaced(superseded);
+  }
+
+  /// Unregisters and frees replaced textures: [only] those, or every one. Only
+  /// once nothing on screen can still show them: after a frame without them,
+  /// or a controller clear. One run at a time, so overlapping resizes never
+  /// retire a texture twice.
+  Future<void> _dropReplaced([
+    List<({SharedOutputTexture texture, MinigpuPreviewController controller})>?
+        only,
+  ]) =>
+      _drops = _drops.then((_) async {
+        // An earlier run may have freed some of [only] already.
+        final batch = [
+          for (final old in only ?? _replaced)
+            if (_replaced.contains(old)) old,
+        ];
+        if (batch.isEmpty || _disposed) return;
+        try {
+          for (final old in batch) {
+            await old.controller.retire(old.texture.asPreviewSource());
+          }
+          if (_disposed) return; // dispose frees what is left
+          await _gpu.waitForSubmittedWork();
+          if (_disposed) return;
+          for (final old in batch) {
+            _replaced.remove(old);
+            old.texture.destroy();
+          }
+        } catch (error) {
+          // Unregistration or GPU completion not proven: keep them alive.
+          _report('replaced texture kept: $error');
+        }
+      });
 
   /// Hide the view and fence any in-flight frame from presenting it again.
   /// Keeps allocations for another frame of the same admitted view.
@@ -348,9 +410,11 @@ class GpuPane implements GpuPaneTarget {
 
   /// Drops the platform registration and frees GPU resources.
   ///
-  /// ORDER MATTERS: the controller unregisters the Flutter texture — an async
-  /// channel round trip — BEFORE the texture it points at is destroyed.
-  /// Reversing it lets the compositor sample a freed resource.
+  /// ORDER MATTERS: the controller unregisters the Flutter textures BEFORE the
+  /// textures they point at are destroyed, and the host answers only once the
+  /// engine has really dropped them (it removes a texture on the raster
+  /// thread, after the request). Reversing it lets the compositor sample a
+  /// freed resource.
   Future<void> dispose() {
     final pending = _disposing;
     if (pending != null) return pending;
@@ -365,14 +429,24 @@ class GpuPane implements GpuPaneTarget {
         await waitForReaders?.call();
         await _active;
         if (_texture != null ||
+            _replaced.isNotEmpty ||
             _upload != null ||
             _scratch != null ||
             _config != null) {
           await _gpu.retireSubmittedWork(deviceEpoch: _deviceOwner.deviceEpoch);
         }
         await _controller.dispose();
+        // A replaced texture registered under an earlier controller is gone
+        // only once that controller's own disposal is.
+        for (final old in List.of(_replaced)) {
+          await old.controller.retire(old.texture.asPreviewSource());
+        }
         _texture?.destroy();
         _texture = null;
+        for (final old in _replaced) {
+          old.texture.destroy();
+        }
+        _replaced.clear();
         _upload?.destroy();
         _upload = null;
         _scratch?.destroy();

@@ -27,9 +27,10 @@ enum PreviewSourceKind {
   cpu,
 }
 
-/// A presentable frame source. Lifetime is owned by the producer; the
-/// preview controller borrows the underlying GPU resource until the
-/// next [PreviewController.present] call or until disposal.
+/// A presentable frame source. Lifetime belongs to the producer; registration
+/// borrows the GPU resource. Replacing a frame or disposing a view can retire
+/// native presentation asynchronously. The producer must retain the resource
+/// through the actual consumer retirement, not just the host's present reply.
 @immutable
 abstract class PreviewSource {
   const PreviewSource();
@@ -48,8 +49,9 @@ abstract class PreviewSource {
   Map<String, Object?> toChannelMessage();
 
   /// True if the producer guarantees this source remains valid until
-  /// the next presentation. Most native shared textures are *borrowed*
-  /// — the producer must wait for [PreviewController.presentedAtUs]
-  /// before reusing them.
+  /// the next presentation. This declaration supplies no ownership transfer
+  /// or GPU-read completion. [PreviewController.presentedAtUs] acknowledges
+  /// host registration only; it does not authorize overwriting, reusing or
+  /// destroying a borrowed native resource.
   bool get isOwned => false;
 }

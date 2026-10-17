@@ -208,13 +208,17 @@ EXPORT uint64_t mgpuExternalPoolNowMicros(void);
  * host-chosen, >now and at most five seconds away. Full admission returns
  * WOULD_BLOCK without consuming any ownership. Fixed mutex handoff: producer
  * key 0 -> consumer key 1
- * -> key 0. Foreign readiness polls never enter Dawn's worker queue. */
+ * -> key 0. Release key 1 before Submit: SOURCE_DONE, also on cancel or
+ * timeout, leaves key 0 with the producer. Foreign readiness polls never enter
+ * Dawn's worker queue. */
 EXPORT int mgpuExternalPoolSubmit(MGPUExternalPool *pool,
                                   const MGPUExternalPoolSubmission *submission);
 EXPORT int mgpuExternalPoolCancel(MGPUExternalPool *pool, uint64_t lease_token);
 EXPORT int mgpuExternalPoolPoll(MGPUExternalPool *pool,
                                 MGPUExternalPoolEvent *out_event,
                                 uint32_t out_size);
+/* PENDING until the output is ready; CONFLICT once that output is already
+ * acquired (it never becomes acquirable again under the same token). */
 EXPORT int mgpuExternalPoolAcquireOutput(MGPUExternalPool *pool,
                                          uint64_t lease_token,
                                          MGPUExternalPoolOutput *out_output,
@@ -236,7 +240,9 @@ EXPORT int mgpuExternalPoolBindOutput(MGPUExternalPool *pool,
                                       MGPUComputeShader *shader, int binding);
 /* Binding is queued in FIFO order. A shader may not dispatch a retained binding
  * after consumer release; replace that binding or destroy the shader before
- * final pool release. A retained view alone is not a retained consumer. */
+ * final pool release. A retained view alone is not a retained consumer: the
+ * binding holds its own view reference only so that breaking this rule fails
+ * GPU validation instead of reading a freed view. */
 EXPORT int mgpuExternalPoolGetStats(MGPUExternalPool *pool,
                                     MGPUExternalPoolStats *out_stats,
                                     uint32_t out_size);
@@ -244,7 +250,8 @@ EXPORT int mgpuExternalPoolGetStats(MGPUExternalPool *pool,
  * release normally. Post-submit timeout/device loss faults admission and keeps
  * uncertain resources charged. Poll events and finish consumers, then release.
  * Release is final/nonconcurrent and returns WOULD_BLOCK while ownership or
- * completion records remain. It never invents GPU completion. */
+ * completion records remain. It never invents GPU completion. Once the
+ * creation device is lost or replaced, quarantined outputs no longer block it. */
 EXPORT int mgpuExternalPoolRetire(MGPUExternalPool *pool);
 EXPORT int mgpuExternalPoolRelease(MGPUExternalPool *pool);
 #ifdef __cplusplus

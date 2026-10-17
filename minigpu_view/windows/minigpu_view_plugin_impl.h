@@ -9,10 +9,45 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
+#include <vector>
 
 #include "d3d11_texture_handler.h"
+#include "registrar_association.h"
 
 namespace minigpu_view {
+
+// Holds the replies that promise "this texture is gone" until the engine has
+// removed it. UnregisterTexture only posts the removal to the raster thread,
+// so answering right after it let Dart destroy a producer texture the engine
+// could still sample. A method result may be completed from any thread (the
+// client wrapper allows it), so End answers due replies where it runs.
+class UnregisterBarrier : public UnregisterTracker {
+ public:
+  using Reply = std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>;
+
+  uint64_t Begin() override;
+  void End(uint64_t ticket) override;
+
+  // Succeeds [reply] once every unregistration begun so far has ended.
+  void ReplyWhenDone(Reply reply);
+
+  // Plugin teardown: answers every waiting reply now, because the engine
+  // that would end the open tickets is going away.
+  void Close();
+
+ private:
+  struct Waiter {
+    uint64_t last_ticket = 0;  // waits for every ticket up to this one
+    Reply reply;
+  };
+
+  std::mutex mutex_;
+  uint64_t next_ticket_ = 0;
+  std::set<uint64_t> open_;
+  std::vector<Waiter> waiters_;
+};
 
 // Plugin entry point. Owns one D3D11TextureHandler per Dart-side
 // MinigpuPreviewController instance AND per source handle.
@@ -36,9 +71,11 @@ namespace minigpu_view {
 class MinigpuViewPlugin : public flutter::Plugin {
  public:
   static void RegisterWithRegistrar(
-      flutter::PluginRegistrarWindows* registrar);
+      flutter::PluginRegistrarWindows* registrar,
+      std::unique_ptr<RegistrarAssociationOwner> association = nullptr);
 
-  explicit MinigpuViewPlugin(flutter::PluginRegistrarWindows* registrar);
+  explicit MinigpuViewPlugin(flutter::PluginRegistrarWindows* registrar,
+      std::unique_ptr<RegistrarAssociationOwner> association = nullptr);
 
   virtual ~MinigpuViewPlugin();
 
@@ -60,10 +97,15 @@ class MinigpuViewPlugin : public flutter::Plugin {
 
   flutter::PluginRegistrarWindows* registrar_;
   flutter::TextureRegistrar* textures_;
+  std::unique_ptr<RegistrarAssociationOwner> association_;
   // instanceId -> (source key -> handler). The key is the shared handle when
   // present, else the raw texture pointer.
   std::map<int, std::map<int64_t, HandlerEntry>> handlers_;
   uint64_t use_counter_ = 0;
+  // Shared with every handler, whose unregistration may finish after this
+  // plugin is gone.
+  std::shared_ptr<UnregisterBarrier> unregistrations_ =
+      std::make_shared<UnregisterBarrier>();
 };
 
 }  // namespace minigpu_view

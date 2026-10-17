@@ -1,5 +1,55 @@
 # minigpu_view CHANGELOG
 
+## 1.9.0
+
+- YUV frames show the right colours. The conversion over-saturated chroma,
+  by about 30% in limited-range frames and 14% in full-range ones.
+- `PlanarCpuGpuFrame` and `GpuPane.showPlanar` take a `matrix`
+  (`YuvMatrix.bt709`, `bt601` or `bt2020`; BT.709 by default), and
+  `asGpuFrame` uses the matrix and range the capture reports.
+  `kPlanarCfgWords` is now 11: the matrix is the last word.
+- Requires minigpu 1.9.0 and miniav 0.8.0.
+- `GpuPane` no longer goes blank while it resizes: the old picture stays up
+  until the new one is shown. New `MinigpuPreviewController.retire(source)`
+  drops one replaced source.
+- Disposing or retiring a preview now answers only after the engine has let
+  go of the texture.
+- Windows: GPU frames shared through an NT handle now bind. The check retries
+  with `OpenSharedResource1`, no longer reuses an earlier frame's answer, and
+  recovers from a removed device.
+- `MiniAVBuffer.asPreviewSource()` returns null for Windows GPU-handle frames
+  instead of passing the handle where a texture was expected. Show them with
+  `asGpuFrame(gpu)` and `GpuPane`. `asGpuFrame` takes the GPU route only for
+  BGRA and RGBA handles; NV12 handles no longer go through the BGRA copy.
+- CPU planar frames upload only the bytes the conversion reads, without a
+  per-frame copy, and size odd-width chroma correctly. A stride shorter than
+  a row is refused.
+- Web: the canvas copy waits for dispatches issued before it, and under
+  dart2wasm the view no longer reconfigures the canvas or rebuilds its
+  pipelines every frame. `retire` is answered.
+
+- Add fixed native platform cleanup for dormant preview parents and host-only
+  partial setup. Bounded requests acknowledge actual platform close/window
+  removal; missing pumping or failed work retains ownership. Child creation and
+  closure share an admission gate. Caller retains the engine through cleanup.
+
+- Add a bounded native same-engine registrar association and opaque binding API.
+  Plugin teardown fences new work; closed generations retain their charges.
+  Associated verification receives the core C identity, keeping the C++ wrapper
+  private. Engine retention and independent renderer qualification are required;
+  CPU/link checks do not qualify live capture.
+
+- Add bounded trusted native platform dispatch for immutable previews, with
+  irreversible source/deadline fences, callback-return ownership transfer and
+  terminal shutdown quarantine. Headless CPU checks do not qualify a deployed
+  engine or GPU capture; legacy channels remain separate.
+
+- Add a separate trusted native Windows immutable-preview ownership API with
+  bounded registration/descriptor loans, generation-safe callbacks and checked
+  retirement receipts. Requires an independently qualified engine/thread profile;
+  uncertain removal or cleanup retains charged owners. Legacy preview channels
+  remain separate. CPU boundary checks do not qualify real engine/GPU execution.
+
 ## 1.8.2
 
 - Increment downstream deps
@@ -10,63 +60,37 @@
 
 ## 1.7.0
 
-- **Windows: one engine texture per source handle, not per controller —
-  fixes resource exhaustion with multi-buffered producers.** A producer that
-  double/triple-buffers its output presents a different shared handle each
-  frame. The plugin used to re-point a single Flutter texture at each new
-  handle, and the engine re-created its ANGLE offscreen swapchain (color +
-  depth) for every content frame — thousands of allocations per minute that
-  eventually failed with `E_OUTOFMEMORY` ("SwapChain11: Could not create
-  depthstencil surface"). The plugin now keeps one registered texture per
-  (controller, handle) — a ring of N handles costs N swapchains total,
-  created once — and re-presenting a known handle is just
-  `MarkTextureFrameAvailable`. Least-recently-presented textures are evicted
-  above a small cap, so an ever-changing handle stream stays bounded too. The
-  Dart `MinigpuPreviewController` already propagated `textureId` changes to
-  its widget, so no API change.
-- **Host-memory planar frames render on the GPU: NV12, I420/YV12, YUY2, BGRA.**
-  `GpuPane.showPlanar` / `PlanarCpuGpuFrame` upload the planes as bytes and
-  unpack them with a compute shader. These are what cameras and screen capture
-  actually produce — RGBA usually only appears because someone asked a
-  converter for it — and the previous guidance for them was to decode an image
-  on the UI isolate. That is O(pixels) inside the capture callback: at 1080p60
-  it exceeds a frame interval and freezes the app rather than slowing the
-  preview. STRIDES ARE HONOURED, which matters because capture APIs pad rows
-  and assuming `width * bpp` shears the picture progressively down the frame.
-  BT.709 limited range by default (what MF/WGC deliver), overridable — guessing
-  it wrong is silent and shows up as a quality loss that has nothing to do with
-  the codec.
-- **`MiniAVBuffer.asGpuFrame(gpu)`** — one call from a capture buffer to
-  something displayable, whichever shape it arrived in (GPU handle or any of
-  the host formats above). The format knowledge now lives in this package,
-  which has to know both vocabularies, rather than being rewritten in every app
-  that shows a camera. Returns null rather than guessing at an unknown layout:
-  a wrong guess is skewed or miscoloured but not obviously broken, which is
-  worse than an empty pane.
-
-- **`GpuPane` — a pane that owns its destination texture and accepts frames in
-  whatever shape a producer hands them over.** `showSharedHandle`,
-  `showBuffer` and `showBytes` cover the common sources in one call each;
-  `GpuFrame` stays public for custom producers. Consumers were writing a
-  display path per producer, and typically an extra CPU one — read the frame
-  back, decode a `dart:ui` image, paint it — which at 4K costs more than a
-  frame interval on the isolate that also builds the UI and stalls the app
-  rather than degrading. Host-memory frames now upload once (through a pooled
-  buffer, so no per-frame VRAM allocation) and composite on the GPU like every
-  other source.
-  WHEN NOT TO USE IT: if you already have a `SharedOutputTexture`, present it
-  with `asPreviewSource()` — that copies nothing. A pane costs one
-  GPU-to-GPU blit and buys two things: it takes every source shape, and
-  because the caller drives `flush()`, the pane's update rate is something the
-  caller controls rather than something the producer decides. That matters
-  more than it sounds: a platform `Texture` does not hold a snapshot, so a
-  pane pointed at a producer's texture resamples it on any composite — pacing
-  `present` alone cannot bound how often it changes.
-- **`RawSharedTexturePreviewSource` / `RawGpuBufferPreviewSource`** — present
-  sources built from raw integer handles, for producers that publish a surface
-  as `{sharedHandle, texturePtr, width, height}` across an API boundary rather
-  than as an object. Consumers had nothing to call `asPreviewSource()` on and
-  were hand-rolling the wire format; getting it subtly wrong is silent.
+- **Windows: fix resource exhaustion with producers that rotate between
+  several output textures.** The plugin re-pointed one Flutter texture at each
+  new shared handle, so the engine rebuilt its swapchain on every frame until
+  it failed with `E_OUTOFMEMORY` ("SwapChain11: Could not create depthstencil
+  surface"). It now keeps one registered texture per controller and handle,
+  evicting the least recently presented ones above a small cap. No API change.
+- **Host-memory frames in NV12, I420/YV12, YUY2 and BGRA render on the GPU.**
+  `GpuPane.showPlanar` / `PlanarCpuGpuFrame` upload the planes and convert
+  them in a compute shader, instead of decoding an image on the UI isolate,
+  which at 1080p60 can freeze the app. Row strides are honoured. Colour
+  defaults to BT.709 limited range (what Media Foundation and Windows Graphics
+  Capture deliver) and can be overridden.
+- **New `MiniAVBuffer.asGpuFrame(gpu)`**: turns a miniav capture buffer into a
+  displayable frame, whether it holds a GPU handle or one of the host formats
+  above. Returns null for a layout it does not recognise rather than guessing.
+- **New `GpuPane`**: a pane that owns its destination texture and accepts
+  frames in any shape. `showSharedHandle`, `showBuffer` and `showBytes` cover
+  the common sources, and `GpuFrame` stays public for custom producers.
+  Host-memory frames are uploaded once through a pooled buffer and composited
+  on the GPU, instead of a CPU decode-and-paint path that at 4K takes longer
+  than a frame.
+  When not to use it: if you already have a `SharedOutputTexture`, present it
+  with `asPreviewSource()`, which copies nothing. A pane costs one GPU-to-GPU
+  copy; in return it accepts any source and changes only when you call
+  `flush()`, so you control its update rate. (A platform `Texture` shows
+  whatever its source holds each time Flutter composites, so pacing `present`
+  alone cannot limit how often it changes.)
+- **New `RawSharedTexturePreviewSource` / `RawGpuBufferPreviewSource`**:
+  preview sources built from raw integer handles, for producers that pass a
+  surface as `{sharedHandle, texturePtr, width, height}` instead of as an
+  object.
 
 ## 1.6.1
 
@@ -74,42 +98,35 @@
 
 ## 1.6.0
 
-- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
-  in this package.
+- Version bump for the minigpu 1.6.0 family. No functional change in this
+  package.
 
 ## 1.5.10
 
-- Fixes the `miniav` constraint, which was still `^0.5.2` while miniav is at
-  0.7.0 — this package was the only thing blocking any consumer that depends on
-  both. Now `^0.7.0`.
-- The published 1.5.9 shipped `minigpu`/`minigpu_platform_interface` at 1.5.8;
-  those were bumped to 1.5.9 in the repo but never republished. This release
-  carries them.
-- TRAP: `pubspec_overrides.yaml` applies in-repo only, so a stale constraint here
-  is invisible locally and fails only for consumers.
+- Fix the `miniav` constraint: it was still `^0.5.2` while miniav is at 0.7.0,
+  which blocked any app depending on both. Now `^0.7.0`.
+- Depends on `minigpu` / `minigpu_platform_interface` 1.5.9; the published
+  1.5.9 of this package still depended on 1.5.8.
 
 ## 1.5.9
 
-- Web: the `webVideoFrame` present path now works. A raw JS `VideoFrame` cannot
-  cross the method-channel `StandardMessageCodec`, so the plugin resolves a
-  codec-safe int `videoFrameHandle` from a shared global registry
-  (`globalThis.miniavVideoFrameRegistry`) — mirroring the existing WebGPU
-  `bufferHandle` path. (The prior branch expected the JSObject directly under
-  `frame` and was never actually reachable.) This is what makes
-  `miniav_player` web video playback present.
+- Web: the `webVideoFrame` present path now works. A JS `VideoFrame` cannot
+  pass through the method channel, so the plugin looks it up by an int
+  `videoFrameHandle` in a shared registry
+  (`globalThis.miniavVideoFrameRegistry`), like the existing WebGPU
+  `bufferHandle` path. This is what lets `miniav_player` show video on the
+  web.
 
 ## 1.5.8
 
 ## 1.5.7
 
-- Windows: `present()` now probes that a shared handle can actually be opened
-  on the default (primary display) adapter before registering it, and fails
-  with `cross_adapter` when the producer texture lives on a different GPU.
-  Previously such handles registered fine and then failed every raster-time
-  bind ("Binding D3D surface failed.") as a silently black texture with no
-  error surfaced to Dart. Apps can catch the error and fall back to a CPU
-  preview; producers should call `mgpuPreferDisplayAdapter` before GPU init
-  to avoid the mismatch entirely.
+- Windows: `present()` now checks that a shared handle can be opened on the
+  primary display's adapter before registering it, and fails with
+  `cross_adapter` when the producer's texture is on another GPU. Before, such
+  handles registered and then showed as a black texture with no error. Catch
+  the error to fall back to a CPU preview; producers can call
+  `mgpuPreferDisplayAdapter` before GPU init to avoid the mismatch.
 
 ## 1.5.6
 
@@ -161,21 +178,24 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback.
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter; fixes the wrong adapter
+  being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -192,7 +212,8 @@
 ## 0.1.0
 
 - Initial release.
-- Zero-copy Flutter texture rendering via DXGI shared handle (Windows) and platform-native equivalents.
+- Zero-copy Flutter texture rendering via DXGI shared handle (Windows) and
+  platform-native equivalents.
 - `SharedOutputTextureSource` adapter for `minigpu` `SharedOutputTexture`.
 - `MiniAVBufferSource` adapter for `miniav` GPU buffers.
 - `MiniavGpuPreview` widget with platform-channel-based texture registration.

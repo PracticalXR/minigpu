@@ -42,12 +42,15 @@ final class Buffer {
 
   /// Reads data from the buffer asynchronously.
   /// Throws an error if the buffer has been destroyed.
+  ///
+  /// [dataType] defaults to the element type of [outputData]; an explicit one
+  /// must match it (see [write]).
   Future<void> read(
     TypedData outputData,
     int size, {
     // Note: This 'size' likely means element count based on previous context
     int readOffset = 0,
-    BufferDataType dataType = BufferDataType.float32,
+    BufferDataType? dataType,
   }) async {
     if (!isValid) {
       throw StateError('Cannot read from a destroyed buffer.');
@@ -55,22 +58,27 @@ final class Buffer {
     if (descriptor != null && descriptor!.usage & BufferUsage.copySrc == 0) {
       throw UnsupportedError('Buffer was not created with copySrc usage');
     }
+    final type = _resolveDataType(outputData, dataType, 'outputData');
     // Use the null assertion operator (!) as isValid check ensures it's not null
     return _platformBuffer!.read(
-      outputData,
+      _plainView(outputData),
       size, // Pass element count
       elementOffset: readOffset,
-      dataType: dataType,
+      dataType: type,
     );
   }
 
   /// Writes data to the buffer.
   /// Throws an error if the buffer has been destroyed.
+  ///
+  /// [dataType] defaults to the element type of [inputData]. An explicit one
+  /// must match it ([ArgumentError] otherwise): [ByteData] is raw bytes and
+  /// needs one, and a [Uint16List] may carry [BufferDataType.float16] bits.
   Future<void> write(
     TypedData inputData,
     int size, {
     // Note: This 'size' likely means element count based on previous context
-    BufferDataType dataType = BufferDataType.float32,
+    BufferDataType? dataType,
   }) async {
     if (!isValid) {
       throw StateError('Cannot write to a destroyed buffer.');
@@ -78,11 +86,12 @@ final class Buffer {
     if (descriptor != null && descriptor!.usage & BufferUsage.copyDst == 0) {
       throw UnsupportedError('Buffer was not created with copyDst usage');
     }
+    final type = _resolveDataType(inputData, dataType, 'inputData');
     // Use the null assertion operator (!)
     await _platformBuffer!.write(
-      inputData,
+      _plainView(inputData),
       size, // Pass element count
-      dataType: dataType,
+      dataType: type,
     );
   }
 
@@ -114,6 +123,74 @@ final class Buffer {
   // Internal access for ComputeShader (consider if this is the best pattern)
   // Or adjust ComputeShader to accept Buffer directly.
   PlatformBuffer? get platformBuffer => _platformBuffer;
+}
+
+/// [dataType] when given, else the element type of [data]. Both backends take
+/// the bytes of [data] as [dataType] elements, also when the list holds
+/// another type, which silently reinterprets its bits: that is rejected here.
+/// [ByteData] is raw bytes and needs an explicit type; a [Uint16List] may
+/// carry float16 bits.
+BufferDataType _resolveDataType(
+  TypedData data,
+  BufferDataType? dataType,
+  String name,
+) {
+  final elementType = _elementTypeOf(data);
+  if (dataType == null) {
+    if (elementType != null) return elementType;
+    throw ArgumentError(
+      '$name is ${data.runtimeType}, which has no element type: pass dataType',
+    );
+  }
+  if (data is ByteData ||
+      dataType == elementType ||
+      (dataType == BufferDataType.float16 && data is Uint16List)) {
+    return dataType;
+  }
+  throw ArgumentError.value(
+    dataType,
+    'dataType',
+    'does not match the ${elementType?.name ?? data.runtimeType} elements of '
+        '$name',
+  );
+}
+
+BufferDataType? _elementTypeOf(TypedData data) {
+  if (data is Float32List || data is Float32x4List) {
+    return BufferDataType.float32;
+  }
+  if (data is Uint32List) return BufferDataType.uint32;
+  if (data is Int32List || data is Int32x4List) return BufferDataType.int32;
+  if (data is Uint8List || data is Uint8ClampedList) {
+    return BufferDataType.uint8;
+  }
+  if (data is Int8List) return BufferDataType.int8;
+  if (data is Uint16List) return BufferDataType.uint16;
+  if (data is Int16List) return BufferDataType.int16;
+  if (data is Float64List || data is Float64x2List) {
+    return BufferDataType.float64;
+  }
+  if (data is Int64List) return BufferDataType.int64;
+  if (data is Uint64List) return BufferDataType.uint64;
+  return null; // ByteData
+}
+
+/// [data] as the plain list the backends cast to for its element type, over
+/// the same bytes, so a read still lands in the caller's list.
+TypedData _plainView(TypedData data) {
+  if (data is Uint8ClampedList) {
+    return data.buffer.asUint8List(data.offsetInBytes, data.length);
+  }
+  if (data is Float32x4List) {
+    return data.buffer.asFloat32List(data.offsetInBytes, data.length * 4);
+  }
+  if (data is Int32x4List) {
+    return data.buffer.asInt32List(data.offsetInBytes, data.length * 4);
+  }
+  if (data is Float64x2List) {
+    return data.buffer.asFloat64List(data.offsetInBytes, data.length * 2);
+  }
+  return data;
 }
 
 class MinigpuAlreadyInitError extends Error {

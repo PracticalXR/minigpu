@@ -2,6 +2,9 @@
 #define BUFFER_H
 
 #include "webgpu.h"
+#include "minigpu_context_lifetime.h"
+#include "minigpu_source_metadata_allocator.h"
+#include "minigpu_task_queue.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -10,9 +13,9 @@
 #include <future>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "./mutex.h"
@@ -25,6 +28,10 @@ namespace mgpu {
 
 // Forward declarations
 class MGPU;
+class ContextPin;
+namespace capture_cleanup { class Family; }
+struct PrivateResourceState;
+struct PrivateResourceAccess;
 
 // ── Pre-init adapter preference ─────────────────────────────────────────────
 // When enabled BEFORE MGPU::initializeContext(), Dawn binds to the adapter
@@ -42,13 +49,14 @@ bool preferDisplayAdapterEnabled();
 // destroyContext().
 std::string selectedAdapterName();
 
-// Defined in minigpu_external.cpp. Drops the process-global D3D11 device and
-// immediate-context caches that ALIAS the context being torn down (on the
-// D3D11 backend the cached ID3D11Device IS Dawn's own device). Without this
-// they survive a destroy/re-init cycle pointing at the dead device, and the
-// next createSharedOutputTexture() silently takes the cross-device path and
-// returns null. No-op unless [context] is the process-global one that built
-// them, and on non-Windows.
+// Defined in minigpu_external.cpp. First closes (status 3) every render
+// pipeline made on [context], on every platform, which settles any still
+// compiling. Then, only for the process-global context, drops its toRGBA
+// converters and the D3D11 device and immediate-context caches that ALIAS it
+// (on the D3D11 backend the cached ID3D11Device IS Dawn's own device). Without
+// this they survive a destroy/re-init cycle pointing at the dead device, and
+// the next createSharedOutputTexture() silently takes the cross-device path
+// and returns null. The D3D11 caches exist only on Windows.
 void externalOnContextDestroyed(const void *context);
 
 // no gpu library dependency
@@ -78,22 +86,55 @@ enum BufferDataType {
 class WebGPUThread {
 private:
   std::thread worker;
-  std::queue<std::function<void()>> tasks;
+  task_queue::Core tasks;
   mgpu::mutex queueMutex;
   std::condition_variable condition;
   std::atomic<bool> stop{false};
+  const bool profileQueue_;
+  // Tasks queued or running. Callers that would otherwise touch the queue
+  // inline check it so their work cannot overtake work queued before it.
+  std::atomic<size_t> pending_{0};
+  // Set under queueMutex once the worker has left its loop: a task queued
+  // after that would never run, so enqueueAsync refuses it instead.
+  bool exited_ = false;
+  // Waits parked by worker tasks, oldest first. Worker only.
+  task_queue::ParkedWait *parkedHead_ = nullptr, *parkedTail_ = nullptr;
+  // Pumps each parked wait's instance, then resumes the ready ones in park
+  // order. Worker only. Returns whether any resumed.
+  bool pumpParked() noexcept;
 
 public:
   WebGPUThread();
   ~WebGPUThread();
+
+  // Runs every queued task, then joins the worker. Idempotent. MGPU calls it
+  // first thing in its destructor, while the state the tasks use is alive.
+  void shutdown();
+  bool onWorker() const noexcept {
+    return std::this_thread::get_id() == worker.get_id();
+  }
+  bool busy() const noexcept {
+    return pending_.load(std::memory_order_acquire) != 0;
+  }
 
   // Identity of the worker thread. Used by the context state machine to
   // recognise "I am the thread the teardown is about to enqueueSync onto" and
   // refuse to block there (that wait would deadlock the teardown).
   std::thread::id threadId() const { return worker.get_id(); }
 
-  // returns immediately
+  // Returns immediately. Throws once the worker has exited, so the caller's
+  // own fallback runs instead of the task being dropped unrun.
   void enqueueAsync(std::function<void()> task);
+  // Native scoped jobs link their prepaid entry. A refusal never consumes the
+  // token; success has no later throwing operation before it returns.
+  int enqueuePrepared(task_queue::Prepared &) noexcept;
+  // Takes a GPU wait off the worker instead of blocking it (see
+  // task_queue::ParkedWait), so later tasks run while the GPU drains. Only a
+  // task running on the worker may park; anywhere else (and on the web, which
+  // has no worker) it refuses and the caller waits inline. Until the wait
+  // resumes the worker references its instance, counts it as pending work, and
+  // keeps pumping through shutdown.
+  bool park(task_queue::ParkedWait &, WGPUInstance) noexcept;
 
   // waits for completion
   template <typename T> T enqueueSync(std::function<T()> task) {
@@ -230,6 +271,15 @@ public:
   std::string adapterName() const { return selectedName; }
 
   WebGPUThread &getWebGPUThread() { return webgpuThread; }
+  // Joins the worker while every member its tasks use is still alive
+  // (members die in reverse order and ctxStateMutex sits after webgpuThread).
+  ~MGPU() { webgpuThread.shutdown(); }
+  // True when queue work done inline on this thread would reach the queue
+  // ahead of tasks already queued on the worker (dispatches, render passes,
+  // texture uploads); such work is queued behind them instead.
+  bool inlineWouldOvertake() const noexcept {
+    return !webgpuThread.onWorker() && webgpuThread.busy();
+  }
 
   WGPUDevice getDevice() const;
   // Returns an add-ref'd device only when this exact context generation is
@@ -254,6 +304,10 @@ public:
   // Returns the queue without attempting to reinitialize the context.
   WGPUQueue tryGetQueue() const noexcept {
     return (ctx && ctx->initialized) ? ctx->queue : nullptr;
+  }
+  // Returns the device without attempting to reinitialize the context.
+  WGPUDevice tryGetDevice() const noexcept {
+    return (ctx && ctx->initialized) ? ctx->device : nullptr;
   }
 
   mgpu::mutex &getGpuMutex() { return gpuOperationMutex; }
@@ -281,21 +335,22 @@ public:
   }
 
   // ── Batched staging uploads (ADDITIVE — see mgpuBeginUploads) ─────────────
-  // Problem this solves: every `writeBytesAt` / `write` takes the device mutex
+  // Problem this solves: every Buffer write takes the device mutex
   // AND flushes the pending batch (one wgpuQueueSubmit per range).  A producer
   // pushing N scattered dirty runs per frame therefore pays N submits and N
   // lock round-trips on its own thread.
   //
   // The batched path instead accumulates the ranges in a HOST arena (no lock,
-  // no GPU call), then — once, asynchronously, on the WebGPU thread — does ONE
+  // no GPU call), then — once, at End — does ONE
   // wgpuQueueWriteBuffer into a persistent staging buffer and records N
   // copyBufferToBuffer commands into the command encoder the batch is ALREADY
   // building.  No submit, no per-range mutex.
   //
-  // Ordering: IDENTICAL to the inline `writeBytesAt` path.  The emission runs
-  // synchronously on the caller's thread under the same mutex; commands
+  // Ordering: queue order = call order, as for Buffer writes.  While the
+  // WebGPU thread has tasks queued, the emission is queued behind them;
+  // otherwise it runs on the caller's thread under the same mutex.  Commands
   // already recorded into the batch execute before the copies, and a dispatch
-  // that has not been enqueued yet cannot overtake them.  The difference is
+  // enqueued after End cannot overtake them.  The difference is
   // only that the batch does not have to be SUBMITTED for the ordering to
   // hold — a `copyBufferToBuffer` recorded after the pending dispatches is
   // ordered by the encoder, whereas a queue write is ordered by submission and
@@ -334,7 +389,8 @@ public:
   int uploadScopeDepth() const { return uploadDepth; }
 
 private:
-  // Runs on the WebGPU thread with gpuOperationMutex held.
+  // Runs with gpuOperationMutex held: on the WebGPU thread when End was queued
+  // behind its tasks, else on the caller's.
   void applyUploadScopeLocked(UploadScope &scope);
   void uploadFallbackLocked(UploadScope &scope);
   void recycleScope(UploadScope *scope);
@@ -381,10 +437,10 @@ public:
   // of END, not as of the stage call — do not open a scope across a dispatch
   // that overwrites something already staged.
   //
-  // Threading: End runs INLINE on the caller's thread, deliberately — the same
-  // posture `endUploads` was forced into.  `mgpuReadSync*` / `mgpuWrite*` run
-  // inline and do NOT join the WebGPU thread's FIFO, so emitting there would
-  // race every caller that mixes the two.
+  // Threading: queue order = call order, as for Buffer reads.  End resolves on
+  // the caller's thread, or behind the WebGPU thread's queued tasks while it
+  // has any; either way it returns once the destinations are filled.  The map
+  // wait runs without the device mutex.
   struct StagedRead {
     void *dst = nullptr;      // caller destination, filled at End
     uint64_t slotOffset = 0;  // into the readback buffer
@@ -409,7 +465,8 @@ public:
   // no device), -1 on bad arguments.
   int stageRead(WGPUBuffer src, size_t srcByteOffset, size_t srcBufferSize,
                 void *dst, size_t byteSize);
-  // Closes one nesting level; resolves at depth 0.  Returns the reads filled.
+  // Closes one nesting level; resolves at depth 0.  Returns the reads filled,
+  // or -1 when none were (no device, failed map).
   int endReadbacks();
   // Pre-grows the persistent readback allocation (avoids a mid-frame realloc).
   void reserveReadbacks(size_t byteSize);
@@ -436,13 +493,41 @@ public:
   static bool readbackProfEnabled();
 
 private:
+  friend class Buffer; // readOneLocked and the scope pins below
   // Maps [0,size) of [buf] for read and blocks until the map completes.
   bool waitMapReadLocked(WGPUBuffer buf, size_t size);
   // One inline read through a throwaway staging buffer (the End-time fallback
-  // when the persistent allocation cannot be created).
+  // when the persistent allocation cannot be created, and the edge words of
+  // an unaligned write).
   bool readOneLocked(WGPUBuffer src, uint64_t srcOffset, void *dst,
                      uint64_t size);
-  void applyReadbackScopeLocked(ReadbackScope &scope);
+  // Resolves a closed scope. Takes gpuOperationMutex itself and drops it
+  // across the map wait. Returns the reads filled, or -1 when none were.
+  int applyReadbackScope(ReadbackScope &scope);
+
+  // Buffers an open stage scope names between Stage* and End. Releasing one
+  // defers its wgpuBufferDestroy to the first submit after End recorded the
+  // copy: a destroyed buffer in a submit drops the WHOLE shared batch.
+  void pinForScope(WGPUBuffer buffer);
+  void unpinForScope(WGPUBuffer buffer);
+  // gpuOperationMutex held. True when [buffer] is pinned; the destroy and the
+  // caller's reference then belong to the deferred list.
+  bool deferDestroyIfPinnedLocked(WGPUBuffer buffer);
+  // gpuOperationMutex held, after a submit: destroys what is no longer pinned.
+  void destroyDeferredLocked();
+  mgpu::mutex scopePinMutex_; // leaf lock: taken last, never held across Dawn
+  std::unordered_map<WGPUBuffer, int> scopePins_; // guarded by scopePinMutex_
+  std::vector<WGPUBuffer> deferredDestroys_; // guarded by gpuOperationMutex
+
+  // Host bytes of write copies queued behind the worker (Buffer::writeRaw).
+  // A writer that would pass the budget waits for earlier copies to run, so a
+  // producer outpacing a busy worker cannot pile a whole upload into host
+  // memory. queuedWriteMutex_ is a leaf lock, never held across GPU work.
+  void chargeQueuedWrite(size_t bytes);
+  void refundQueuedWrite(size_t bytes) noexcept;
+  mgpu::mutex queuedWriteMutex_;
+  std::condition_variable queuedWriteCv_;
+  size_t queuedWriteBytes_ = 0; // guarded by queuedWriteMutex_
 
   std::unique_ptr<ReadbackScope> readbackOpen;
   int readbackDepth = 0;
@@ -496,9 +581,14 @@ private:
   std::thread::id ctxOwner;
   int ctxAttachCount = 0;
 };
-class Buffer {
+class Buffer : public source_scope::MetadataUniqueRecord {
 public:
   explicit Buffer(MGPU &mgpu_ref);
+  explicit Buffer(std::shared_ptr<PrivateResourceState>);
+  // Scoped CPU storage is released by MetadataDelete<Buffer>, before reading
+  // any destroyed members. Ordinary legacy new/delete and constructor unwind
+  // remain untouched; the C ABI's checked/generic owner paths use that deleter.
+  Buffer(source_scope::MetadataUniqueRecord, std::shared_ptr<PrivateResourceState>);
   ~Buffer();
 
   Buffer(Buffer &&other) noexcept;
@@ -524,21 +614,24 @@ public:
   void write(const int64_t *inputData, size_t elementCount);
   void write(const uint64_t *inputData, size_t elementCount);
 
-  // Partial RAW write: copy [byteSize] bytes of [inputData] into this buffer
-  // starting at [dstByteOffset] bytes. Bypasses the per-type packing path --
-  // the caller supplies bytes already in final buffer layout. Used for
-  // dirty-region uploads (write only the tiles that changed instead of the
-  // whole plane). WebGPU requires dstByteOffset and byteSize to be multiples
-  // of 4; dstByteOffset + byteSize must be <= getSize().
-  void writeBytesAt(const void *inputData, size_t byteSize,
-                    size_t dstByteOffset);
-
-  // Partial RAW read at a byte offset — the read-side mirror of writeBytesAt,
-  // and the inline fallback for `mgpuStageRead`.  Copies [byteSize] bytes
-  // starting at [srcByteOffset] into [outputData] with NO per-type unpacking:
-  // the caller gets the buffer's bytes as they are laid out on the device, so
-  // the answer is identical whether the read was batched or not.
-  void readBytesAt(void *outputData, size_t byteSize, size_t srcByteOffset);
+  // Partial RAW write in final buffer layout (no per-type packing), for
+  // dirty-region uploads. Any offset and size: an unaligned range
+  // read-modify-writes its edge words, which needs CopySrc usage. Returns
+  // false, without throwing, when nothing was written.
+  bool tryWriteBytesAt(const void *inputData, size_t byteSize,
+                       size_t dstByteOffset);
+  // Partial RAW read at any byte offset and size, with NO per-type unpacking:
+  // the bytes as laid out on the device, so the answer is identical whether
+  // the read was batched or not (the inline fallback of `mgpuStageRead`).
+  // Returns false, without throwing, when nothing was read.
+  bool tryReadBytesAt(void *outputData, size_t byteSize, size_t srcByteOffset);
+  // readAsync with the element type chosen at run time. [done] gets whether
+  // the read landed (false: bad type or range, no device, failed map).
+  void readAsyncResult(void *outputData, size_t elementCount, size_t offset,
+                       BufferDataType type, std::function<void(bool)> done);
+  // The synchronous form: true when the read landed.
+  bool readResult(void *outputData, size_t elementCount, size_t offset,
+                  BufferDataType type);
 
   void read(float *outputData, size_t elementCount, size_t offset = 0);
   void read(int32_t *outputData, size_t elementCount, size_t offset = 0);
@@ -573,50 +666,71 @@ public:
                  std::function<void()> callback);
 
   void release();
+  // release() + delete, queued on the WebGPU FIFO: a pending readAsync task
+  // captures `this`, so the object must outlive every task queued before it.
+  void destroyQueued();
+  int destroyCheckedAsync(std::shared_ptr<ContextPin> pin,
+                          MGPUResourceCleanupCallback callback, void *userdata);
+  int destroyCheckedAsync(std::shared_ptr<ContextPin> pin,
+                          MGPUResourceCleanupCallback callback, void *userdata,
+                          const capture_cleanup::Family &family);
 
   size_t getLength() const { return elementCount; }
   size_t getSize() const { return bufferData.size; }
   // The context this buffer was created from (batched-upload routing).
   MGPU &getMGPU() const { return mgpu; }
+  // Legacy buffers remain valid for unscoped writers. A scoped writer requires
+  // the buffer's exact private creation source, never raw device equality.
+  bool matchesPrivateSourcePin(const ContextPin &pin) const;
+  // Internal lifetime alias, not native-use permission. Caller holds the GPU
+  // gate and keeps the buffer wrapper usable through synchronous creation.
+  std::shared_ptr<PrivateResourceState> copyPrivateSourceState(const ContextPin &) const;
   BufferDataType getDataType() const { return dataType; }
   WGPUBuffer getWGPUBuffer() const { return bufferData.buffer; }
 
   BufferData bufferData;
 
 private:
+  friend struct PrivateResourceAccess;
   MGPU &mgpu;
+  std::shared_ptr<PrivateResourceState> privateResource_;
   BufferDataType dataType = kUnknownType;
   size_t elementCount = 0;
   bool isPacked = false; // For types that need packing (8/16-bit, 64-bit)
 
-  // Persistent staging buffer reused across readDirect calls to avoid
+  // Persistent staging buffer reused across reads (readRawNow) to avoid
   // allocating/freeing a large (e.g. 5 MB) CopyDst|MapRead buffer on every
   // texture readback (at 20 fps that is ~100 MB/s of GPU heap churn).
   WGPUBuffer _readStagingBuffer = nullptr;
   size_t _readStagingBufferSize = 0;
+  // One reader of _readStagingBuffer at a time (the map wait runs without
+  // gpuOperationMutex). Taken before gpuOperationMutex.
+  mgpu::mutex readMutex_;
+
+  // Raw byte cores. The plain ones keep queue order = call order: with tasks
+  // queued on the worker they run behind them, otherwise inline (the *Now
+  // bodies). zeroPadTail rounds a write up to whole words with zeros, as the
+  // typed writes always have.
+  bool writeRaw(const void *src, size_t byteSize, size_t dstByteOffset,
+                bool zeroPadTail);
+  bool writeRawNow(const void *src, size_t byteSize, size_t dstByteOffset,
+                   bool zeroPadTail);
+  bool readRaw(void *dst, size_t byteSize, size_t srcByteOffset);
+  bool readRawNow(void *dst, size_t byteSize, size_t srcByteOffset);
+  // [type] is the caller's element type. A packed buffer (8/16/64-bit lanes)
+  // converts each lane to it; anything else is read raw.
+  template <typename T>
+  bool readTyped(T *outputData, size_t elementCount, size_t offset,
+                 BufferDataType type);
+  template <typename T>
+  void readAsyncTyped(T *outputData, size_t elementCount, size_t offset,
+                      BufferDataType type, std::function<void(bool)> done);
 
   void releaseInternal();
+  // Dedicated final-owner path. Exact worker only; no queued/direct fallback.
+  bool releaseCheckedOnWorker(const ContextPin &pin);
   size_t getElementSize(BufferDataType type) const;
   bool needsPacking(BufferDataType type) const;
-
-  template <typename T>
-  void writeDirect(const T *inputData, size_t byteSize, BufferDataType type);
-
-  template <typename T>
-  void writePacked(const T *inputData, size_t byteSize, BufferDataType type);
-
-  template <typename T>
-  void readDirect(T *outputData, size_t elementCount, size_t offset);
-
-  template <typename T>
-  void readDirectChunk(T *outputData, size_t elementCount, size_t offset);
-
-  template <typename T>
-  void readPacked(T *outputData, size_t elementCount, size_t offset);
-
-  template <typename T>
-  void readAsyncImpl(T *outputData, size_t elementCount, size_t offset,
-                     BufferDataType type, std::function<void()> callback);
 };
 
 } // namespace mgpu

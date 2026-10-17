@@ -51,9 +51,11 @@ void main(List<String> args) async {
       // up in the final app output.
       final dawnDll = _findDawnDll(input, dawnSearchDirs, logger);
       if (dawnDll == null) {
-        final searched = dawnSearchDirs
-            .map((u) => '  - ${Directory.fromUri(u).path}')
-            .join('\n');
+        final candidates = _dawnLibCandidates(input.config.code.targetOS);
+        final searched = [
+          for (final u in dawnSearchDirs)
+            for (final rel in candidates) '  - ${File.fromUri(u.resolve(rel)).path}',
+        ].join('\n');
         final systemDir = _systemDawnRoot();
         final osKey = _osKey(input);
         final archKey = _archKey(
@@ -297,31 +299,41 @@ String? _systemDawnRoot() {
   return null;
 }
 
-/// Searches [searchDirs] in order, recursively, for `webgpu_dawn.dll` /
-/// `libwebgpu_dawn.so` / `libwebgpu_dawn.dylib` matching the current target OS.
-/// Returns the first match found, or null.
-File? _findDawnDll(BuildInput input, List<Uri> searchDirs, Logger logger) {
-  final os = input.config.code.targetOS;
-  final filename = switch (os) {
-    OS.windows => 'webgpu_dawn.dll',
-    OS.macOS => 'libwebgpu_dawn.dylib',
-    OS.linux || OS.android => 'libwebgpu_dawn.so',
-    _ => 'libwebgpu_dawn.so',
-  };
+/// Where the Dawn shared library sits inside a `build_{os}_{arch}/` directory,
+/// in priority order: the files `src/cmake/dawn.cmake` links against.
+///
+/// Fixed paths, never a recursive walk. The walk shipped the first
+/// `webgpu_dawn.dll` it met, so a Debug Dawn build beside the Release one
+/// (`Debug/` sorts first) was bundled with a library linked against the
+/// Release import lib, and that DLL needs a debug CRT user machines lack.
+/// Windows lists Release outputs only because minigpu_ffi is always built
+/// `BuildMode.release`, which links `src/dawn/native/Release/webgpu_dawn.lib`.
+List<String> _dawnLibCandidates(OS os) => switch (os) {
+  // Dawn sets CMAKE_RUNTIME_OUTPUT_DIRECTORY to its build root, so a
+  // multi-config build puts the DLL in `<config>/`; older Dawn left it beside
+  // its import lib.
+  OS.windows => const [
+    'Release/webgpu_dawn.dll',
+    'src/dawn/native/Release/webgpu_dawn.dll',
+  ],
+  OS.macOS => const ['src/dawn/native/libwebgpu_dawn.dylib'],
+  _ => const ['src/dawn/native/libwebgpu_dawn.so'],
+};
 
+/// Returns the first existing Dawn shared library for the current target OS:
+/// [searchDirs] in priority order, and within each the [_dawnLibCandidates]
+/// in theirs. Returns null when none exists.
+File? _findDawnDll(BuildInput input, List<Uri> searchDirs, Logger logger) {
+  final candidates = _dawnLibCandidates(input.config.code.targetOS);
   for (final dirUri in searchDirs) {
-    final dir = Directory.fromUri(dirUri);
-    if (!dir.existsSync()) {
-      logger.fine('Dawn search dir does not exist, skipping: ${dir.path}');
-      continue;
-    }
-    for (final entity in dir.listSync(recursive: true, followLinks: false)) {
-      if (entity is File && p.basename(entity.path) == filename) {
-        logger.info('Found Dawn at: ${entity.path}');
-        return entity;
+    for (final rel in candidates) {
+      final file = File.fromUri(dirUri.resolve(rel));
+      if (file.existsSync()) {
+        logger.info('Found Dawn at: ${file.path}');
+        return file;
       }
+      logger.fine('Dawn library not at ${file.path}');
     }
-    logger.fine('$filename not found under ${dir.path}');
   }
   return null;
 }

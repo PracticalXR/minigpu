@@ -1,17 +1,19 @@
+## 1.9.0
+
+- Docs: a hot reload keeps every GPU object and does not re-run `gpu.init()`,
+  so register callbacks that drop objects you rebuild on next use, never
+  `gpu.destroySync`. A hot restart never runs these callbacks.
+
 ## 1.8.1
 
 - Version alignment with the minigpu 1.8.1 family release.
 
 ## 1.7.0
 
-- Docs corrected: `MinigpuBinding` was described as preventing stale
-  `NativeCallable` invocations during hot reload. It never could — `reassemble`
-  is synchronous, so it can stop new work but cannot wait for work already
-  handed to the GPU worker thread, and isolate teardown deletes callbacks
-  regardless of what Dart does. That bug is fixed in minigpu_ffi, which now
-  delivers completions on a Dart native port. This widget is a teardown
-  ORDERING aid: it runs your registered GPU disposal at the one moment
-  (hot reload) when nothing else does. No functional change.
+- Docs fix: `MinigpuBinding` does not prevent stale GPU callbacks during hot
+  reload, as the docs claimed; that crash is fixed in minigpu_ffi 1.7.0. The
+  widget is a teardown-ordering aid: it runs your registered GPU cleanup on
+  hot reload, when nothing else would. No functional change.
 
 ## 1.6.1
 
@@ -19,8 +21,8 @@
 
 ## 1.6.0
 
-- Version bump to keep the minigpu 1.6.0 family aligned. No functional change
-  in this package.
+- Version bump for the minigpu 1.6.0 family. No functional change in this
+  package.
 
 ## 1.5.9
 
@@ -80,21 +82,24 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback.
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter; fixes the wrong adapter
+  being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -106,4 +111,5 @@
 
 ## 1.4.0
 
-- Initial release. Re-exports `minigpu` and provides `MinigpuFlutterBinding` for registering synchronous hot-restart teardown callbacks.
+- Initial release. Re-exports `minigpu` and provides `MinigpuFlutterBinding`
+  for registering synchronous hot-restart teardown callbacks.

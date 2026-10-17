@@ -1,5 +1,7 @@
 #include "include/minigpu_view/minigpu_view_plugin.h"
 #include "minigpu_view_plugin_impl.h"
+#include "private_preview_owner.h"
+#include "private_preview_dispatcher.h"
 
 #include <flutter/encodable_value.h>
 #include <flutter/method_channel.h>
@@ -14,26 +16,45 @@ namespace minigpu_view {
 
 // static
 void MinigpuViewPlugin::RegisterWithRegistrar(
-    flutter::PluginRegistrarWindows* registrar) {
+    flutter::PluginRegistrarWindows* registrar,
+    std::unique_ptr<RegistrarAssociationOwner> association) {
   auto channel =
       std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
           registrar->messenger(), "minigpu_view",
           &flutter::StandardMethodCodec::GetInstance());
 
-  auto plugin = std::make_unique<MinigpuViewPlugin>(registrar);
+  const auto publication = association ? association->publication() : nullptr;
+  auto* textures = registrar->texture_registrar();
+  auto plugin = std::make_unique<MinigpuViewPlugin>(registrar, std::move(association));
 
-  channel->SetMethodCallHandler(
-      [plugin_pointer = plugin.get()](const auto& call, auto result) {
-        plugin_pointer->HandleMethodCall(call, std::move(result));
-      });
+  try {
+    channel->SetMethodCallHandler(
+        [plugin_pointer = plugin.get()](const auto& call, auto result) {
+          plugin_pointer->HandleMethodCall(call, std::move(result));
+        });
 
-  registrar->AddPlugin(std::move(plugin));
+    registrar->AddPlugin(std::move(plugin));
+  } catch (...) {
+    // Do not leave a messenger callback pointing at an uninstalled plugin.
+    channel->SetMethodCallHandler(nullptr);
+    throw;
+  }
+  // Use a strong metadata snapshot, not the moved plugin/owner pointer. A
+  // reentrant teardown closes it permanently and publication then refuses.
+  if (publication) PublishRegistrarAssociation(publication, textures);
 }
 
-MinigpuViewPlugin::MinigpuViewPlugin(flutter::PluginRegistrarWindows* registrar)
-    : registrar_(registrar), textures_(registrar->texture_registrar()) {}
+MinigpuViewPlugin::MinigpuViewPlugin(flutter::PluginRegistrarWindows* registrar,
+    std::unique_ptr<RegistrarAssociationOwner> association)
+    : registrar_(registrar), textures_(registrar->texture_registrar()),
+      association_(std::move(association)) {}
 
-MinigpuViewPlugin::~MinigpuViewPlugin() = default;
+MinigpuViewPlugin::~MinigpuViewPlugin() {
+  if (association_) association_->Close();
+  ClosePrivatePreviewDispatchers(textures_);
+  ClosePrivatePreviewRegistrar(textures_);
+  unregistrations_->Close();
+}
 
 namespace {
 
@@ -53,6 +74,52 @@ int64_t NowMicros() {
 }
 
 }  // namespace
+
+uint64_t UnregisterBarrier::Begin() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const uint64_t ticket = ++next_ticket_;
+  open_.insert(ticket);
+  return ticket;
+}
+
+void UnregisterBarrier::End(uint64_t ticket) {
+  std::vector<Reply> due;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_.erase(ticket);
+    const uint64_t oldest_open = open_.empty() ? UINT64_MAX : *open_.begin();
+    for (auto it = waiters_.begin(); it != waiters_.end();) {
+      if (it->last_ticket < oldest_open) {
+        due.push_back(std::move(it->reply));
+        it = waiters_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  // Outside the lock: a reply takes the messenger's own lock.
+  for (auto& reply : due) reply->Success();
+}
+
+void UnregisterBarrier::ReplyWhenDone(Reply reply) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!open_.empty()) {
+      waiters_.push_back(Waiter{next_ticket_, std::move(reply)});
+      return;
+    }
+  }
+  reply->Success();
+}
+
+void UnregisterBarrier::Close() {
+  std::vector<Waiter> waiters;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    waiters.swap(waiters_);
+  }
+  for (auto& waiter : waiters) waiter.reply->Success();
+}
 
 void MinigpuViewPlugin::HandleMethodCall(
     const flutter::MethodCall<flutter::EncodableValue>& method_call,
@@ -133,7 +200,8 @@ void MinigpuViewPlugin::HandleMethodCall(
                         "(primary display) adapter: " + why);
           return;
         }
-        auto handler = std::make_unique<D3D11TextureHandler>(textures_);
+        auto handler =
+            std::make_unique<D3D11TextureHandler>(textures_, unregistrations_);
         if (!handler->InitializeFromSharedHandle(shared_h, width, height)) {
           result->Error("init_failed",
                         "Failed to initialize D3D11 shared-handle texture handler");
@@ -148,7 +216,8 @@ void MinigpuViewPlugin::HandleMethodCall(
           result->Error("invalid_handle", "Missing handle and sharedHandle");
           return;
         }
-        auto handler = std::make_unique<D3D11TextureHandler>(textures_);
+        auto handler =
+            std::make_unique<D3D11TextureHandler>(textures_, unregistrations_);
         if (!handler->Initialize(tex, width, height)) {
           result->Error("init_failed",
                         "Failed to initialize D3D11 texture handler");
@@ -199,7 +268,25 @@ void MinigpuViewPlugin::HandleMethodCall(
 
   if (method == "dispose") {
     handlers_.erase(instance_id);
-    result->Success();
+    // Not before the engine has dropped the textures: Dart destroys the
+    // producer textures once this returns.
+    unregistrations_->ReplyWhenDone(std::move(result));
+    return;
+  }
+
+  if (method == "retire") {
+    // One source the instance has replaced (a resize). Keyed like present;
+    // the reply waits for the engine as for dispose.
+    const auto* handle_v = get("handle");
+    const auto* shared_handle_v = get("sharedHandle");
+    const int64_t handle = handle_v ? GetInt64(*handle_v) : 0;
+    const int64_t shared_handle =
+        shared_handle_v ? GetInt64(*shared_handle_v) : 0;
+    auto instance = handlers_.find(instance_id);
+    if (instance != handlers_.end()) {
+      instance->second.erase(shared_handle != 0 ? shared_handle : handle);
+    }
+    unregistrations_->ReplyWhenDone(std::move(result));
     return;
   }
 
@@ -210,7 +297,16 @@ void MinigpuViewPlugin::HandleMethodCall(
 
 void MinigpuViewPluginRegisterWithRegistrar(
     FlutterDesktopPluginRegistrarRef registrar) {
-  minigpu_view::MinigpuViewPlugin::RegisterWithRegistrar(
-      flutter::PluginRegistrarManager::GetInstance()
-          ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar));
+  if (!registrar) return;
+  try {
+    std::unique_ptr<minigpu_view::RegistrarAssociationOwner> association;
+    const auto result = minigpu_view::RegistrarAssociationOwner::Reserve(
+        FlutterDesktopRegistrarGetTextureRegistrar(registrar), registrar, association);
+    if (result == MGPU_VIEW_OK && !association) return; // Exact published duplicate.
+    if (result != MGPU_VIEW_OK && result != MGPU_VIEW_NOT_READY) return;
+    // Failure of the optional private profile must not disable normal preview.
+    minigpu_view::MinigpuViewPlugin::RegisterWithRegistrar(
+        flutter::PluginRegistrarManager::GetInstance()
+            ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar), std::move(association));
+  } catch (...) { /* Never unwind through Flutter's C registration boundary. */ }
 }

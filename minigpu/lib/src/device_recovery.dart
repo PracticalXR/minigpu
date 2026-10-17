@@ -124,7 +124,18 @@ final class _GpuDeviceRecovery {
       // Register BEFORE returning our attachment. This receipt adds no owner.
       final contextRetired = gpu.observeContextRetirement(deviceEpoch: epoch);
       contextRetired.ignore();
-      await _detach(); // coordinator, worker, host and external readers
+      final detached = _detach(); // coordinator, worker, host and external readers
+      try {
+        await detached;
+      } catch (error, stack) {
+        // A child that would not destroy did not keep the released context
+        // alive: report it, but let the retirement it did not stop count.
+        if (!identical(gpu._teardownReachedRelease, detached) ||
+            !gpu._teardownReleased) {
+          rethrow;
+        }
+        scheduleMicrotask(() => Error.throwWithStackTrace(error, stack));
+      }
       await contextRetired;
       _oldRetired = true;
     }
@@ -133,7 +144,7 @@ final class _GpuDeviceRecovery {
       throw StateError('GPU recovery was cancelled after retirement');
     }
     _report(GpuRecoveryPhase.replacing);
-    gpu._retiring = null; // only the successful old receipt can reach here
+    gpu._retiring = null; // only a released old context can reach here
     final initialized = Completer<void>();
     gpu._initializing = initialized.future;
     gpu

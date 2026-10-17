@@ -27,8 +27,16 @@ final class GpuRenderBindingCacheSnapshot {
 }
 
 final class GpuRenderPipeline {
-  GpuRenderPipeline(this._platform, this.descriptor, [void Function()? owner])
-    : _retirement = GpuResourceRetirement(_platform.destroy, owner) {
+  /// A supplied [retirement] replaces the one built from [owner]; it must
+  /// destroy [_platform] and must not reference this pipeline, or the
+  /// finalizer can never run.
+  GpuRenderPipeline(
+    this._platform,
+    this.descriptor, [
+    void Function()? owner,
+    GpuResourceRetirement? retirement,
+  ]) : _retirement =
+           retirement ?? GpuResourceRetirement(_platform.destroy, owner) {
     _finalizer.attach(this, _retirement, detach: this);
   }
   final PlatformRenderPipeline _platform;
@@ -60,6 +68,22 @@ final class GpuRenderPipeline {
 
   Future<void> _prepare() async {
     final stopwatch = Stopwatch()..start();
+    const limit = Duration(seconds: 30);
+    // A backend that signals the settle is awaited: no wakeups while a slow
+    // compile runs, and no lag behind it. Destroying the pipeline settles it
+    // too. The status below still decides the outcome.
+    final settled = _platform.status == 0 ? _platform.settled : null;
+    if (settled != null) {
+      try {
+        await settled.timeout(limit);
+      } on TimeoutException {
+        // Reported below, by the same check a polled compile meets.
+      }
+    }
+    // Without the signal, poll: soon at first (cache hits finish within a
+    // millisecond or two), then back off to a 16 ms period for slow or stuck
+    // compiles.
+    var pollMs = 1;
     while (isValid) {
       switch (_platform.status) {
         case 1:
@@ -74,11 +98,12 @@ final class GpuRenderPipeline {
         default:
           throw StateError('Unknown render pipeline status');
       }
-      if (stopwatch.elapsed >= const Duration(seconds: 30)) {
+      if (stopwatch.elapsed >= limit) {
         destroy();
         throw TimeoutException('Render pipeline preparation timed out');
       }
-      await Future<void>.delayed(const Duration(milliseconds: 10));
+      await Future<void>.delayed(Duration(milliseconds: pollMs));
+      if (pollMs < 16) pollMs *= 2;
     }
     throw StateError('Render pipeline was destroyed during preparation');
   }

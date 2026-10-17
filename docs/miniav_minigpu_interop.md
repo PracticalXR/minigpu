@@ -370,7 +370,7 @@ fn nv12_to_rgb(uv: vec2f) -> vec3f {
 }
 ```
 
-Minigpu will ship `yuv_helpers.wgsl` as a bundled asset that user shaders can `#include` (or the Dart layer can prepend at `loadKernel` time).
+No helper file ships with minigpu: copy `nv12_to_rgb` above into your shader. (The planned bundled `yuv_helpers.wgsl` asset was dropped; it was never compiled or loaded.)
 
 ### 7.2 `mgpuVideoTextureToRGBA()` — internal compute pass
 
@@ -380,7 +380,7 @@ When the user calls this helper:
 3. The result is wrapped in an `MGPUBuffer` (backed by a `WGPUBuffer`, `CopySrc|CopyDst`) and returned.
 4. The intermediate storage texture is destroyed.
 
-Color matrix is BT.709 by default; a future `mgpuVideoTextureToRGBAWithMatrix()` variant will accept a custom 3×4 matrix.
+The conversion uses the texture's colour setting, read at each call: `mgpuVideoTextureSetYuvColor(tex, matrix, fullRange)` picks BT.709, BT.601 or BT.2020 and full or limited range (BT.709 full range by default). NV12 and I420 use both, GRAY8 only the range, and packed formats neither. From Dart, set `yuvMatrix` and `yuvFullRange` on the `ExternalVideoBuffer`. `mgpuVideoTextureToRGBAAsyncToPort()` runs the same conversion without blocking the caller and posts to a Dart port when the buffer is ready.
 
 ---
 
@@ -424,6 +424,6 @@ MiniAV's frame callback remains blocked (or the `MiniAVBuffer` is retained via `
 | 5 | `minigpu_ffi/src/include/minigpu.h` | `#include "minigpu_external.h"` |
 | 6 | `minigpu_ffi/src/CMakeLists.txt` | Add `minigpu_external.cpp` to sources; link D3D11/DXGI on Win, IOSurface on Apple, no extra libs on Linux/Android |
 | 7 | `minigpu_ffi/lib/minigpu_ffi.dart` | Dart FFI bindings for new symbols |
-| 8 | `minigpu_ffi/src/src/` (WGSL assets) | `yuv_helpers.wgsl`, `nv12_to_rgba.wgsl`, `yuv420p_to_rgba.wgsl` |
+| 8 | `minigpu_ffi/src/src/minigpu_external.cpp` | Conversion kernels as inline WGSL (no `.wgsl` asset files ship) |
 | 9 | `minigpu_ffi/src/test/` | `external_texture_test.cpp` — gtest with synthetic D3D11 texture import (Windows-only CI gate) |
 | 10 | `minigpu_av/test/` | Dart integration test: camera → `mgpuImportVideoFrame` → passthrough shader → `mgpuVideoTextureToRGBA` → compare first pixel |

@@ -322,6 +322,20 @@ struct Slot {
   int result = 0;
   std::array<Consumer, kConsumers> consumers{};
 };
+// One auto-reset event wakes the coordinator: notify_all() from jobs, callbacks
+// and calls, and ID3D11Fence::SetEventOnCompletion for GPU progress, so it
+// sleeps instead of polling every millisecond. A set event is never lost.
+struct WakeEvent {
+  HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  WakeEvent() = default;
+  WakeEvent(const WakeEvent &) = delete;
+  WakeEvent &operator=(const WakeEvent &) = delete;
+  ~WakeEvent() {
+    if (event)
+      CloseHandle(event);
+  }
+  void notify_all() noexcept { SetEvent(event); }
+};
 class PoolState : public std::enable_shared_from_this<PoolState> {
 public:
   PoolState(std::shared_ptr<mgpu::ContextPin> creation,
@@ -622,7 +636,8 @@ public:
         s->phase = Phase::Quarantine;
         s->uncertain = true;
         self->fault(MGPU_EXTERNAL_POOL_DEVICE_LOST);
-      }
+      } else
+        self->copyFence->SetEventOnCompletion(s->copyValue, self->wake.event);
       self->context4->Flush();
       self->wake.notify_all();
     });
@@ -751,12 +766,21 @@ public:
         continue;
       if (retiring || faulted)
         s.canceled = true;
-      if (s.phase == Phase::Waiting) {
-        if (s.canceled || nowMicros() >= s.frame.deadline_micros) {
-          rollback(s, s.canceled ? MGPU_EXTERNAL_POOL_CANCELED
-                                 : MGPU_EXTERNAL_POOL_TIMEOUT);
+      if (s.phase == Phase::Waiting &&
+          (s.canceled || nowMicros() >= s.frame.deadline_micros)) {
+        s.result = s.canceled ? MGPU_EXTERNAL_POOL_CANCELED
+                              : MGPU_EXTERNAL_POOL_TIMEOUT;
+        // A producer that already released key 1 gets key 0 back through
+        // ReturnSource, or its next AcquireSync(0) would hang; one still
+        // holding key 0 (WAIT_TIMEOUT) keeps it.
+        if (source(s.frame.texture_id)->mutex->AcquireSync(1, 0) != S_OK) {
+          rollback(s, s.result);
           continue;
         }
+        s.mutexHeld = true;
+        s.phase = Phase::ReturnSource;
+      }
+      if (s.phase == Phase::Waiting) {
         auto *f = fence(s.frame.producer_fence_id);
         auto value = f->object->GetCompletedValue();
         if (value == UINT64_MAX) {
@@ -844,10 +868,34 @@ public:
       }
     }
   }
+  // Fence completions and notify_all() set the wake event. Only a keyed-mutex
+  // handoff (no event exists for it), pending Dawn callbacks (they need
+  // ProcessEvents) and deadlines need the clock; the idle bound notices context
+  // retirement, which has no wake source.
+  DWORD waitMillis(bool callbacks) {
+    if (callbacks)
+      return 1;
+    uint64_t wait = 50000;
+    const uint64_t now = nowMicros();
+    for (auto &s : slots) {
+      if (s.phase == Phase::Waiting) {
+        auto *f = fence(s.frame.producer_fence_id);
+        if (!f || f->object->GetCompletedValue() >= s.frame.producer_fence_value)
+          return 1;
+      } else if (s.phase != Phase::Copying || s.uncertain)
+        continue;
+      const uint64_t left =
+          s.frame.deadline_micros > now ? s.frame.deadline_micros - now : 0;
+      if (left < wait)
+        wait = left;
+    }
+    return DWORD((wait + 999) / 1000);
+  }
   void start() {
     coordinator = std::thread([this] {
       for (;;) {
         bool callbacks = false;
+        DWORD wait = 1;
         {
           std::unique_lock<std::mutex> lock(mutex);
           if (stopping)
@@ -860,11 +908,12 @@ public:
           for (const auto &s : slots)
             for (const auto &c : s.consumers)
               callbacks |= c.callbackPending;
+          wait = waitMillis(callbacks);
         }
         if (callbacks)
           wgpuInstanceProcessEvents(pin->instance());
-        std::unique_lock<std::mutex> lock(mutex);
-        wake.wait_for(lock, std::chrono::milliseconds(1));
+        if (WaitForSingleObject(wake.event, wait) == WAIT_FAILED)
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     });
   }
@@ -873,7 +922,7 @@ public:
   const bool issued;
   uint64_t frameBytes;
   std::mutex mutex;
-  std::condition_variable wake;
+  WakeEvent wake;
   std::thread coordinator;
   bool stopping = false, charged = false, retiring = false, faulted = false;
   LUID luid{};
@@ -1249,11 +1298,12 @@ extern "C" int mgpuExternalPoolSignalHostConsumerFence(
         });
     std::lock_guard<std::mutex> lock(self->mutex);
     if (result == 0) --self->fence(id)->uses;
-    else { self->faulted = self->retiring = true; self->wake.notify_all(); }
+    // fault() queues the FAULT event that event-driven consumers wait for.
+    else { self->fault(MGPU_EXTERNAL_POOL_DEVICE_LOST); self->wake.notify_all(); }
     return result;
   } catch (...) {
     std::lock_guard<std::mutex> lock(self->mutex);
-    self->faulted = self->retiring = true;
+    self->fault(MGPU_CONTEXT_LEASE_INTERNAL);
     self->wake.notify_all();
     return MGPU_CONTEXT_LEASE_INTERNAL; // Unknown signal remains retained.
   }
@@ -1336,6 +1386,8 @@ extern "C" int mgpuExternalPoolSubmit(MGPUExternalPool *pool,
   self->highSequence = frame->media_sequence;
   self->highToken = frame->lease_token;
   self->reservedEvents += 3;
+  // The producer signal wakes the coordinator; it no longer polls the fence.
+  f->object->SetEventOnCompletion(frame->producer_fence_value, self->wake.event);
   self->wake.notify_all();
   return MGPU_EXTERNAL_POOL_PENDING;
 #else
@@ -1389,6 +1441,9 @@ extern "C" int mgpuExternalPoolAcquireOutput(MGPUExternalPool *pool,
   auto *s = self->slot(token);
   if (!s || s->canceled)
     return MGPU_CONTEXT_LEASE_INVALID;
+  // A lease never returns to Ready under its token, so a retry cannot succeed.
+  if (s->phase == Phase::Leased || s->phase == Phase::Ending)
+    return MGPU_EXTERNAL_POOL_CONFLICT;
   if (s->phase != Phase::Ready)
     return MGPU_EXTERNAL_POOL_PENDING;
   auto &c = s->consumers[0];
@@ -1470,6 +1525,7 @@ extern "C" int mgpuExternalPoolReleaseOutputConsumer(MGPUExternalPool *pool,
     c->fenceId = fenceId;
     c->fenceValue = value;
     ++f->uses;
+    f->object->SetEventOnCompletion(value, self->wake.event);
   }
   c->released = true;
   self->wake.notify_all();
@@ -1499,10 +1555,13 @@ extern "C" int mgpuExternalPoolBindOutput(MGPUExternalPool *pool,
       nativeShader->getCreationDevice() != self->pin->device())
     return MGPU_CONTEXT_LEASE_INVALID;
   auto view = s->view;
-  self->enqueueJob([self, nativeShader, binding, view] {
-    nativeShader->setTextureView(binding, view);
-  });
-  return 0;
+  // Reserve shader admission at this public call, before any later exclusive
+  // acquisition/destruction. The shader-owned FIFO task retains this pool.
+  return nativeShader->setTextureViewQueued(binding, view, self, [self] {
+    std::lock_guard<std::mutex> lock(self->mutex);
+    self->quarantineLocked();
+    self->wake.notify_all();
+  }) ? 0 : MGPU_CONTEXT_LEASE_WOULD_BLOCK;
 #else
   return MGPU_EXTERNAL_POOL_UNSUPPORTED;
 #endif
@@ -1566,13 +1625,20 @@ extern "C" int mgpuExternalPoolRelease(MGPUExternalPool *pool) {
     {
       auto self = pool->state;
       std::lock_guard<std::mutex> lock(self->mutex);
-      if (self->producerExport || self->count || self->reservedEvents)
+      // Quarantine is terminal: once the pin's device generation is gone, its
+      // slots' event reservations and fence uses can never drain, so they stop
+      // holding the pool (and the process-wide pool quota).
+      const bool deviceGone = !self->pin->gpu().matchesReadyDevice(
+          self->pin->device(), self->pin->deviceGeneration());
+      if (self->producerExport || self->count ||
+          (self->reservedEvents && !deviceGone))
         return MGPU_CONTEXT_LEASE_WOULD_BLOCK;
       for (auto &s : self->slots)
-        if (s.phase != Phase::Idle)
+        if (s.phase != Phase::Idle &&
+            !(deviceGone && s.phase == Phase::Quarantine))
           return MGPU_CONTEXT_LEASE_WOULD_BLOCK;
       for (auto &f : self->fences)
-        if (f.uses) return MGPU_CONTEXT_LEASE_WOULD_BLOCK;
+        if (f.uses && !deviceGone) return MGPU_CONTEXT_LEASE_WOULD_BLOCK;
       if (self->pin->gpu().getWebGPUThread().threadId() ==
           std::this_thread::get_id())
         return MGPU_CONTEXT_LEASE_WOULD_BLOCK;

@@ -3,9 +3,9 @@
 /// Implements the `minigpu_view` method channel on the browser by:
 ///   1. Registering an `<canvas>` element per controller via
 ///      `ui_web.platformViewRegistry`.
-///   2. On each `present` call, blitting the producer's `GPUTexture`
+///   2. On each `present` call, drawing the producer's GPU buffer
 ///      into the canvas's `GPUCanvasContext` on the **same** WebGPU
-///      device — one command, zero PCIe traffic.
+///      device — one render pass, zero PCIe traffic.
 ///
 /// Producers (e.g. `minigpu_web`) MUST set the JS global
 /// `window.gpuDevice` to the WebGPU device they're using before any
@@ -56,6 +56,20 @@ JSObject? _webGpuGetJsObject(int handle) {
   } catch (_) {
     return null;
   }
+}
+
+/// The wasm instance `minigpu_web` publishes (its bindings read only this
+/// name), or null on a page without one.
+@JS('MinigpuModule')
+external JSObject? get _minigpuModule;
+
+/// Submits the compute work minigpu still holds in its open batch, so a blit
+/// submitted next on the shared queue runs after the dispatches that wrote its
+/// source buffer. Nothing batched (or no minigpu) submits nothing.
+void _flushMinigpuBatch() {
+  final module = _minigpuModule;
+  if (module == null || !module.has('_mgpuFlushBatch')) return;
+  module.callMethod<JSAny?>('_mgpuFlushBatch'.toJS);
 }
 
 @JS('globalThis')
@@ -112,6 +126,10 @@ class MinigpuViewWebPlugin {
       case 'dispose':
         _sinks.remove(instanceId)?.dispose();
         return null;
+      case 'retire':
+        // One canvas per instance, and no presented source is referenced
+        // after its present: nothing to drop.
+        return null;
       default:
         throw MissingPluginException('minigpu_view_web: ${call.method}');
     }
@@ -129,14 +147,11 @@ class MinigpuViewWebPlugin {
     sink ??= _registerSink(instanceId, width, height);
 
     if (kind == 'webGpuTexture') {
-      // 'texture' key: a JSObject GPUTexture passed directly (same-device path).
       // 'bufferHandle' key: an Emscripten integer handle — we resolve the
-      //   JS GPUBuffer locally via WebGPU.getJsObject() to stay codec-safe.
-      final texture = args['texture'];
+      //   JS GPUBuffer locally via WebGPU.getJsObject() to stay codec-safe
+      //   (a JS object cannot cross the method channel's codec).
       final bufferHandle = args['bufferHandle'];
-      if (texture is JSAny && texture.isA<JSObject>()) {
-        sink.copyFromGpuTexture(texture as JSObject, width, height);
-      } else if (bufferHandle is int && bufferHandle != 0) {
+      if (bufferHandle is int && bufferHandle != 0) {
         final jsBuffer = _webGpuGetJsObject(bufferHandle);
         if (jsBuffer != null) {
           final format = args['format'] as String? ?? 'rgba32float';
@@ -244,7 +259,9 @@ class _CanvasSink {
   }
 
   void _ensureContext(JSObject device) {
-    if (_ctx != null && identical(_device, device)) return;
+    // JS identity: dart2wasm wraps each JS value read into Dart afresh, so
+    // identical() never holds and the canvas would be reconfigured per frame.
+    if (_ctx != null && _device.strictEquals(device).toDart) return;
     final ctx = canvas.getContext('webgpu');
     if (ctx == null) {
       throw PlatformException(
@@ -270,37 +287,6 @@ class _CanvasSink {
     _ctx = ctxJs;
     _device = device;
     _canvasFormat = format;
-  }
-
-  /// Blit a producer GPUTexture into the canvas via
-  /// `commandEncoder.copyTextureToTexture` on the same device.
-  void copyFromGpuTexture(JSObject src, int width, int height) {
-    if (_disposed) return;
-    final device = _resolveDevice();
-    if (device == null) {
-      throw PlatformException(
-        code: 'no_device',
-        message: 'window.gpuDevice not set; producer must publish it',
-      );
-    }
-    _ensureContext(device);
-
-    if (canvas.width != width) canvas.width = width;
-    if (canvas.height != height) canvas.height = height;
-
-    final dst = _ctx!.callMethod<JSObject>('getCurrentTexture'.toJS);
-    final encoder = device.callMethod<JSObject>('createCommandEncoder'.toJS);
-
-    encoder.callMethod<JSAny?>(
-      'copyTextureToTexture'.toJS,
-      {'texture': src}.jsify(),
-      {'texture': dst}.jsify(),
-      {'width': width, 'height': height, 'depthOrArrayLayers': 1}.jsify(),
-    );
-
-    final cmd = encoder.callMethod<JSObject>('finish'.toJS);
-    final queue = device['queue'] as JSObject;
-    queue.callMethod<JSAny?>('submit'.toJS, [cmd].jsify());
   }
 
   /// Read tightly packed producer pixels directly from a storage buffer.
@@ -379,6 +365,9 @@ class _CanvasSink {
     renderPass.callMethod<JSAny?>('setBindGroup'.toJS, 0.toJS, bindGroup);
     renderPass.callMethod<JSAny?>('draw'.toJS, 3.toJS);
     renderPass.callMethod<JSAny?>('end'.toJS);
+    // The producer's dispatches into src may still wait in minigpu's batch;
+    // submitted after this pass, they would leave the canvas a frame behind.
+    _flushMinigpuBatch();
     queue.callMethod<JSAny?>(
       'submit'.toJS,
       [encoder.callMethod<JSObject>('finish'.toJS)].jsify(),
@@ -419,7 +408,9 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     String canvasFormat,
     String format,
   ) {
-    if (!identical(_bufferDevice, device)) {
+    // strictEquals, not identical(): see _ensureContext. A miss here rebuilt
+    // the pipelines and the uniform buffer on every present.
+    if (!_bufferDevice.strictEquals(device).toDart) {
       _bufferParamBuf?.callMethod<JSAny?>('destroy'.toJS);
       _bufferParamBuf = null;
       _bufferPipelines.clear();

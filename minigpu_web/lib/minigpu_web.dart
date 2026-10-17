@@ -101,7 +101,7 @@ class MinigpuWeb extends MinigpuPlatform {
   @override
   void setLogCallback(
     void Function(int level, String message)? callback, {
-    int level = 1,
+    int level = 2,
   }) {
     // Only the LEVEL is honored on web: routing native log lines through a
     // Dart callback needs a wasm function-pointer table slot
@@ -616,14 +616,27 @@ class WebComputeShader implements PlatformComputeShader {
     await wasm.mgpuDispatch(_shader, groupsX, groupsY, groupsZ);
   }
 
+  @override
+  Future<void> buildPipeline() async {
+    // A module from before the export warms up the old way, one workgroup.
+    if (!wasm.hasComputePipelineBuild) return dispatch(1, 1, 1);
+    if (!wasm.mgpuComputeShaderBuildPipeline(_shader)) {
+      throw StateError(
+        'Compute pipeline was not built: no kernel or bindings, the shader is '
+        'closed, or the pipeline could not be created',
+      );
+    }
+  }
+
   /// One-shot marker: a fired dispatch that REJECTED. Static — one report
   /// per page is enough to name the failure.
   static bool _saidFireFailed = false;
 
   @override
   void dispatchFire(int groupsX, int groupsY, int groupsZ) {
-    // queue.submit is synchronous in JS WebGPU; the returned promise only
-    // covers call plumbing, so dropping it preserves submission order.
+    // The dispatch is recorded into minigpu's open batch synchronously, inside
+    // this call (a direct export call that never suspends); the returned
+    // future only carries a failure, so dropping it keeps program order.
     //
     // 🔴 "Dropping it" must still HANDLE rejection: an uncaught C++ exception
     // in the wasm surfaces as a bare number (the exception pointer) on this
@@ -786,9 +799,37 @@ class WebRenderPipeline implements PlatformRenderPipeline {
 
   final wasm.MGPURenderPipeline _pipeline;
   bool _destroyed = false;
+  Completer<void>? _settled;
+
+  /// Pipelines awaiting their settle, by handle; one module hook serves all.
+  static final Map<int, Completer<void>> _settleWaiters = {};
+
+  // The wasm passes the handle as a signed int: compare unsigned.
+  int get _handleKey => _pipeline.toDartInt & 0xFFFFFFFF;
+
+  static void _onSettled(int handle) {
+    final waiter = _settleWaiters.remove(handle & 0xFFFFFFFF);
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+  }
 
   @override
   int get status => _destroyed ? 3 : wasm.mgpuRenderPipelineStatus(_pipeline);
+
+  @override
+  Future<void>? get settled {
+    final known = _settled;
+    if (known != null) return known.future;
+    if (!wasm.hasRenderPipelineSettledSignal) return null;
+    final settled = _settled = Completer<void>();
+    if (status != 0) {
+      settled.complete();
+    } else {
+      // Set on every registration: cheap, and survives a replaced hook.
+      wasm.setRenderPipelineSettledHook(_onSettled);
+      _settleWaiters[_handleKey] = settled;
+    }
+    return settled.future;
+  }
 
   @override
   String get diagnostic => _destroyed
@@ -860,6 +901,14 @@ class WebRenderPipeline implements PlatformRenderPipeline {
     if (_destroyed) return;
     wasm.mgpuDestroyRenderPipeline(_pipeline);
     _destroyed = true;
+    // The close normally fires the hook; never leave a waiter behind, nor
+    // drop one a later pipeline at the same handle registered.
+    final settled = _settled;
+    if (settled == null) return;
+    if (identical(_settleWaiters[_handleKey], settled)) {
+      _settleWaiters.remove(_handleKey);
+    }
+    if (!settled.isCompleted) settled.complete();
   }
 }
 
@@ -869,39 +918,25 @@ class WebBuffer implements PlatformBuffer {
 
   WebBuffer(this._buffer);
 
+  // 0 once destroyed: the C object may already be freed and its handle reused.
   @override
-  int get webBufferHandle => wasm.mgpuGetWGPUBufferHandle(_buffer);
+  int get webBufferHandle =>
+      _destroyed ? 0 : wasm.mgpuGetWGPUBufferHandle(_buffer);
 
   @override
   Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) {
-    if (dstByteOffset < 0 || dstByteOffset % 4 != 0 || bytes.length % 4 != 0) {
-      throw ArgumentError('writeRawBytes needs a 4-byte-aligned length');
+    if (_destroyed) throw StateError('Buffer is destroyed');
+    if (bytes.length % 4 != 0 || dstByteOffset % 4 != 0) {
+      throw ArgumentError('writeRawBytes needs 4-byte-aligned length/offset');
     }
-    if (dstByteOffset != 0) {
-      wasm.mgpuWriteRawBytesAt(_buffer, bytes, dstByteOffset);
-      return Future.value();
+    if (dstByteOffset < 0) {
+      throw RangeError.value(dstByteOffset, 'dstByteOffset', 'Cannot be negative');
     }
-    // A VIEW over the caller's bytes, not a fresh list. This used to allocate a
-    // `Uint32List` the size of the payload and memcpy into it on EVERY call —
-    // on the streaming path that is a whole-frame allocation plus a whole-frame
-    // copy per frame (33 MB at 4K), which is both the copy itself and a
-    // per-frame garbage source large enough to show up as a frame-time spike.
-    // A 4-byte-aligned view aliases the same store and costs nothing.
-    //
-    // The fallback is for the case a view cannot describe: a list whose
-    // offsetInBytes is not 4-aligned (only possible for a caller-made view over
-    // an odd offset). Then, and only then, a copy is unavoidable.
-    final Uint32List words;
-    if (bytes.offsetInBytes % 4 == 0) {
-      words = bytes.buffer.asUint32List(
-        bytes.offsetInBytes,
-        bytes.lengthInBytes ~/ 4,
-      );
-    } else {
-      words = Uint32List(bytes.length ~/ 4);
-      words.buffer.asUint8List().setRange(0, bytes.length, bytes);
-    }
-    return write(words, words.length, dataType: BufferDataType.uint32);
+    // Every offset, 0 included, goes straight from the caller's bytes to
+    // GPUQueue.writeBuffer: no wasm-heap scratch the size of the payload, no
+    // C call, and any byte alignment of the caller's list.
+    wasm.mgpuWriteRawBytesAt(_buffer, bytes, dstByteOffset);
+    return Future.value();
   }
 
   @override
@@ -913,11 +948,15 @@ class WebBuffer implements PlatformBuffer {
     int byteOffset = 0,
     BufferDataType dataType = BufferDataType.float32,
   }) async {
+    // The C object is freed, or queued to be, once destroy() ran.
+    if (_destroyed) throw StateError('Buffer is destroyed');
+    // Every reader takes any TypedData and fills it from its start, as the
+    // native backend does: a ByteData or another list type gets the bytes.
     switch (dataType) {
       case BufferDataType.int8:
         await wasm.mgpuReadAsyncInt8(
           _buffer,
-          outputData as Int8List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -925,7 +964,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.int16:
         await wasm.mgpuReadAsyncInt16(
           _buffer,
-          outputData as Int16List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -933,7 +972,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.int32:
         await wasm.mgpuReadAsyncInt32(
           _buffer,
-          outputData as Int32List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -941,9 +980,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.int64:
         await wasm.mgpuReadAsyncInt64(
           _buffer,
-          outputData is ByteData
-              ? outputData
-              : (outputData.buffer.asByteData()),
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -951,7 +988,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.uint8:
         await wasm.mgpuReadAsyncUint8(
           _buffer,
-          outputData as Uint8List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -959,7 +996,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.uint16:
         await wasm.mgpuReadAsyncUint16(
           _buffer,
-          outputData as Uint16List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -967,7 +1004,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.uint32:
         await wasm.mgpuReadAsyncUint32(
           _buffer,
-          outputData as Uint32List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -975,7 +1012,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.uint64:
         await wasm.mgpuReadAsyncUint64(
           _buffer,
-          outputData as Uint64List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -985,7 +1022,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.float32:
         await wasm.mgpuReadAsyncFloat(
           _buffer,
-          outputData as Float32List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -994,7 +1031,7 @@ class WebBuffer implements PlatformBuffer {
       case BufferDataType.float64:
         await wasm.mgpuReadAsyncDouble(
           _buffer,
-          outputData as Float64List,
+          outputData,
           readElements: readElements,
           elementOffset: elementOffset,
         );
@@ -1008,72 +1045,42 @@ class WebBuffer implements PlatformBuffer {
     int size, {
     BufferDataType dataType = BufferDataType.float32,
   }) async {
-    if (inputData.elementSizeInBytes != dataType.bytesPerElement) {
-      return;
-    }
-
+    if (_destroyed) throw StateError('Buffer is destroyed');
+    // Any TypedData uploads its bytes as [dataType] elements, as natively: a
+    // ByteData is raw bytes for every type, and a list of another element type
+    // is reinterpreted rather than dropped.
     switch (dataType) {
       case BufferDataType.int8:
-        if (inputData is! Int8List) {
-          break;
-        }
         wasm.mgpuWriteInt8(_buffer, inputData, size);
         break;
       case BufferDataType.int16:
-        if (inputData is! Int16List) {
-          break;
-        }
-        wasm.mgpuWriteInt16(_buffer, inputData as Int16List, size);
+        wasm.mgpuWriteInt16(_buffer, inputData, size);
         break;
       case BufferDataType.int32:
-        if (inputData is! Int32List) {
-          break;
-        }
-        wasm.mgpuWriteInt32(_buffer, inputData as Int32List, size);
+        wasm.mgpuWriteInt32(_buffer, inputData, size);
         break;
       case BufferDataType.int64:
-        if (inputData is! Int64List && inputData is! ByteData) {
-          break;
-        }
-        wasm.mgpuWriteInt64(_buffer, inputData as Int64List, size);
+        wasm.mgpuWriteInt64(_buffer, inputData, size);
         break;
       case BufferDataType.uint8:
-        if (inputData is! Uint8List) {
-          break;
-        }
-        wasm.mgpuWriteUint8(_buffer, inputData as Uint8List, size);
+        wasm.mgpuWriteUint8(_buffer, inputData, size);
         break;
       case BufferDataType.uint16:
-        if (inputData is! Uint16List) {
-          break;
-        }
-        wasm.mgpuWriteUint16(_buffer, inputData as Uint16List, size);
+        wasm.mgpuWriteUint16(_buffer, inputData, size);
         break;
       case BufferDataType.uint32:
-        if (inputData is! Uint32List) {
-          break;
-        }
-        wasm.mgpuWriteUint32(_buffer, inputData as Uint32List, size);
+        wasm.mgpuWriteUint32(_buffer, inputData, size);
         break;
       case BufferDataType.uint64:
-        if (inputData is! Uint64List && inputData is! ByteData) {
-          break;
-        }
-        wasm.mgpuWriteUint64(_buffer, inputData as Uint64List, size);
+        wasm.mgpuWriteUint64(_buffer, inputData, size);
         break;
       case BufferDataType.float16:
         throw UnimplementedError('float16 is not supported in WebAssembly.');
       case BufferDataType.float32:
-        if (inputData is! Float32List) {
-          break;
-        }
-        await wasm.mgpuWriteFloat(_buffer, inputData as Float32List, size);
+        await wasm.mgpuWriteFloat(_buffer, inputData, size);
         break;
       case BufferDataType.float64:
-        if (inputData is! Float64List) {
-          break;
-        }
-        wasm.mgpuWriteDouble(_buffer, inputData as Float64List, size);
+        wasm.mgpuWriteDouble(_buffer, inputData, size);
         break;
     }
   }
@@ -1170,6 +1177,9 @@ class WebVideoTexture implements PlatformVideoTexture {
     'Read back via WebCodecs VideoFrame.copyTo() instead.',
   );
 
+  @override
+  Future<PlatformBuffer> toRGBAAsync() async => toRGBA();
+
   /// D3D11 shared-output path is Windows-only; always returns false on Web.
   @override
   bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
@@ -1202,8 +1212,9 @@ class WebPlatformSharedOutputTexture implements PlatformSharedOutputTexture {
   final int _height;
 
   /// The last buffer that was passed to [copyFromBufferF32].
-  /// Its WGPUBuffer handle is exposed as [webGpuTextureJs].
-  wasm.MGPUBuffer? _lastBuffer;
+  /// Its WGPUBuffer handle is exposed as [webGpuTextureJs]. Kept as the
+  /// [WebBuffer], not its C pointer, so a destroyed one answers no handle.
+  WebBuffer? _lastBuffer;
 
   @override
   int get width => _width;
@@ -1228,9 +1239,19 @@ class WebPlatformSharedOutputTexture implements PlatformSharedOutputTexture {
     if (src is! WebBuffer) return false;
     // Store the buffer reference so that webGpuTextureJs can return the
     // correct JS object when asPreviewSource() is called immediately after.
-    _lastBuffer = src._buffer;
+    _lastBuffer = src;
+    // The consumer blits from the JS GPUBuffer with its own queue.submit, which
+    // would run ahead of the dispatches that filled it while they wait in
+    // minigpu's open batch. An empty batch submits nothing.
+    wasm.mgpuFlushBatch();
     return true;
   }
+
+  /// [copyFromBufferF32] records and flushes the copy at once; there is no GPU
+  /// wait to move off the caller.
+  @override
+  Future<bool> copyFromBufferF32Async(PlatformBuffer src) async =>
+      copyFromBufferF32(src);
 
   /// Returns the Emscripten integer handle for the WGPUBuffer last written
   /// via [copyFromBufferF32].  The view plugin resolves the JS GPUBuffer via
@@ -1240,7 +1261,7 @@ class WebPlatformSharedOutputTexture implements PlatformSharedOutputTexture {
   Object? get webGpuTextureJs {
     final buf = _lastBuffer;
     if (buf == null) return null;
-    final handle = wasm.mgpuGetWGPUBufferHandle(buf);
+    final handle = buf.webBufferHandle;
     return handle == 0 ? null : handle; // int, not JSObject — codec-safe
   }
 

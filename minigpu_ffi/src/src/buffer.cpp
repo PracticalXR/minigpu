@@ -1,5 +1,8 @@
 #include "../include/buffer.h"
+#include "../include/minigpu_capture_cleanup_owner.h"
 #include "../include/compute_shader.h"
+#include "../include/minigpu_context_owner.h"
+#include "../include/minigpu_private_resource_owner.h"
 #include "../include/log.h"
 #include "../include/mutex.h"
 #include "../include/platform_sleep.h"
@@ -12,7 +15,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 #ifndef __EMSCRIPTEN__
@@ -151,29 +157,57 @@ static void set_selected_adapter_name(const std::string& name) {
   g_selectedAdapterName = name;
 }
 
-WebGPUThread::WebGPUThread() {
+WebGPUThread::WebGPUThread() : profileQueue_(waitProfEnabled()) {
 #ifndef __EMSCRIPTEN__
   // Only create actual thread on native platforms
   worker = std::thread([this]() {
+    auto idleSince = std::chrono::steady_clock::now();
     while (true) {
-      std::function<void()> task;
+      task_queue::Execution task;
       {
         mgpu::unique_lock<mgpu::mutex> lock(queueMutex);
-        condition.wait(lock, [this] { return !tasks.empty() || stop; });
+        // A parked wait needs its instance pumped, so the worker sleeps on
+        // the queue only while nothing is parked.
+        if (!parkedHead_)
+          condition.wait(lock, [this] { return !tasks.empty() || stop; });
 
-        if (stop && tasks.empty())
+        if (stop && tasks.empty() && !parkedHead_) {
+          exited_ = true;
           break;
+        }
 
-        task = std::move(tasks.front());
-        tasks.pop();
+        tasks.takeFront(task);
       }
-      task();
+      if (!task.empty()) {
+        if (task.stamp().profiled)
+          waitProfNote(WP_Q_LAT, waitProfNowUs() - task.stamp().enqueuedUs, 0);
+        // A throwing task must not take the worker (and every later task,
+        // and the process via std::terminate) down with it.
+        try {
+          task.run();
+        } catch (...) {
+          LOG_ERROR("WebGPU thread: a queued task threw; continuing");
+        }
+        pending_.fetch_sub(1, std::memory_order_acq_rel);
+      }
+      if (!parkedHead_) continue;
+      if (pumpParked() || !task.empty()) {
+        idleSince = std::chrono::steady_clock::now();
+        continue;
+      }
+      // Nothing ran and nothing resumed: the same backoff an inline GPU wait
+      // uses. A task queued meanwhile waits at most one 0.25 ms step.
+      platformWaitBackoff(std::chrono::duration_cast<std::chrono::microseconds>(
+                              std::chrono::steady_clock::now() - idleSince)
+                              .count());
     }
   });
 #endif
 }
 
-WebGPUThread::~WebGPUThread() {
+WebGPUThread::~WebGPUThread() { shutdown(); }
+
+void WebGPUThread::shutdown() {
 #ifndef __EMSCRIPTEN__
   {
     mgpu::lock_guard<mgpu::mutex> lock(queueMutex);
@@ -193,23 +227,99 @@ void WebGPUThread::enqueueAsync(std::function<void()> task) {
     task();
   }
 #else
-  // Native platforms: use actual thread
-  if (waitProfEnabled()) {
-    // Queue latency (enqueue -> the task actually starting on the worker) is
-    // the one component a caller can never see and the first thing a
-    // wandering spike gets blamed on, so measure it rather than argue.
-    const long long t0 = waitProfNowUs();
-    std::function<void()> inner = std::move(task);
-    task = [inner, t0]() {
-      waitProfNote(WP_Q_LAT, waitProfNowUs() - t0, 0);
-      if (inner) inner();
-    };
-  }
+  const task_queue::Stamp stamp{profileQueue_, profileQueue_ ? waitProfNowUs() : 0};
   {
     mgpu::lock_guard<mgpu::mutex> lock(queueMutex);
-    tasks.push(std::move(task));
+    if (exited_) throw std::runtime_error("WebGPU thread has shut down");
+    // Allocate only an empty legacy deque record; payload transfer is noexcept.
+    tasks.pushLegacy(task, stamp);
+    // Under the lock, so the worker cannot run (and count down) this task
+    // before it is counted.
+    pending_.fetch_add(1, std::memory_order_relaxed);
   }
   condition.notify_one();
+#endif
+}
+
+int WebGPUThread::enqueuePrepared(task_queue::Prepared &task) noexcept {
+#ifdef __EMSCRIPTEN__
+  task_queue::Execution execution;
+  if (!execution.takeInline(task)) return MGPU_CONTEXT_LEASE_INVALID;
+  execution.run(); // Scoped entry invokes a noexcept job trampoline.
+  return MGPU_CONTEXT_LEASE_OK;
+#else
+  try {
+    const task_queue::Stamp stamp{profileQueue_, profileQueue_ ? waitProfNowUs() : 0};
+    {
+      mgpu::lock_guard<mgpu::mutex> lock(queueMutex);
+      if (stop) return MGPU_CONTEXT_LEASE_RETIRED;
+      if (!tasks.pushScoped(task, stamp)) return MGPU_CONTEXT_LEASE_INVALID;
+      pending_.fetch_add(1, std::memory_order_relaxed);
+    }
+    condition.notify_one();
+    return MGPU_CONTEXT_LEASE_OK;
+  } catch (...) { return MGPU_CONTEXT_LEASE_INTERNAL; } // Lock failed before linking.
+#endif
+}
+
+bool WebGPUThread::park(task_queue::ParkedWait &wait, WGPUInstance instance) noexcept {
+#ifdef __EMSCRIPTEN__
+  (void)wait;
+  (void)instance;
+  return false;
+#else
+  if (!onWorker() || !instance || wait.linked || !wait.ready || !wait.resume)
+    return false;
+  wgpuInstanceAddRef(instance);
+  wait.instance = instance;
+  wait.next = nullptr;
+  wait.linked = true;
+  (parkedTail_ ? parkedTail_->next : parkedHead_) = &wait;
+  parkedTail_ = &wait;
+  // Runs inside the parking task, so the count never touches zero between.
+  pending_.fetch_add(1, std::memory_order_relaxed);
+  return true;
+#endif
+}
+
+bool WebGPUThread::pumpParked() noexcept {
+#ifdef __EMSCRIPTEN__
+  return false;
+#else
+  void *pumped = nullptr;
+  for (auto *wait = parkedHead_; wait; wait = wait->next) {
+    if (wait->instance == pumped) continue;
+    pumped = wait->instance;
+    wgpuInstanceProcessEvents(static_cast<WGPUInstance>(pumped));
+  }
+  // Split before resuming anything: a resume can destroy its node.
+  task_queue::ParkedWait *ready = nullptr, **readyTail = &ready;
+  task_queue::ParkedWait *kept = nullptr, **keptTail = &kept;
+  for (auto *wait = std::exchange(parkedHead_, nullptr); wait;) {
+    auto *next = std::exchange(wait->next, nullptr);
+    if (wait->ready->load(std::memory_order_acquire)) {
+      *readyTail = wait;
+      readyTail = &wait->next;
+    } else {
+      *keptTail = wait;
+      keptTail = &wait->next;
+      parkedTail_ = wait;
+    }
+    wait = next;
+  }
+  parkedHead_ = kept;
+  if (!kept) parkedTail_ = nullptr;
+  for (auto *wait = ready; wait;) {
+    auto *next = wait->next;
+    auto instance = static_cast<WGPUInstance>(wait->instance);
+    wait->next = nullptr;
+    wait->linked = false;
+    wait->resume(*wait);
+    wgpuInstanceRelease(instance);
+    pending_.fetch_sub(1, std::memory_order_acq_rel);
+    wait = next;
+  }
+  return ready != nullptr;
 #endif
 }
 
@@ -225,7 +335,10 @@ void MGPU::flushBatchLocked() {
     wgpuCommandEncoderRelease(batchEncoder);
     batchEncoder = nullptr;
     if (commands) {
-      wgpuQueueSubmit(getQueue(), 1, &commands);
+      // Not getQueue(): a flush must never lazily create a context, or throw
+      // from under its caller's cleanup. The batch was recorded on ctx's device.
+      if (WGPUQueue queue = ctx ? ctx->queue : nullptr)
+        wgpuQueueSubmit(queue, 1, &commands);
       wgpuCommandBufferRelease(commands);
     }
   }
@@ -234,6 +347,59 @@ void MGPU::flushBatchLocked() {
   // its bytes are free to be overwritten: queue operations execute in
   // submission order, and the next staging write is issued after this submit.
   stagingCursor = 0;
+  // Nothing recorded is unsubmitted now, so a destroy held back for an open
+  // scope can no longer invalidate a submit.
+  destroyDeferredLocked();
+}
+
+// ── Scope pins ─────────────────────────────────────────────────────────────
+// A buffer staged into an open upload/readback scope is recorded only at End.
+// Destroying it before then would make End's copy (and with it the WHOLE
+// shared batch) fail at submit, so Buffer::release defers the destroy while a
+// scope still holds the handle and the next flush after the unpin runs it.
+
+void MGPU::pinForScope(WGPUBuffer buffer) {
+  mgpu::lock_guard<mgpu::mutex> lock(scopePinMutex_);
+  ++scopePins_[buffer];
+}
+
+void MGPU::unpinForScope(WGPUBuffer buffer) {
+  mgpu::lock_guard<mgpu::mutex> lock(scopePinMutex_);
+  auto it = scopePins_.find(buffer);
+  if (it != scopePins_.end() && --it->second <= 0) scopePins_.erase(it);
+}
+
+bool MGPU::deferDestroyIfPinnedLocked(WGPUBuffer buffer) {
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(scopePinMutex_);
+    if (scopePins_.find(buffer) == scopePins_.end()) return false;
+  }
+  try {
+    deferredDestroys_.push_back(buffer);
+  } catch (...) {
+    return false; // out of memory: destroy now, as before pins existed
+  }
+  return true;
+}
+
+void MGPU::destroyDeferredLocked() {
+  if (deferredDestroys_.empty()) return;
+  // Still-pinned handles move to the front; the rest are destroyed outside
+  // the pin lock.
+  size_t kept = 0;
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(scopePinMutex_);
+    for (size_t i = 0; i < deferredDestroys_.size(); ++i) {
+      if (scopePins_.find(deferredDestroys_[i]) != scopePins_.end()) {
+        std::swap(deferredDestroys_[kept++], deferredDestroys_[i]);
+      }
+    }
+  }
+  for (size_t i = kept; i < deferredDestroys_.size(); ++i) {
+    wgpuBufferDestroy(deferredDestroys_[i]);
+    wgpuBufferRelease(deferredDestroys_[i]);
+  }
+  deferredDestroys_.resize(kept);
 }
 
 // ── Batched staging uploads ────────────────────────────────────────────────
@@ -276,7 +442,10 @@ MGPU::UploadScope *MGPU::acquireScope() {
 void MGPU::recycleScope(UploadScope *scope) {
   if (!scope) return;
   for (const StagedCopy &c : scope->copies) {
-    if (c.dst) wgpuBufferRelease(c.dst);
+    if (c.dst) {
+      unpinForScope(c.dst);
+      wgpuBufferRelease(c.dst);
+    }
   }
   scope->host.clear();
   scope->copies.clear();
@@ -306,7 +475,9 @@ int MGPU::stageWrite(WGPUBuffer dst, size_t dstByteOffset,
   // requires 4-byte aligned offsets and size.  Anything else must take the
   // inline path so behaviour is bit-identical to before.
   if ((byteSize & 3u) || (dstByteOffset & 3u)) return 0;
-  if (dstByteOffset + byteSize > dstBufferSize) return -1;
+  // Subtraction form: a host-supplied offset near SIZE_MAX must not wrap.
+  if (dstByteOffset > dstBufferSize || byteSize > dstBufferSize - dstByteOffset)
+    return -1;
   if (uploadDepth <= 0 || !uploadOpen) return 0;
 
   UploadScope &s = *uploadOpen;
@@ -336,7 +507,9 @@ int MGPU::stageWrite(WGPUBuffer dst, size_t dstByteOffset,
   c.srcOffset = srcOffset;
   c.size = byteSize;
   // The emission is asynchronous: hold a reference so a destination destroyed
-  // between End and the WebGPU thread picking the scope up stays alive.
+  // between End and the WebGPU thread picking the scope up stays alive, and a
+  // pin so its wgpuBufferDestroy waits until End has recorded the copy.
+  pinForScope(dst);
   wgpuBufferAddRef(dst);
   s.copies.push_back(c);
   return 1;
@@ -352,27 +525,34 @@ int MGPU::endUploads() {
     recycleScope(raw);
     return 0;
   }
-  // Emitted INLINE on the caller's thread — deliberately, so the ordering
-  // contract is bit-for-bit the one the inline write path already has:
-  // commands already RECORDED into the batch execute before these copies,
-  // and a dispatch that has not been enqueued yet cannot overtake them.
-  // (Emitting on the WebGPU thread instead would put the upload behind the
-  // dispatch FIFO, which the inline read/write entry points do not join —
-  // that would be a new race for every caller that mixes the two.)
+  // Queue order = call order, as for Buffer writes: while the worker has
+  // dispatches or render passes queued, the emission runs behind them (the
+  // arena already owns the bytes); otherwise inline on the caller's thread.
   // What is saved is the per-range mutex round trip and the per-range
   // wgpuQueueSubmit, not the ordering.
-  const bool prof = uploadProfEnabled();
-  const long long tLock0 = prof ? mgpu_now_us() : 0;
-  {
-    mgpu::lock_guard<mgpu::mutex> lock(gpuOperationMutex);
-    if (prof) uploadStats.usLock += mgpu_now_us() - tLock0;
-    applyUploadScopeLocked(*raw);
+  auto emit = [this, raw, n]() {
+    const bool prof = uploadProfEnabled();
+    const long long tLock0 = prof ? mgpu_now_us() : 0;
+    {
+      mgpu::lock_guard<mgpu::mutex> lock(gpuOperationMutex);
+      if (prof) uploadStats.usLock += mgpu_now_us() - tLock0;
+      applyUploadScopeLocked(*raw);
+    }
+    if (prof) {
+      uploadStats.scopes++;
+      uploadStats.copies += n;
+    }
+    recycleScope(raw);
+  };
+  if (inlineWouldOvertake()) {
+    try {
+      webgpuThread.enqueueAsync(emit);
+      return n;
+    } catch (...) {
+      // Never queued (the worker has exited): emit inline instead.
+    }
   }
-  if (prof) {
-    uploadStats.scopes++;
-    uploadStats.copies += n;
-  }
-  recycleScope(raw);
+  emit();
   return n;
 }
 
@@ -527,7 +707,9 @@ int MGPU::stageRead(WGPUBuffer src, size_t srcByteOffset, size_t srcBufferSize,
   // A staged range becomes a copyBufferToBuffer: 4-byte aligned offset AND
   // size.  Anything else takes the inline path so the answer is unchanged.
   if ((byteSize & 3u) || (srcByteOffset & 3u)) return 0;
-  if (srcByteOffset + byteSize > srcBufferSize) return -1;
+  // Subtraction form: a host-supplied offset near SIZE_MAX must not wrap.
+  if (srcByteOffset > srcBufferSize || byteSize > srcBufferSize - srcByteOffset)
+    return -1;
   if (readbackDepth <= 0 || !readbackOpen) return 0;
 
   ReadbackScope &s = *readbackOpen;
@@ -566,6 +748,7 @@ int MGPU::stageRead(WGPUBuffer src, size_t srcByteOffset, size_t srcBufferSize,
   c.size = byteSize;
   // The source must survive until End even if the caller destroys the buffer
   // in between (same contract the upload twin has for destinations).
+  pinForScope(src);
   wgpuBufferAddRef(src);
   s.copies.push_back(c);
   if (prof) {
@@ -584,67 +767,104 @@ int MGPU::endReadbacks() {
   const int n = (int)scope->reads.size();
   if (n == 0) return 0;
 
-  const bool prof = readbackProfEnabled();
-  const long long tLock0 = prof ? mgpu_now_us() : 0;
-  {
-    // INLINE on the caller's thread, under the same mutex Buffer::read takes —
-    // so the ordering versus dispatches and inline reads/writes is exactly the
-    // one the per-buffer path already had.
-    mgpu::unique_lock<mgpu::mutex> lock(gpuOperationMutex);
-    if (prof) readbackStats.usLock += mgpu_now_us() - tLock0;
-    applyReadbackScopeLocked(*scope);
+  // Queue order = call order, as for Buffer reads: behind the worker's queued
+  // dispatches while it has any, inline otherwise.
+  int filled = -1;
+  bool ran = false;
+  if (inlineWouldOvertake()) {
+    try {
+      filled = webgpuThread.enqueueSync<int>([&]() {
+        ran = true;
+        return applyReadbackScope(*scope);
+      });
+    } catch (...) {
+      // Never queued (the worker has exited): resolve inline below. A resolve
+      // that ran and threw has failed.
+    }
   }
+  if (!ran) filled = applyReadbackScope(*scope);
   for (const ReadCopy &c : scope->copies) {
-    if (c.src) wgpuBufferRelease(c.src);
+    if (c.src) {
+      unpinForScope(c.src);
+      wgpuBufferRelease(c.src);
+    }
   }
-  if (prof) {
+  if (readbackProfEnabled()) {
     readbackStats.scopes++;
     readbackStats.copies += (long long)scope->copies.size();
   }
-  return n;
+  return filled;
+}
+
+namespace {
+
+// One buffer map in flight. Atomics, because an AllowSpontaneous callback may
+// fire on any Dawn thread.
+struct MapWait {
+  std::atomic<bool> done{false};
+  std::atomic<int> status{(int)WGPUMapAsyncStatus_Success};
+  static void callback(WGPUMapAsyncStatus s, WGPUStringView, void *userdata1,
+                       void *) {
+    MapWait *w = static_cast<MapWait *>(userdata1);
+    w->status.store((int)s, std::memory_order_relaxed);
+    w->done.store(true, std::memory_order_release); // last touch of *w
+  }
+  WGPUBufferMapCallbackInfo info() {
+    WGPUBufferMapCallbackInfo cb = {};
+    cb.mode = WGPUCallbackMode_AllowSpontaneous;
+    cb.callback = &MapWait::callback;
+    cb.userdata1 = this;
+    return cb;
+  }
+  bool ok() const {
+    return status.load(std::memory_order_relaxed) ==
+           (int)WGPUMapAsyncStatus_Success;
+  }
+};
+
+// Blocks until [w] completes. Native polls with zero-timeout WaitAny calls,
+// which check the queue fence themselves: a timed WaitAny holds Dawn's device
+// lock for the whole wait, and ProcessEvents would run other callers'
+// callbacks here. Between polls it backs off, so a long drain stops burning a
+// core.
+void waitForMap(WGPUInstance instance, WGPUFuture future, MapWait &w,
+                WaitScope &wp) {
+  WGPUFutureWaitInfo waitInfo = {};
+  waitInfo.future = future;
+#ifdef __EMSCRIPTEN__
+  // Asyncify awaits the GPU map promise directly. Polling through
+  // emscripten_sleep(0) adds a browser timer wake after the GPU is ready.
+  if (instance) wgpuInstanceWaitAny(instance, 1, &waitInfo, UINT64_MAX);
+  while (!w.done.load(std::memory_order_acquire)) {
+    emscripten_sleep(0);
+    ++wp.iters;
+  }
+#else
+  const auto start = std::chrono::steady_clock::now();
+  while (!w.done.load(std::memory_order_acquire)) {
+    if (instance) wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
+    if (w.done.load(std::memory_order_acquire)) break;
+    ++wp.iters;
+    platformWaitBackoff(std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - start)
+                            .count());
+  }
+#endif
+}
+
+} // namespace
+
+void waitBackoffStep(long long waitedMicros) noexcept {
+  platformWaitBackoff(waitedMicros);
 }
 
 bool MGPU::waitMapReadLocked(WGPUBuffer buf, size_t size) {
-  struct ReadState {
-    bool completed = false;
-    WGPUMapAsyncStatus status = WGPUMapAsyncStatus_Success;
-    mgpu::mutex mutex;
-  };
-  ReadState state;
-  WGPUBufferMapCallbackInfo cb = {};
-  cb.mode = WGPUCallbackMode_AllowSpontaneous;
-  cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *u1,
-                   void *) {
-    ReadState *st = static_cast<ReadState *>(u1);
-    mgpu::lock_guard<mgpu::mutex> lk(st->mutex);
-    st->status = status;
-    st->completed = true;
-  };
-  cb.userdata1 = &state;
-
+  MapWait state;
   WaitScope wpMap(WP_RB_MAP);
-  WGPUFuture future = wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, cb);
-  WGPUInstance instance = tryGetInstance();
-  WGPUFutureWaitInfo waitInfo = {};
-  waitInfo.future = future;
-  if (instance) {
-#ifdef __EMSCRIPTEN__
-    // Asyncify awaits the GPU map promise directly. Polling through
-    // emscripten_sleep(0) adds a browser timer wake after the GPU is ready.
-    wgpuInstanceWaitAny(instance, 1, &waitInfo, UINT64_MAX);
-#else
-    wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
-#endif
-  }
-  if (!waitInfo.completed) {
-    // Same hot-poll as Buffer::readDirect: Sleep(1) actually sleeps ~15 ms
-    // under the default Windows timer resolution, which would dominate.
-    while (!state.completed) {
-      platformSleep(0, instance);
-      ++wpMap.iters;
-    }
-  }
-  return state.status == WGPUMapAsyncStatus_Success;
+  WGPUFuture future =
+      wgpuBufferMapAsync(buf, WGPUMapMode_Read, 0, size, state.info());
+  waitForMap(tryGetInstance(), future, state, wpMap);
+  return state.ok();
 }
 
 bool MGPU::readOneLocked(WGPUBuffer src, uint64_t srcOffset, void *dst,
@@ -683,102 +903,6 @@ bool MGPU::readOneLocked(WGPUBuffer src, uint64_t srcOffset, void *dst,
   wgpuBufferDestroy(tmp);
   wgpuBufferRelease(tmp);
   return ok;
-}
-
-void MGPU::applyReadbackScopeLocked(ReadbackScope &scope) {
-  if (scope.reads.empty()) return;
-  if (!ctx || !ctx->initialized) return;
-  WGPUDevice device = ctx->device;
-  WGPUQueue queue = ctx->queue;
-  if (!device || !queue) return;
-
-  const bool prof = readbackProfEnabled();
-  const size_t total = (size_t)scope.total;
-
-  if (readbackCapacity < total) {
-    // Growing orphans nothing (the buffer is only ever read within one scope),
-    // but the old allocation must be gone before the new one is recorded into.
-    if (readbackBuffer) {
-      wgpuBufferRelease(readbackBuffer);
-      readbackBuffer = nullptr;
-      readbackCapacity = 0;
-    }
-    size_t cap = kMinReadbackBytes;
-    while (cap < total && cap < ((size_t)1 << 31)) cap <<= 1;
-    if (cap < total) cap = total;
-    WGPUBufferDescriptor desc = {};
-    desc.size = (uint64_t)cap;
-    desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
-    desc.mappedAtCreation = false;
-    readbackBuffer = wgpuDeviceCreateBuffer(device, &desc);
-    if (!readbackBuffer) {
-      LOG_ERROR("batched readback: failed to allocate %zu byte buffer", cap);
-      readbackCapacity = 0;
-      if (prof) readbackStats.fallbacks++;
-      // Correct but unbatched: exactly what the per-buffer path would have done.
-      for (const ReadCopy &c : scope.copies) {
-        // Resolve straight into the destinations that map onto this copy.
-        for (const StagedRead &r : scope.reads) {
-          if (r.slotOffset < c.slotOffset ||
-              r.slotOffset + r.size > c.slotOffset + c.size)
-            continue;
-          readOneLocked(c.src, c.srcOffset + (r.slotOffset - c.slotOffset),
-                        r.dst, r.size);
-        }
-      }
-      return;
-    }
-    readbackCapacity = cap;
-    if (prof) readbackStats.grows++;
-  }
-
-  // ── ONE submit ───────────────────────────────────────────────────────────
-  // The copies go into the encoder the compute batch is ALREADY building, so
-  // the single flush below carries the pending dispatches AND every copy: the
-  // per-read `flushBatchLocked() + own encoder + own submit` disappears.
-  const long long tC = prof ? mgpu_now_us() : 0;
-  if (!batchEncoder) {
-    batchEncoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
-    if (!batchEncoder) {
-      LOG_ERROR("batched readback: could not create command encoder");
-      return;
-    }
-  }
-  if (batchPass) {
-    wgpuComputePassEncoderEnd(batchPass);
-    wgpuComputePassEncoderRelease(batchPass);
-    batchPass = nullptr;
-  }
-  for (const ReadCopy &c : scope.copies) {
-    wgpuCommandEncoderCopyBufferToBuffer(batchEncoder, c.src, c.srcOffset,
-                                         readbackBuffer, c.slotOffset, c.size);
-  }
-  if (prof) readbackStats.usCopy += mgpu_now_us() - tC;
-
-  const long long tS = prof ? mgpu_now_us() : 0;
-  flushBatchLocked();
-  if (prof) readbackStats.usSubmit += mgpu_now_us() - tS;
-
-  // ── ONE fence + ONE map ──────────────────────────────────────────────────
-  const long long tM = prof ? mgpu_now_us() : 0;
-  const bool mapped = waitMapReadLocked(readbackBuffer, total);
-  if (prof) readbackStats.usMap += mgpu_now_us() - tM;
-  if (!mapped) {
-    LOG_ERROR("batched readback: map failed");
-    return;
-  }
-  const long long tO = prof ? mgpu_now_us() : 0;
-  const uint8_t *base = static_cast<const uint8_t *>(
-      wgpuBufferGetConstMappedRange(readbackBuffer, 0, total));
-  if (base) {
-    for (const StagedRead &r : scope.reads) {
-      std::memcpy(r.dst, base + r.slotOffset, (size_t)r.size);
-    }
-  } else {
-    LOG_ERROR("batched readback: could not get mapped range");
-  }
-  wgpuBufferUnmap(readbackBuffer);
-  if (prof) readbackStats.usOut += mgpu_now_us() - tO;
 }
 
 void MGPU::releaseReadbackLocked() {
@@ -897,6 +1021,18 @@ void MGPU::initializeContextUnlocked() {
   WGPUInstanceDescriptor instanceDesc = {};
   instanceDesc.nextInChain = nullptr;
 #ifndef __EMSCRIPTEN__
+  // A failed init deletes its native wrapper: the next attempt replaces `ctx`
+  // and would drop the only pointer to it. This runs after the failure path's
+  // own handle releases, the order destroyContextUnlocked keeps.
+  struct NativeInstanceGuard {
+    Context *c;
+    bool keep;
+    ~NativeInstanceGuard() {
+      if (keep || !c->dawnNativeInstance) return;
+      delete static_cast<dawn::native::Instance *>(c->dawnNativeInstance);
+      c->dawnNativeInstance = nullptr;
+    }
+  } nativeInstanceGuard{c, false};
   {
     auto* nativeInst = new dawn::native::Instance(&instanceDesc);
     c->dawnNativeInstance = nativeInst;
@@ -1498,6 +1634,11 @@ void MGPU::initializeContextUnlocked() {
     wantedFeatures.push_back(
         WGPUFeatureName_SharedTextureMemoryAHardwareBuffer);
 #endif
+  // Dawn is entered from several threads (the worker, inline writes/reads on
+  // Dart threads, ProcessEvents pumps, last-ref releases). Without this
+  // feature Dawn creates no device mutex and its internal guards are no-ops.
+  if (adapterHas(WGPUFeatureName_ImplicitDeviceSynchronization))
+    wantedFeatures.push_back(WGPUFeatureName_ImplicitDeviceSynchronization);
 #endif // !__EMSCRIPTEN__
   if (!wantedFeatures.empty()) {
     deviceDesc.requiredFeatures = wantedFeatures.data();
@@ -1647,11 +1788,14 @@ void MGPU::initializeContextUnlocked() {
   }
 
   c->initialized = true;
+#ifndef __EMSCRIPTEN__
+  nativeInstanceGuard.keep = true;
+#endif
   LOG_INFO("WebGPU context initialized successfully");
 #ifndef __EMSCRIPTEN__
   // ONE line per device creation at INFO. Per-entry hit/miss detail is DEBUG:
-  // this channel defaults to INFO, and a line per blob would bury real
-  // warnings the way per-buffer logging once buried them.
+  // at INFO a line per blob would bury real warnings the way per-buffer
+  // logging once buried them.
   MGPU_LOG(mgpu::LOG_INFO, "%s", mgpu::shaderCacheSummaryLine().c_str());
 #endif
 #ifdef __EMSCRIPTEN__
@@ -1726,10 +1870,6 @@ void MGPU::attachContextAsyncResult(std::function<void(bool)> callback) {
     });
     return;
   }
-  {
-    mgpu::lock_guard<mgpu::mutex> lk(ctxStateMutex);
-    ++ctxAttachCount;
-  }
   auto body = [this, callback]() {
     bool ok = false;
     try {
@@ -1746,10 +1886,23 @@ void MGPU::attachContextAsyncResult(std::function<void(bool)> callback) {
     }
     if (callback) callback(ok);
   };
+  // Counted only once nothing but the thread start can still fail.
+  {
+    mgpu::lock_guard<mgpu::mutex> lk(ctxStateMutex);
+    ++ctxAttachCount;
+  }
 #ifdef __EMSCRIPTEN__
   body();
 #else
-  std::thread(body).detach();
+  try {
+    std::thread(body).detach();
+  } catch (...) {
+    // The init thread never started: give the reference back, and let the
+    // caller report the failure (the callback has not run).
+    mgpu::lock_guard<mgpu::mutex> lk(ctxStateMutex);
+    if (ctxAttachCount > 0) --ctxAttachCount;
+    throw;
+  }
 #endif
 }
 
@@ -1862,7 +2015,10 @@ void MGPU::destroyContextUnlocked() {
   if (readbackOpen) {
     std::unique_ptr<ReadbackScope> open(readbackOpen.release());
     for (const ReadCopy &c : open->copies) {
-      if (c.src) wgpuBufferRelease(c.src);
+      if (c.src) {
+        unpinForScope(c.src);
+        wgpuBufferRelease(c.src);
+      }
     }
   }
   readbackDepth = 0;
@@ -2051,9 +2207,27 @@ void MGPU::ensureDeviceValid() {
 
 Buffer::Buffer(MGPU &mgpu_ref) : mgpu(mgpu_ref) {}
 
-Buffer::~Buffer() { release(); }
+bool Buffer::matchesPrivateSourcePin(const ContextPin &pin) const {
+  if (!pin.sourceDomain() &&
+      (!privateResource_ || !privateResource_->pin ||
+       !privateResource_->pin->sourceDomain())) return true;
+  return privateResource_ && samePrivatePin(*privateResource_, pin) &&
+      privateResource_->ready.load() && !privateResource_->quarantined.load();
+}
+std::shared_ptr<PrivateResourceState> Buffer::copyPrivateSourceState(const ContextPin &pin) const {
+  return privateResource_ && samePrivatePin(*privateResource_, pin) &&
+      privateResource_->ready.load() && !privateResource_->quarantined.load()
+      ? privateResource_ : nullptr;
+}
+
+Buffer::~Buffer() {
+  if (privateResource_) { releasePrivateResource(privateResource_); return; }
+  release();
+}
 
 Buffer::Buffer(Buffer &&other) noexcept
+    // MetadataUniqueRecord is deliberately default-initialized: allocation
+    // identity belongs to this address and never moves with legacy GPU payload.
     : mgpu(other.mgpu), bufferData(std::move(other.bufferData)),
       dataType(other.dataType), elementCount(other.elementCount),
       isPacked(other.isPacked),
@@ -2117,7 +2291,9 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType,
     size_t physicalByteSize;
 
     if (isPacked) {
-      // For PACKED types, byteSize is ELEMENT COUNT
+      // byteSize is elementCount * the element's natural width for every type
+      // (so it equals the count only for 8-bit). Packed types store elements
+      // at that width, rounded up to a whole word.
       LOG_INFO("Packed type: elementCount=%zu", elementCount);
 
       switch (dataType) {
@@ -2157,6 +2333,14 @@ void Buffer::createBuffer(size_t byteSize, BufferDataType dataType,
 
     LOG_INFO("Buffer size: original=%zu, aligned=%zu", originalSize,
              bufferData.size);
+
+    // Over the device limit Dawn returns an error buffer, not null: the
+    // caller would get a handle on which every later use silently fails.
+    WGPULimits limits = {};
+    if (wgpuDeviceGetLimits(device, &limits) == WGPUStatus_Success &&
+        bufferData.size > limits.maxBufferSize) {
+      throw std::runtime_error("buffer size exceeds the device maxBufferSize");
+    }
 
     // Create the buffer
     bufferData.usage = usage;
@@ -2216,8 +2400,12 @@ void Buffer::release() {
         if (queue) {
           wgpuQueueSubmit(queue, 0, nullptr);
         }
-        wgpuBufferDestroy(bufferHandle);
-        wgpuBufferRelease(bufferHandle);
+        // An open stage scope still names this buffer: destroying it now
+        // would fail End's submit, so the destroy waits for that scope.
+        if (!owner->deferDestroyIfPinnedLocked(bufferHandle)) {
+          wgpuBufferDestroy(bufferHandle);
+          wgpuBufferRelease(bufferHandle);
+        }
         if (stagingHandle) {
           wgpuBufferDestroy(stagingHandle);
           wgpuBufferRelease(stagingHandle);
@@ -2253,6 +2441,112 @@ void Buffer::release() {
     _readStagingBuffer = nullptr;
     _readStagingBufferSize = 0;
   }
+}
+
+void Buffer::destroyQueued() {
+#ifdef __EMSCRIPTEN__
+  // The browser build runs tasks inline, so this frees the buffer now. That
+  // is not call order: under ASYNCIFY a read suspended in its map wait still
+  // uses `this`, so on the web a buffer must not be destroyed while a read of
+  // it is pending.
+  release();
+  source_scope::MetadataDelete<Buffer>{}(this);
+#else
+  // Running release() on the worker too keeps it from racing a queued read
+  // (readRawNow) that is replacing _readStagingBuffer.
+  Buffer *self = this;
+  try {
+    mgpu.getWebGPUThread().enqueueAsync([self]() {
+      self->release();
+      source_scope::MetadataDelete<Buffer>{}(self);
+    });
+  } catch (...) {
+    // A refused enqueue does not prove the earlier reads have run: keep the
+    // object and its GPU buffer rather than free them under a queued task.
+    LOG_ERROR("buffer deletion retained: GPU enqueue failed");
+  }
+#endif
+}
+
+int Buffer::destroyCheckedAsync(std::shared_ptr<ContextPin> pin,
+                                MGPUResourceCleanupCallback callback,
+                                void *userdata) {
+#ifdef __EMSCRIPTEN__
+  return MGPU_CONTEXT_LEASE_UNSUPPORTED;
+#else
+  if (!pin || !callback) return MGPU_CONTEXT_LEASE_INVALID;
+  capture_cleanup::Family family;
+  const auto result = capture_cleanup::Family::begin(pin->sourceDomain(), family);
+  if (result != source_scope::Result::Ok) return capture_cleanup::nativeResult(result);
+  return destroyCheckedAsync(std::move(pin), callback, userdata, family);
+#endif
+}
+
+int Buffer::destroyCheckedAsync(std::shared_ptr<ContextPin> pin,
+                                MGPUResourceCleanupCallback callback,
+                                void *userdata, const capture_cleanup::Family &family) {
+#ifdef __EMSCRIPTEN__
+  return MGPU_CONTEXT_LEASE_UNSUPPORTED;
+#else
+  // Exclusive final ownership and drained CPU/map/readback users are caller
+  // preconditions; legacy Buffer has no comprehensive asynchronous-user count.
+  if (!pin || !callback || !family.matches(pin->sourceDomain()) || &pin->gpu() != &mgpu ||
+      !bufferData.creationDevice || pin->device() != bufferData.creationDevice)
+    return MGPU_CONTEXT_LEASE_INVALID;
+  if (pin->sourceDomain() && !privateResource_) return MGPU_CONTEXT_LEASE_INVALID;
+  if (privateResource_ && (!samePrivatePin(*privateResource_, *pin) ||
+      !privateResource_->ready.load() || privateResource_->quarantined.load()))
+    return MGPU_CONTEXT_LEASE_QUARANTINED;
+  capture_cleanup::PreparedTask job;
+  const auto prepared = job.prepare(family, [buffer = this, pin]() {
+      if (buffer->releaseCheckedOnWorker(*pin)) {
+        source_scope::MetadataDelete<Buffer>{}(buffer); // Empty native fields.
+        return true;
+      }
+      return false;
+  }, callback, userdata);
+  if (prepared != MGPU_CONTEXT_LEASE_OK) return prepared;
+  return job.enqueue([](void *context, mgpu::task_queue::Prepared &task) noexcept {
+    return static_cast<MGPU *>(context)->getWebGPUThread().enqueuePrepared(task);
+  }, &mgpu);
+#endif
+}
+
+bool Buffer::releaseCheckedOnWorker(const ContextPin &pin) {
+  if (std::this_thread::get_id() != mgpu.getWebGPUThread().threadId() ||
+      &pin.gpu() != &mgpu || pin.device() != bufferData.creationDevice)
+    return false;
+  if ((pin.sourceDomain() && !privateResource_) ||
+      (privateResource_ && !samePrivatePin(*privateResource_, pin))) return false;
+  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
+  // Prior use retirement is a separate prerequisite. This releases only this
+  // final owner's references; do not submit work on a replacement/global queue.
+  if (bufferData.buffer) {
+    // As in release(): an open stage scope still names this buffer, so its
+    // destroy waits for that scope's End instead of failing the batch.
+    if (!mgpu.deferDestroyIfPinnedLocked(bufferData.buffer)) {
+      wgpuBufferDestroy(bufferData.buffer);
+      wgpuBufferRelease(bufferData.buffer);
+    }
+    bufferData.buffer = nullptr;
+  }
+  if (_readStagingBuffer) {
+    wgpuBufferDestroy(_readStagingBuffer);
+    wgpuBufferRelease(_readStagingBuffer);
+    _readStagingBuffer = nullptr;
+  }
+  if (bufferData.creationDevice) {
+    wgpuDeviceRelease(bufferData.creationDevice);
+    bufferData.creationDevice = nullptr;
+  }
+  bufferData.size = 0;
+  bufferData.usage = WGPUBufferUsage_None;
+  elementCount = 0;
+  dataType = kUnknownType;
+  isPacked = false;
+  _readStagingBufferSize = 0;
+  if (privateResource_) privateResource_->nativeReleased = true;
+  return true;
 }
 
 void Buffer::releaseInternal() {
@@ -2309,404 +2603,225 @@ bool Buffer::needsPacking(BufferDataType type) const {
          type == kInt64 || type == kUInt64 || type == kFloat64;
 }
 
-void Buffer::write(const float *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(float);
-  LOG_INFO("write(float): elementCount=%zu, byteSize=%zu", elementCount,
-           byteSize);
-  writeDirect(inputData, byteSize, kFloat32);
-}
+// ── Raw byte cores ─────────────────────────────────────────────────────────
+// Every Buffer read and write ends here. Queue order = call order: while the
+// WebGPU thread has tasks queued or running (dispatches, render passes, async
+// reads, releases), a call from another thread runs behind them instead of
+// reaching the queue first; otherwise it runs inline, as it always did.
 
-void Buffer::write(const int32_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(int32_t);
-  writeDirect(inputData, byteSize, kInt32);
-}
+namespace {
 
-void Buffer::write(const uint32_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(uint32_t);
-  writeDirect(inputData, byteSize, kUInt32);
-}
-
-void Buffer::write(const int8_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(int8_t);
-  if (needsPacking(kInt8)) {
-    writePacked(inputData, byteSize, kInt8);
-  } else {
-    writeDirect(inputData, byteSize, kInt8);
+// Drops what retainReadyContextSnapshot retained. Declared before the device
+// lock, so it runs after the unlock.
+struct ContextSnapshotRefs {
+  WGPUDevice device = nullptr;
+  WGPUQueue queue = nullptr;
+  WGPUInstance instance = nullptr;
+  ContextSnapshotRefs() = default;
+  ContextSnapshotRefs(const ContextSnapshotRefs &) = delete;
+  ContextSnapshotRefs &operator=(const ContextSnapshotRefs &) = delete;
+  ~ContextSnapshotRefs() {
+    if (queue) wgpuQueueRelease(queue);
+    if (device) wgpuDeviceRelease(device);
+    if (instance) wgpuInstanceRelease(instance);
   }
+};
+
+// Host bytes of write copies one context may hold queued behind its worker:
+// two whole 32 MiB upload chunks, so one can be copied while one waits.
+constexpr size_t kQueuedWriteBudget = size_t(64) << 20;
+
+} // namespace
+
+void MGPU::chargeQueuedWrite(size_t bytes) {
+  mgpu::unique_lock<mgpu::mutex> lock(queuedWriteMutex_);
+  // A copy larger than the whole budget is admitted alone, never refused.
+  queuedWriteCv_.wait(lock, [&] {
+    return queuedWriteBytes_ == 0 ||
+           (queuedWriteBytes_ <= kQueuedWriteBudget &&
+            bytes <= kQueuedWriteBudget - queuedWriteBytes_);
+  });
+  queuedWriteBytes_ += bytes;
 }
 
-void Buffer::write(const uint8_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(uint8_t);
-  if (needsPacking(kUInt8)) {
-    writePacked(inputData, byteSize, kUInt8);
-  } else {
-    writeDirect(inputData, byteSize, kUInt8);
+void MGPU::refundQueuedWrite(size_t bytes) noexcept {
+  {
+    mgpu::lock_guard<mgpu::mutex> lock(queuedWriteMutex_);
+    queuedWriteBytes_ -= bytes;
   }
+  queuedWriteCv_.notify_all();
 }
 
-void Buffer::write(const int16_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(int16_t);
-  if (needsPacking(kInt16)) {
-    writePacked(inputData, byteSize, kInt16);
-  } else {
-    writeDirect(inputData, byteSize, kInt16);
+bool Buffer::writeRaw(const void *src, size_t byteSize, size_t dstByteOffset,
+                      bool zeroPadTail) {
+  if (byteSize == 0) return true;
+  if (!src) return false;
+  const size_t size = bufferData.size;
+  const size_t span = zeroPadTail ? ((byteSize + 3) & ~(size_t)3) : byteSize;
+  if (span < byteSize || dstByteOffset > size || span > size - dstByteOffset) {
+    LOG_ERROR("buffer write out of range: offset=%zu size=%zu buffer=%zu",
+              dstByteOffset, byteSize, size);
+    return false;
   }
-}
-
-void Buffer::write(const uint16_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(uint16_t);
-  if (needsPacking(kUInt16)) {
-    writePacked(inputData, byteSize, kUInt16);
-  } else {
-    writeDirect(inputData, byteSize, kUInt16);
+  // Queue writes take whole words, so a partial word is read back first.
+  if (((dstByteOffset & 3) || (span & 3)) &&
+      !(bufferData.usage & WGPUBufferUsage_CopySrc)) {
+    LOG_ERROR("unaligned buffer write (offset=%zu size=%zu) needs a CopySrc "
+              "buffer",
+              dstByteOffset, byteSize);
+    return false;
   }
-}
-
-void Buffer::write(const double *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(double);
-  if (needsPacking(kFloat64)) {
-    writePacked(inputData, byteSize, kFloat64);
-  } else {
-    writeDirect(inputData, byteSize, kFloat64);
+  if (mgpu.inlineWouldOvertake()) {
+    // The caller's bytes may die on return: the queued write owns a copy,
+    // already padded, charged to the context's queued-write budget (waiting
+    // for room first) until the task that writes it is gone.
+    struct QueuedCopy {
+      MGPU &gpu;
+      const size_t charged;
+      std::vector<uint8_t> bytes;
+      QueuedCopy(MGPU &g, size_t n) : gpu(g), charged(n) {
+        gpu.chargeQueuedWrite(n);
+      }
+      ~QueuedCopy() { gpu.refundQueuedWrite(charged); }
+    };
+    try {
+      auto copy = std::make_shared<QueuedCopy>(mgpu, span);
+      // The payload is copied once; only the padded tail is zero-filled.
+      const uint8_t *in = static_cast<const uint8_t *>(src);
+      copy->bytes.reserve(span);
+      copy->bytes.assign(in, in + byteSize);
+      copy->bytes.resize(span);
+      mgpu.getWebGPUThread().enqueueAsync([this, copy, dstByteOffset]() {
+        writeRawNow(copy->bytes.data(), copy->bytes.size(), dstByteOffset,
+                    false);
+      });
+      return true;
+    } catch (...) {
+      // Out of memory, or the worker has exited: write inline instead.
+    }
   }
+  return writeRawNow(src, byteSize, dstByteOffset, zeroPadTail);
 }
 
-void Buffer::write(const int64_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(int64_t);
-  if (needsPacking(kInt64)) {
-    writePacked(inputData, byteSize, kInt64);
-  } else {
-    writeDirect(inputData, byteSize, kInt64);
-  }
-}
-
-void Buffer::write(const uint64_t *inputData, size_t elementCount) {
-  size_t byteSize = elementCount * sizeof(uint64_t);
-  if (needsPacking(kUInt64)) {
-    writePacked(inputData, byteSize, kUInt64);
-  } else {
-    writeDirect(inputData, byteSize, kUInt64);
-  }
-}
-
-void Buffer::read(float *outputData, size_t elementCount, size_t offset) {
-  readDirect(outputData, elementCount, offset);
-}
-
-void Buffer::read(int32_t *outputData, size_t elementCount, size_t offset) {
-  readDirect(outputData, elementCount, offset);
-}
-
-void Buffer::read(uint32_t *outputData, size_t elementCount, size_t offset) {
-  readDirect(outputData, elementCount, offset);
-}
-
-void Buffer::read(int8_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kInt8)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(uint8_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kUInt8)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(int16_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kInt16)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(uint16_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kUInt16)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(double *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kFloat64)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(int64_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kInt64)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::read(uint64_t *outputData, size_t elementCount, size_t offset) {
-  if (needsPacking(kUInt64)) {
-    readPacked(outputData, elementCount, offset);
-  } else {
-    readDirect(outputData, elementCount, offset);
-  }
-}
-
-void Buffer::readAsync(float *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kFloat32, callback);
-}
-
-void Buffer::readAsync(int32_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kInt32, callback);
-}
-
-void Buffer::readAsync(uint32_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kUInt32, callback);
-}
-
-void Buffer::readAsync(int8_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kInt8, callback);
-}
-
-void Buffer::readAsync(uint8_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kUInt8, callback);
-}
-
-void Buffer::readAsync(int16_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kInt16, callback);
-}
-
-void Buffer::readAsync(uint16_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kUInt16, callback);
-}
-
-void Buffer::readAsync(double *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kFloat64, callback);
-}
-
-void Buffer::readAsync(int64_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kInt64, callback);
-}
-
-void Buffer::readAsync(uint64_t *outputData, size_t elementCount, size_t offset,
-                       std::function<void()> callback) {
-  readAsyncImpl(outputData, elementCount, offset, kUInt64, callback);
-}
-
-void Buffer::readBytesAt(void *outputData, size_t byteSize,
-                         size_t srcByteOffset) {
-  if (!outputData || byteSize == 0) return;
-  // readDirect<uint8_t> is a RAW byte read: elementSize == 1, so elementCount
-  // is the byte count and offset is the byte offset.  No per-type unpacking —
-  // identical bytes to what the batched path copies out of the mapped range.
-  readDirect<uint8_t>(static_cast<uint8_t *>(outputData), byteSize,
-                      srcByteOffset);
-}
-
-void Buffer::writeBytesAt(const void *inputData, size_t byteSize,
-                          size_t dstByteOffset) {
-  if (!inputData || byteSize == 0) {
-    return;
-  }
-  if (!mgpu.isDeviceValid()) {
-    LOG_ERROR("MGPU context is not valid, cannot perform buffer operation");
-    throw std::runtime_error("WebGPU context not valid for buffer operation");
-  }
-  if (dstByteOffset + byteSize > bufferData.size) {
-    throw std::runtime_error(
-        "writeBytesAt out of range: offset=" + std::to_string(dstByteOffset) +
-        " size=" + std::to_string(byteSize) +
-        " buffer=" + std::to_string(bufferData.size));
-  }
+bool Buffer::writeRawNow(const void *src, size_t byteSize,
+                         size_t dstByteOffset, bool zeroPadTail) {
   WaitScope wpTotal(WP_WR_TOTAL);
-  // 4-byte alignment is a WebGPU requirement for queue writes.
   mgpu::unique_lock<mgpu::mutex> lock = [&] {
     WaitScope wp(WP_WR_LOCK);
     return mgpu::unique_lock<mgpu::mutex>(mgpu.getGpuMutex());
   }();
+  // The non-initializing getters: a write never creates or repairs a device.
+  WGPUQueue queue = mgpu.tryGetQueue();
+  WGPUDevice device = mgpu.tryGetDevice();
+  const WGPUBuffer target = bufferData.buffer;
+  if (!queue || !device || !target || bufferData.creationDevice != device) {
+    LOG_ERROR("buffer write skipped: no ready device for this buffer");
+    return false;
+  }
   // Queue writes are ordered by SUBMISSION time — flush pending batched
   // dispatches first so they execute before this write, not after.
   {
     WaitScope wp(WP_WR_FLUSH);
     mgpu.flushBatchLocked();
   }
-  WGPUQueue queue = mgpu.getQueue();
-  if (!queue || !bufferData.buffer) {
-    LOG_ERROR("Invalid WebGPU handles for writeBytesAt");
-    throw std::runtime_error("WebGPU handles not valid for buffer operation");
-  }
-  {
+  const uint8_t *bytes = static_cast<const uint8_t *>(src);
+  const size_t head = dstByteOffset & 3;
+  if (head == 0 && (byteSize & 3) == 0) {
     WaitScope wp(WP_WR_WRITE);
-    wgpuQueueWriteBuffer(queue, bufferData.buffer, dstByteOffset, inputData,
-                         byteSize);
+    wgpuQueueWriteBuffer(queue, target, dstByteOffset, bytes, byteSize);
+    return true;
   }
+  if (head == 0 && zeroPadTail) {
+    // The typed writes have always zero-filled the rest of the last word.
+    const size_t body = byteSize & ~(size_t)3;
+    uint8_t tail[4] = {0, 0, 0, 0};
+    std::memcpy(tail, bytes + body, byteSize - body);
+    WaitScope wp(WP_WR_WRITE);
+    if (body) wgpuQueueWriteBuffer(queue, target, dstByteOffset, bytes, body);
+    wgpuQueueWriteBuffer(queue, target, dstByteOffset + body, tail, 4);
+    return true;
+  }
+  // Queue writes take whole words: write the covering words, with the bytes
+  // around the range read back first (writeRaw checked CopySrc). The mutex
+  // stays held from that read to the write, so nothing can change those
+  // bytes in between.
+  const size_t first = dstByteOffset - head;
+  const size_t end = dstByteOffset + byteSize;
+  const size_t last = (end + 3) & ~(size_t)3;
+  std::vector<uint8_t> words;
+  try {
+    words.resize(last - first);
+  } catch (...) {
+    LOG_ERROR("unaligned buffer write: out of memory");
+    return false;
+  }
+  if (head && !mgpu.readOneLocked(target, first, words.data(), 4)) return false;
+  if ((end & 3) && !(head && last - 4 == first) &&
+      !mgpu.readOneLocked(target, last - 4, words.data() + (last - 4 - first),
+                          4)) {
+    return false;
+  }
+  std::memcpy(words.data() + head, bytes, byteSize);
+  WaitScope wp(WP_WR_WRITE);
+  wgpuQueueWriteBuffer(queue, target, first, words.data(), words.size());
+  return true;
 }
 
-template <typename T>
-void Buffer::writeDirect(const T *inputData, size_t byteSize,
-                         BufferDataType type) {
-  if (!inputData || byteSize == 0) {
-    return;
+bool Buffer::readRaw(void *dst, size_t byteSize, size_t srcByteOffset) {
+  if (byteSize == 0) return true;
+  if (!dst) return false;
+  const size_t size = bufferData.size;
+  if (srcByteOffset > size || byteSize > size - srcByteOffset) {
+    LOG_ERROR("Read would exceed buffer bounds: %zu + %zu > %zu",
+              srcByteOffset, byteSize, size);
+    return false;
   }
-
-  if (!mgpu.isDeviceValid()) {
-    LOG_ERROR("MGPU context is not valid, cannot perform buffer operation");
-    throw std::runtime_error("WebGPU context not valid for buffer operation");
+  if (mgpu.inlineWouldOvertake()) {
+    bool ran = false;
+    try {
+      return mgpu.getWebGPUThread().enqueueSync<bool>([&]() {
+        ran = true;
+        return readRawNow(dst, byteSize, srcByteOffset);
+      });
+    } catch (...) {
+      // Never queued (the worker has exited): read inline below. A read that
+      // ran and threw has failed.
+      if (ran) return false;
+    }
   }
-
-  if (bufferData.size < byteSize) {
-    throw std::runtime_error(
-        "Buffer size mismatch: allocated=" + std::to_string(bufferData.size) +
-        " bytes, trying to upload=" + std::to_string(byteSize) + " bytes");
-  }
-
-  LOG_INFO("setDataDirect: byteSize=%zu, bufferSize=%zu, inputData=%p",
-           byteSize, bufferData.size, inputData);
-
-  // Acquire WebGPU operation lock to prevent conflicts with compute dispatch
-  mgpu::lock_guard<mgpu::mutex> lock(mgpu.getGpuMutex());
-  // Queue writes are ordered by SUBMISSION time — flush pending batched
-  // dispatches first so they execute before this write, not after.
-  mgpu.flushBatchLocked();
-
-  WGPUDevice device = mgpu.getDevice();
-  WGPUQueue queue = mgpu.getQueue();
-
-  if (!device || !queue || !bufferData.buffer) {
-    LOG_ERROR("Invalid WebGPU handles: device=%p, queue=%p, buffer=%p", device,
-              queue, bufferData.buffer);
-    throw std::runtime_error("WebGPU handles not valid for buffer operation");
-  }
-
-  // Write the buffer data - protected by mutex from compute operations
-  wgpuQueueWriteBuffer(queue, bufferData.buffer, 0, inputData, byteSize);
-  LOG_INFO("setDataDirect completed successfully");
+  return readRawNow(dst, byteSize, srcByteOffset);
 }
 
-template <typename T>
-void Buffer::writePacked(const T *inputData, size_t byteSize,
-                         BufferDataType type) {
-  if (!inputData || byteSize == 0) {
-    return;
-  }
-
-  size_t numElements = byteSize / sizeof(T);
-  std::vector<uint32_t> packedData;
-
-  switch (type) {
-  case kInt8:
-  case kUInt8: {
-    // Pack 4 bytes into each uint32 - size should match createBuffer
-    // calculation
-    size_t packedElements = (numElements + 3) / 4;
-    packedData.resize(packedElements, 0);
-
-    for (size_t i = 0; i < numElements; ++i) {
-      size_t packedIndex = i / 4;
-      size_t byteOffset = i % 4;
-      uint32_t value =
-          static_cast<uint32_t>(static_cast<uint8_t>(inputData[i]));
-      packedData[packedIndex] |= (value << (byteOffset * 8));
-    }
-    break;
-  }
-
-  case kInt16:
-  case kUInt16: {
-    // Pack 2 shorts into each uint32 - size should match createBuffer
-    // calculation
-    size_t packedElements = (numElements + 1) / 2;
-    packedData.resize(packedElements, 0);
-
-    for (size_t i = 0; i < numElements; ++i) {
-      size_t packedIndex = i / 2;
-      size_t shortOffset = i % 2;
-      uint32_t value =
-          static_cast<uint32_t>(static_cast<uint16_t>(inputData[i]));
-      packedData[packedIndex] |= (value << (shortOffset * 16));
-    }
-    break;
-  }
-
-  case kInt64:
-  case kUInt64:
-  case kFloat64: {
-    // Convert 64-bit values to pairs of uint32
-    packedData.resize(numElements * 2);
-
-    for (size_t i = 0; i < numElements; ++i) {
-      uint64_t value;
-      if (type == kFloat64) {
-        double doubleVal = static_cast<double>(inputData[i]);
-        std::memcpy(&value, &doubleVal, sizeof(uint64_t));
-      } else {
-        value = static_cast<uint64_t>(inputData[i]);
-      }
-
-      packedData[i * 2] = static_cast<uint32_t>(value & 0xFFFFFFFF);
-      packedData[i * 2 + 1] = static_cast<uint32_t>(value >> 32);
-    }
-    break;
-  }
-
-  default:
-    writeDirect(inputData, byteSize, type);
-    return;
-  }
-
-  // Upload packed data - this size should now match what was allocated
-  size_t packedByteSize = packedData.size() * sizeof(uint32_t);
-  writeDirect(packedData.data(), packedByteSize, kUInt32);
-}
-
-template <typename T>
-void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
-  LOG_INFO("readDirect: elementCount=%zu, offset=%zu, sizeof(T)=%zu",
-           elementCount, offset, sizeof(T));
-
-  const size_t elementSize = sizeof(T); // Use actual template type size, not logical dataType size
-  size_t byteOffset = offset * elementSize;
-  size_t readBytes = elementCount * elementSize;
-
-  LOG_INFO("readDirect: byteOffset=%zu, readBytes=%zu, bufferSize=%zu",
-           byteOffset, readBytes, bufferData.size);
-
-  if (byteOffset + readBytes > bufferData.size) {
-    LOG_ERROR("Read would exceed buffer bounds: %zu + %zu > %zu", byteOffset,
-              readBytes, bufferData.size);
-    return;
-  }
-
-  if (!mgpu.isDeviceValid()) {
-    LOG_ERROR("MGPU context is not valid, cannot perform buffer read");
-    throw std::runtime_error("WebGPU context not valid for buffer read");
-  }
+bool Buffer::readRawNow(void *dst, size_t byteSize, size_t srcByteOffset) {
+  // Copies take whole words: copy the covering words and hand back the bytes
+  // asked for (buffer sizes are word multiples, so the window always fits).
+  const size_t head = srcByteOffset & 3;
+  const size_t windowOffset = srcByteOffset - head;
+  const size_t window = (head + byteSize + 3) & ~(size_t)3;
 
   WaitScope wpTotal(WP_RD_TOTAL);
-
-  // Acquire WebGPU operation lock to prevent conflicts with compute dispatch.
-  // We use unique_lock (vs lock_guard) so we can unlock it explicitly before
-  // calling wgpuInstanceProcessEvents at the end, which must run outside the
-  // lock to avoid blocking buffer-release cleanup tasks that also acquire it.
-  mgpu::unique_lock<mgpu::mutex> lock =
-      [&] {
-        WaitScope wp(WP_RD_LOCK);
-        return mgpu::unique_lock<mgpu::mutex>(mgpu.getGpuMutex());
-      }();
+  // One reader of this buffer's staging buffer at a time: the map wait below
+  // runs without the device mutex.
+  mgpu::lock_guard<mgpu::mutex> readLock(readMutex_);
+  ContextSnapshotRefs refs;
+  mgpu::unique_lock<mgpu::mutex> lock = [&] {
+    WaitScope wp(WP_RD_LOCK);
+    return mgpu::unique_lock<mgpu::mutex>(mgpu.getGpuMutex());
+  }();
+  // Retained, because the wait runs unlocked and a teardown may drop the
+  // context's own references meanwhile.
+  uint64_t generation = 0;
+  if (!mgpu.retainReadyContextSnapshot(&refs.device, &refs.queue,
+                                       &refs.instance, &generation)) {
+    LOG_ERROR("buffer read skipped: no ready device");
+    return false;
+  }
+  WGPUDevice device = refs.device;
+  const WGPUBuffer source = bufferData.buffer;
+  if (!source || bufferData.creationDevice != device) {
+    LOG_ERROR("buffer read skipped: buffer released or from another device");
+    return false;
+  }
   // Readbacks copy via their own encoder — flush pending batched dispatches
   // first so their results are visible to this read.
   {
@@ -2714,397 +2829,624 @@ void Buffer::readDirect(T *outputData, size_t elementCount, size_t offset) {
     mgpu.flushBatchLocked();
   }
 
-  WGPUDevice device = mgpu.getDevice();
-  WGPUQueue queue = mgpu.getQueue();
-
-  if (!device || !queue || !bufferData.buffer) {
-    LOG_ERROR("Invalid WebGPU handles for read: device=%p, queue=%p, buffer=%p",
-              device, queue, bufferData.buffer);
-    throw std::runtime_error("WebGPU handles not valid for buffer read");
-  }
-
-  // Snapshot the handle while we hold the GPU mutex.  A concurrent
-  // Buffer::release() on the Dart thread nulls bufferData.buffer without
-  // the mutex (it only enqueues the actual WGPUBuffer destruction on the
-  // WebGPU thread).  Using a local copy avoids a TOCTOU race where
-  // bufferData.buffer becomes nullptr between the check above and the
-  // wgpuCommandEncoderCopyBufferToBuffer call below.
-  // Safety: the cleanup task enqueued by release() is always ordered *after*
-  // this readDirect task on the WebGPU thread, so localBuffer stays alive
-  // for the full duration of this function.
-  const WGPUBuffer localBuffer = bufferData.buffer;
-
-  // Reuse the persistent staging buffer when it already has the right size.
-  // This eliminates the ~100 MB/s of GPU heap churn that occurs when reading
-  // a 5 MB texture tensor at 20 fps (one 5 MB alloc+free per frame).
   // ── Staging buffer: GROW-ON-DEMAND, never resized to fit ──────────────────
-  // This used to keep a staging buffer of EXACTLY readBytes and destroy +
-  // recreate it whenever the next read asked for a different length. That is
-  // fine for a fixed-size tensor and pathological for the case this path
-  // actually serves: a compacted, rate-controlled payload whose length changes
-  // every single frame. Every read then paid a GPU buffer destroy + create,
-  // and the trailing wgpuInstanceProcessEvents below existed only to stop the
-  // orphans piling up. It is the same shape as the raw-upload scratch that used
-  // to malloc per call — a per-frame allocate/free cycle wrapped around a
-  // transfer, costing more than the transfer.
-  //
-  // Capacity only ever grows, to the next power of two, and is bounded by the
-  // source buffer's own size (a read cannot exceed it), so the worst case is
-  // one staging copy of a buffer that is being fully read back — which is what
-  // an exact-fit buffer cost anyway. Released with the buffer.
+  // A compacted, rate-controlled payload changes length every frame; an
+  // exact-fit staging buffer paid a GPU destroy + create per read. Capacity
+  // only grows, to the next power of two, bounded by the source buffer's own
+  // size. The member owns it until release(), so no error path below may
+  // release it.
   {
     WaitScope wpAlloc(WP_RD_ALLOC);
-    if (_readStagingBufferSize < readBytes) {
-      if (_readStagingBuffer) {
-        wgpuBufferDestroy(_readStagingBuffer);
-        wgpuBufferRelease(_readStagingBuffer);
-        _readStagingBuffer = nullptr;
-        _readStagingBufferSize = 0;
-      }
+    if (_readStagingBufferSize < window) {
       size_t cap = 65536;
-      while (cap < readBytes && cap < ((size_t)1 << 31)) cap <<= 1;
-      if (cap < readBytes) cap = readBytes;
+      while (cap < window && cap < ((size_t)1 << 31)) cap <<= 1;
       if (cap > bufferData.size) cap = bufferData.size;
-      if (cap < readBytes) cap = readBytes;
-      // MapRead buffers must be a multiple of 4; the doubling keeps that, the
-      // clamp to bufferData.size might not.
+      if (cap < window) cap = window;
+      // MapRead buffers must be a multiple of 4.
       cap = (cap + 3) & ~(size_t)3;
-
       WGPUBufferDescriptor stagingDesc = {};
       stagingDesc.size = cap;
       stagingDesc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
       stagingDesc.mappedAtCreation = false;
-
-      _readStagingBuffer = wgpuDeviceCreateBuffer(device, &stagingDesc);
-      if (!_readStagingBuffer) {
+      WGPUBuffer grown = wgpuDeviceCreateBuffer(device, &stagingDesc);
+      if (!grown) {
         LOG_ERROR("Failed to create staging buffer");
-        throw std::runtime_error("Failed to create staging buffer");
+        return false;
       }
+      if (_readStagingBuffer) {
+        wgpuBufferDestroy(_readStagingBuffer);
+        wgpuBufferRelease(_readStagingBuffer);
+      }
+      _readStagingBuffer = grown;
       _readStagingBufferSize = cap;
     }
   }
-  WGPUBuffer stagingBuffer = _readStagingBuffer;
+  WGPUBuffer staging = _readStagingBuffer;
 
-  // Copy from our buffer to staging buffer - protected by mutex
-  const long long wpSubmit0 = waitProfEnabled() ? waitProfNowUs() : 0;
-  WGPUCommandEncoderDescriptor encoderDesc = {};
-  WGPUCommandEncoder encoder =
-      wgpuDeviceCreateCommandEncoder(device, &encoderDesc);
-  if (!encoder) {
-    LOG_ERROR("Failed to create command encoder");
-    wgpuBufferRelease(stagingBuffer);
-    throw std::runtime_error("Failed to create command encoder");
-  }
-
-  wgpuCommandEncoderCopyBufferToBuffer(encoder, localBuffer, byteOffset,
-                                       stagingBuffer, 0, readBytes);
-
-  WGPUCommandBufferDescriptor cmdBufferDesc = {};
-  WGPUCommandBuffer commands =
-      wgpuCommandEncoderFinish(encoder, &cmdBufferDesc);
-  if (!commands) {
-    LOG_ERROR("Failed to finish command encoder");
+  {
+    WaitScope wp(WP_RD_SUBMIT);
+    WGPUCommandEncoder encoder =
+        wgpuDeviceCreateCommandEncoder(device, nullptr);
+    if (!encoder) {
+      LOG_ERROR("Failed to create command encoder");
+      return false;
+    }
+    wgpuCommandEncoderCopyBufferToBuffer(encoder, source, windowOffset,
+                                         staging, 0, window);
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, nullptr);
     wgpuCommandEncoderRelease(encoder);
-    wgpuBufferRelease(stagingBuffer);
-    throw std::runtime_error("Failed to finish command encoder");
+    if (!commands) {
+      LOG_ERROR("Failed to finish command encoder");
+      return false;
+    }
+    wgpuQueueSubmit(refs.queue, 1, &commands);
+    wgpuCommandBufferRelease(commands);
   }
 
-  wgpuQueueSubmit(queue, 1, &commands);
-  if (waitProfEnabled())
-    waitProfNote(WP_RD_SUBMIT, waitProfNowUs() - wpSubmit0, 0);
-
-  // Map and read the staging buffer synchronously
-  struct ReadState {
-    bool completed = false;
-    WGPUMapAsyncStatus status = WGPUMapAsyncStatus_Success;
-    mgpu::mutex mutex;
-#ifndef __EMSCRIPTEN__
-    std::condition_variable cv;
-#endif
-  };
-
-  ReadState readState;
-
-  WGPUBufferMapCallbackInfo mapCallbackInfo = {};
-  mapCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
-  mapCallbackInfo.callback = [](WGPUMapAsyncStatus status,
-                                WGPUStringView message, void *userdata1,
-                                void *userdata2) {
-    ReadState *state = static_cast<ReadState *>(userdata1);
-    mgpu::lock_guard<mgpu::mutex> lock(state->mutex);
-    state->status = status;
-    state->completed = true;
-
-#ifndef __EMSCRIPTEN__
-    state->cv.notify_one();
-#endif
-  };
-  mapCallbackInfo.userdata1 = &readState;
-
-  // mapAsync wants a 4-byte multiple. readBytes always was one when the
-  // staging buffer was created to fit it exactly (a MapRead buffer must be a
-  // multiple of 4 too); now that the buffer can be larger than the request,
-  // round the MAPPED range up rather than let an odd raw-byte read start
-  // failing validation. Only readBytes are ever copied out.
-  size_t mapBytes = (readBytes + 3) & ~(size_t)3;
-  if (mapBytes > _readStagingBufferSize) mapBytes = _readStagingBufferSize;
-  auto future = wgpuBufferMapAsync(stagingBuffer, WGPUMapMode_Read, 0, mapBytes,
-                                   mapCallbackInfo);
-
-  WGPUInstance instance = mgpu.getInstance();
-
-  // Wait for the map operation
+  // Our own reference across the unlocked wait.
+  wgpuBufferAddRef(staging);
+  MapWait mapWait;
+  WGPUFuture future = wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, window,
+                                         mapWait.info());
+  // The wait needs nothing the mutex guards. Holding it stalled every
+  // dispatch, write and read, on every thread, for the whole GPU drain.
+  lock.unlock();
   {
     WaitScope wpMap(WP_RD_MAP);
-    WGPUFutureWaitInfo waitInfo = {};
-    waitInfo.future = future;
-#ifdef __EMSCRIPTEN__
-    // Await the map itself rather than polling it via setTimeout(0). The
-    // instance enables TimedWaitAny only on this Asyncify browser backend.
-    wgpuInstanceWaitAny(instance, 1, &waitInfo, UINT64_MAX);
-#else
-    wgpuInstanceWaitAny(instance, 1, &waitInfo, 0);
-#endif
-    if (!waitInfo.completed) {
-      // Hot-poll: Sleep(1) on Windows actually sleeps ~15ms under the default
-      // timer resolution which makes per-frame read-back dominate encoder
-      // throughput. Use ms=0 so platformSleep just calls
-      // wgpuInstanceProcessEvents + Sleep(0) (yield only). The GPU side
-      // typically completes within microseconds for small read-backs.
-      while (!readState.completed) {
-        platformSleep(0, instance);
-        ++wpMap.iters;
+    waitForMap(refs.instance, future, mapWait, wpMap);
+  }
+
+  bool ok = false;
+  {
+    WaitScope wp(WP_RD_COPY);
+    if (mapWait.ok()) {
+      const uint8_t *mapped = static_cast<const uint8_t *>(
+          wgpuBufferGetConstMappedRange(staging, 0, window));
+      if (mapped) {
+        std::memcpy(dst, mapped + head, byteSize);
+        ok = true;
+      } else {
+        LOG_ERROR("Failed to get mapped range");
       }
-    }
-  }
-
-  const long long wpCopy0 = waitProfEnabled() ? waitProfNowUs() : 0;
-  if (readState.status == WGPUMapAsyncStatus_Success) {
-    const void *mappedData =
-        wgpuBufferGetConstMappedRange(stagingBuffer, 0, mapBytes);
-    if (mappedData) {
-      std::memcpy(outputData, mappedData, readBytes);
-      LOG_INFO("Successfully read %zu bytes", readBytes);
+      wgpuBufferUnmap(staging);
     } else {
-      LOG_ERROR("Failed to get mapped range");
+      LOG_ERROR("Buffer mapping failed with status %d",
+                mapWait.status.load(std::memory_order_relaxed));
     }
-  } else {
-    LOG_ERROR("Buffer mapping failed with status %d", (int)readState.status);
   }
-  wgpuBufferUnmap(stagingBuffer);
-  if (waitProfEnabled()) waitProfNote(WP_RD_COPY, waitProfNowUs() - wpCopy0, 0);
+  wgpuBufferRelease(staging);
 
-  // Keep the staging buffer alive for reuse on the next readDirect call.
-  // It will be released in Buffer::release() when the buffer is destroyed.
-  wgpuCommandBufferRelease(commands);
-  wgpuCommandEncoderRelease(encoder);
-
-  // Release the GPU mutex before pumping events.  wgpuInstanceProcessEvents
-  // may deliver Dawn-internal callbacks (e.g. from prior buffer releases) that
-  // themselves need the GPU mutex; holding it here would deadlock.
-  lock.unlock();
-
-  // Pump Dawn's event loop so pending deferred deallocations and any callbacks
-  // chained after our map can run.
-  //
-  // This used to exist because the staging buffer was destroyed and recreated
-  // whenever the read length changed, so without a pump the orphans piled up a
-  // frame at a time. The staging buffer is persistent now, so that reason is
-  // gone; the pump is kept for the OTHER deferred work Dawn has queued, and it
-  // is cheap (measured at 1.5 us per read). It must stay OUTSIDE the lock: a
-  // callback delivered here may itself need the GPU mutex.
+  // Pump Dawn's event loop for the deferred work it has queued (cheap, about
+  // 1.5 us per read). Outside the lock: a callback delivered here may itself
+  // need the device mutex.
   {
     WaitScope wpEv(WP_RD_EVENTS);
-    wgpuInstanceProcessEvents(instance);
+    wgpuInstanceProcessEvents(refs.instance);
   }
-}
-template <typename T>
-void Buffer::readPacked(T *outputData, size_t elementCount, size_t offset) {
-  if (!outputData || elementCount == 0) {
-    return;
-  }
-
-  switch (dataType) {
-  case kInt8:
-  case kUInt8: {
-    // Read packed uint32 data
-    size_t packedElements = (elementCount + 3) / 4;
-    std::vector<uint32_t> packedData(packedElements);
-
-    readDirect(packedData.data(), packedElements, offset / 4);
-
-    // Unpack the data
-    for (size_t i = 0; i < elementCount; ++i) {
-      size_t packedIndex = i / 4;
-      size_t byteOffset = i % 4;
-      uint32_t packedValue = packedData[packedIndex];
-      uint8_t value =
-          static_cast<uint8_t>((packedValue >> (byteOffset * 8)) & 0xFF);
-      outputData[i] = static_cast<T>(value);
-    }
-    break;
-  }
-
-  case kInt16:
-  case kUInt16: {
-    // Read packed uint32 data
-    size_t packedElements = (elementCount + 1) / 2;
-    std::vector<uint32_t> packedData(packedElements);
-
-    readDirect(packedData.data(), packedElements, offset / 2);
-
-    // Unpack the data
-    for (size_t i = 0; i < elementCount; ++i) {
-      size_t packedIndex = i / 2;
-      size_t shortOffset = i % 2;
-      uint32_t packedValue = packedData[packedIndex];
-      uint16_t value =
-          static_cast<uint16_t>((packedValue >> (shortOffset * 16)) & 0xFFFF);
-      outputData[i] = static_cast<T>(value);
-    }
-    break;
-  }
-
-  case kInt64:
-  case kUInt64:
-  case kFloat64: {
-    // Read pairs of uint32 values
-    std::vector<uint32_t> packedData(elementCount * 2);
-    readDirect(packedData.data(), elementCount * 2, offset * 2);
-
-    // Unpack the data
-    for (size_t i = 0; i < elementCount; ++i) {
-      uint64_t value = static_cast<uint64_t>(packedData[i * 2]) |
-                       (static_cast<uint64_t>(packedData[i * 2 + 1]) << 32);
-
-      if (dataType == kFloat64) {
-        double doubleVal;
-        std::memcpy(&doubleVal, &value, sizeof(double));
-        outputData[i] = static_cast<T>(doubleVal);
-      } else {
-        outputData[i] = static_cast<T>(value);
-      }
-    }
-    break;
-  }
-
-  default:
-    // Fallback to direct read
-    readDirect(outputData, elementCount, offset);
-    break;
-  }
+  return ok;
 }
 
-template <typename T>
-void Buffer::readAsyncImpl(T *outputData, size_t elementCount, size_t offset,
-                           BufferDataType type,
-                           std::function<void()> callback) {
-  if (!outputData || elementCount == 0) {
-    if (callback)
-      callback();
-    return;
+// The batched twin of readRawNow: the staged copies ride the encoder the
+// batch is already building, ONE submit carries them with the pending
+// dispatches, and the ONE map wait runs without the device mutex.
+int MGPU::applyReadbackScope(ReadbackScope &scope) {
+  if (scope.reads.empty()) return 0;
+  const bool prof = readbackProfEnabled();
+  const size_t total = (size_t)scope.total;
+  ContextSnapshotRefs refs;
+  const long long tLock0 = prof ? mgpu_now_us() : 0;
+  mgpu::unique_lock<mgpu::mutex> lock(gpuOperationMutex);
+  if (prof) readbackStats.usLock += mgpu_now_us() - tLock0;
+  // Retained, because the wait runs unlocked and a teardown may drop the
+  // context's own references meanwhile.
+  uint64_t generation = 0;
+  if (!retainReadyContextSnapshot(&refs.device, &refs.queue, &refs.instance,
+                                  &generation)) {
+    LOG_ERROR("batched readback skipped: no ready device");
+    return -1;
   }
+  WGPUDevice device = refs.device;
+  // Checked out for the unlocked wait, so nothing else maps or drops it.
+  WGPUBuffer readback = readbackBuffer;
+  size_t capacity = readbackCapacity;
+  readbackBuffer = nullptr;
+  readbackCapacity = 0;
+  // Lock held: back to the member unless a teardown or a reserve replaced it
+  // meanwhile, in which case it is ours to drop.
+  auto checkIn = [&]() {
+    if (!readback) return;
+    if (!readbackBuffer && matchesReadyDevice(device, generation)) {
+      readbackBuffer = readback;
+      readbackCapacity = capacity;
+    } else {
+      wgpuBufferRelease(readback);
+    }
+    readback = nullptr;
+  };
 
-  mgpu.getWebGPUThread().enqueueAsync(
-      [this, outputData, elementCount, offset, type, callback]() {
-        try {
-          if (needsPacking(type)) {
-            readPacked(outputData, elementCount, offset);
-          } else {
-            readDirect(outputData, elementCount, offset);
-          }
-          if (callback)
-            callback();
-        } catch (...) {
-          if (callback)
-            callback();
+  if (capacity < total) {
+    // Growing orphans nothing (the buffer is only ever read within one scope),
+    // but the old allocation goes before the new one is created.
+    if (readback) {
+      wgpuBufferRelease(readback);
+      readback = nullptr;
+    }
+    size_t cap = kMinReadbackBytes;
+    while (cap < total && cap < ((size_t)1 << 31)) cap <<= 1;
+    if (cap < total) cap = total;
+    WGPUBufferDescriptor desc = {};
+    desc.size = (uint64_t)cap;
+    desc.usage = WGPUBufferUsage_CopyDst | WGPUBufferUsage_MapRead;
+    desc.mappedAtCreation = false;
+    readback = wgpuDeviceCreateBuffer(device, &desc);
+    if (!readback) {
+      LOG_ERROR("batched readback: failed to allocate %zu byte buffer", cap);
+      if (prof) readbackStats.fallbacks++;
+      // Correct but unbatched: exactly what the per-buffer path would have
+      // done, except that each read waits under the lock.
+      int filled = 0;
+      for (const ReadCopy &c : scope.copies) {
+        // Resolve straight into the destinations that map onto this copy.
+        for (const StagedRead &r : scope.reads) {
+          if (r.slotOffset < c.slotOffset ||
+              r.slotOffset + r.size > c.slotOffset + c.size)
+            continue;
+          if (readOneLocked(c.src, c.srcOffset + (r.slotOffset - c.slotOffset),
+                            r.dst, r.size))
+            ++filled;
         }
-      });
+      }
+      return filled ? filled : -1;
+    }
+    capacity = cap;
+    if (prof) readbackStats.grows++;
+  }
+
+  // ── ONE submit ───────────────────────────────────────────────────────────
+  // The copies go into the encoder the compute batch is ALREADY building, so
+  // the single flush below carries the pending dispatches AND every copy: the
+  // per-read `flushBatchLocked() + own encoder + own submit` disappears.
+  const long long tC = prof ? mgpu_now_us() : 0;
+  if (!batchEncoder) {
+    batchEncoder = wgpuDeviceCreateCommandEncoder(device, nullptr);
+    if (!batchEncoder) {
+      LOG_ERROR("batched readback: could not create command encoder");
+      checkIn();
+      return -1;
+    }
+  }
+  if (batchPass) {
+    wgpuComputePassEncoderEnd(batchPass);
+    wgpuComputePassEncoderRelease(batchPass);
+    batchPass = nullptr;
+  }
+  for (const ReadCopy &c : scope.copies) {
+    wgpuCommandEncoderCopyBufferToBuffer(batchEncoder, c.src, c.srcOffset,
+                                         readback, c.slotOffset, c.size);
+  }
+  if (prof) readbackStats.usCopy += mgpu_now_us() - tC;
+
+  const long long tS = prof ? mgpu_now_us() : 0;
+  flushBatchLocked();
+  if (prof) readbackStats.usSubmit += mgpu_now_us() - tS;
+
+  // ── ONE fence + ONE map ──────────────────────────────────────────────────
+  // The wait needs nothing the mutex guards. Holding it stalled every
+  // dispatch, write and read, on every thread, for the whole GPU drain.
+  MapWait mapWait;
+  WGPUFuture future = wgpuBufferMapAsync(readback, WGPUMapMode_Read, 0, total,
+                                         mapWait.info());
+  lock.unlock();
+  const long long tM = prof ? mgpu_now_us() : 0;
+  {
+    WaitScope wpMap(WP_RB_MAP);
+    waitForMap(refs.instance, future, mapWait, wpMap);
+  }
+  if (prof) readbackStats.usMap += mgpu_now_us() - tM;
+
+  int filled = -1;
+  const long long tO = prof ? mgpu_now_us() : 0;
+  if (mapWait.ok()) {
+    const uint8_t *base = static_cast<const uint8_t *>(
+        wgpuBufferGetConstMappedRange(readback, 0, total));
+    if (base) {
+      for (const StagedRead &r : scope.reads) {
+        std::memcpy(r.dst, base + r.slotOffset, (size_t)r.size);
+      }
+      filled = (int)scope.reads.size();
+    } else {
+      LOG_ERROR("batched readback: could not get mapped range");
+    }
+    wgpuBufferUnmap(readback);
+  } else {
+    LOG_ERROR("batched readback: map failed");
+  }
+  if (prof) readbackStats.usOut += mgpu_now_us() - tO;
+  lock.lock();
+  checkIn();
+  return filled;
 }
 
-template void Buffer::writeDirect<int8_t>(const int8_t *, size_t,
-                                          BufferDataType);
-template void Buffer::writeDirect<uint8_t>(const uint8_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writeDirect<int16_t>(const int16_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writeDirect<uint16_t>(const uint16_t *, size_t,
-                                            BufferDataType);
-template void Buffer::writeDirect<int32_t>(const int32_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writeDirect<uint32_t>(const uint32_t *, size_t,
-                                            BufferDataType);
-template void Buffer::writeDirect<int64_t>(const int64_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writeDirect<uint64_t>(const uint64_t *, size_t,
-                                            BufferDataType);
-template void Buffer::writeDirect<float>(const float *, size_t, BufferDataType);
-template void Buffer::writeDirect<double>(const double *, size_t,
-                                          BufferDataType);
+template <typename T>
+bool Buffer::readTyped(T *outputData, size_t elementCount, size_t offset,
+                       BufferDataType type) {
+  if (elementCount == 0) return true;
+  if (!outputData) return false;
+  // Lane = bytes per element on the device. On little-endian the packed
+  // lanes are the raw bytes, so a matching T reads straight into the caller.
+  size_t lane = sizeof(T);
+  bool convert = false;
+  if (needsPacking(type)) {
+    switch (dataType) {
+    case kInt8:
+    case kUInt8:
+      lane = 1;
+      convert = sizeof(T) != 1;
+      break;
+    case kInt16:
+    case kUInt16:
+      lane = 2;
+      convert = sizeof(T) != 2;
+      break;
+    case kInt64:
+    case kUInt64:
+    case kFloat64:
+      lane = 8;
+      convert = sizeof(T) != 8 ||
+                (dataType == kFloat64) != std::is_floating_point<T>::value;
+      break;
+    default:
+      break; // read raw, as it always was
+    }
+  }
+  const size_t limit = (std::numeric_limits<size_t>::max)() / lane;
+  if (offset > limit || elementCount > limit) {
+    LOG_ERROR("buffer read out of range: offset=%zu count=%zu", offset,
+              elementCount);
+    return false;
+  }
+  const size_t at = offset * lane;
+  const size_t bytes = elementCount * lane;
+  if (!convert) return readRaw(outputData, bytes, at);
 
-template void Buffer::writePacked<int8_t>(const int8_t *, size_t,
-                                          BufferDataType);
-template void Buffer::writePacked<uint8_t>(const uint8_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writePacked<int16_t>(const int16_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writePacked<uint16_t>(const uint16_t *, size_t,
-                                            BufferDataType);
-template void Buffer::writePacked<int64_t>(const int64_t *, size_t,
-                                           BufferDataType);
-template void Buffer::writePacked<uint64_t>(const uint64_t *, size_t,
-                                            BufferDataType);
-template void Buffer::writePacked<double>(const double *, size_t,
-                                          BufferDataType);
+  std::vector<uint8_t> raw;
+  try {
+    raw.resize(bytes);
+  } catch (...) {
+    LOG_ERROR("buffer read: out of memory");
+    return false;
+  }
+  if (!readRaw(raw.data(), bytes, at)) return false;
+  for (size_t i = 0; i < elementCount; ++i) {
+    const uint8_t *p = raw.data() + i * lane;
+    if (lane == 1) {
+      outputData[i] = static_cast<T>(p[0]);
+    } else if (lane == 2) {
+      uint16_t v;
+      std::memcpy(&v, p, sizeof(v));
+      outputData[i] = static_cast<T>(v);
+    } else if (dataType == kFloat64) {
+      double v;
+      std::memcpy(&v, p, sizeof(v));
+      outputData[i] = static_cast<T>(v);
+    } else {
+      uint64_t v;
+      std::memcpy(&v, p, sizeof(v));
+      outputData[i] = static_cast<T>(v);
+    }
+  }
+  return true;
+}
 
-template void Buffer::readDirect<int8_t>(int8_t *, size_t, size_t);
-template void Buffer::readDirect<uint8_t>(uint8_t *, size_t, size_t);
-template void Buffer::readDirect<int16_t>(int16_t *, size_t, size_t);
-template void Buffer::readDirect<uint16_t>(uint16_t *, size_t, size_t);
-template void Buffer::readDirect<int32_t>(int32_t *, size_t, size_t);
-template void Buffer::readDirect<uint32_t>(uint32_t *, size_t, size_t);
-template void Buffer::readDirect<int64_t>(int64_t *, size_t, size_t);
-template void Buffer::readDirect<uint64_t>(uint64_t *, size_t, size_t);
-template void Buffer::readDirect<float>(float *, size_t, size_t);
-template void Buffer::readDirect<double>(double *, size_t, size_t);
+template <typename T>
+void Buffer::readAsyncTyped(T *outputData, size_t elementCount, size_t offset,
+                            BufferDataType type,
+                            std::function<void(bool)> done) {
+  if (!outputData || elementCount == 0) {
+    if (done) done(outputData != nullptr);
+    return;
+  }
+  try {
+    mgpu.getWebGPUThread().enqueueAsync(
+        [this, outputData, elementCount, offset, type, done]() {
+          bool ok = false;
+          try {
+            ok = readTyped(outputData, elementCount, offset, type);
+          } catch (...) {
+            LOG_ERROR("buffer read failed with an exception");
+          }
+          if (done) done(ok);
+        });
+  } catch (...) {
+    // Never queued (the worker has exited): complete now rather than leave
+    // the caller waiting forever.
+    if (done) done(false);
+  }
+}
 
-template void Buffer::readPacked<int8_t>(int8_t *, size_t, size_t);
-template void Buffer::readPacked<uint8_t>(uint8_t *, size_t, size_t);
-template void Buffer::readPacked<int16_t>(int16_t *, size_t, size_t);
-template void Buffer::readPacked<uint16_t>(uint16_t *, size_t, size_t);
-template void Buffer::readPacked<int64_t>(int64_t *, size_t, size_t);
-template void Buffer::readPacked<uint64_t>(uint64_t *, size_t, size_t);
-template void Buffer::readPacked<double>(double *, size_t, size_t);
+void Buffer::readAsyncResult(void *outputData, size_t elementCount,
+                             size_t offset, BufferDataType type,
+                             std::function<void(bool)> done) {
+  switch (type) {
+  case kFloat32:
+    readAsyncTyped(static_cast<float *>(outputData), elementCount, offset, type,
+                   std::move(done));
+    return;
+  case kInt32:
+    readAsyncTyped(static_cast<int32_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kUInt32:
+    readAsyncTyped(static_cast<uint32_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kInt8:
+    readAsyncTyped(static_cast<int8_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kUInt8:
+    readAsyncTyped(static_cast<uint8_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kInt16:
+    readAsyncTyped(static_cast<int16_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kUInt16:
+    readAsyncTyped(static_cast<uint16_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kFloat64:
+    readAsyncTyped(static_cast<double *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kInt64:
+    readAsyncTyped(static_cast<int64_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  case kUInt64:
+    readAsyncTyped(static_cast<uint64_t *>(outputData), elementCount, offset,
+                   type, std::move(done));
+    return;
+  default:
+    LOG_ERROR("buffer read: unknown element type %d", (int)type);
+    if (done) done(false);
+    return;
+  }
+}
 
-template void Buffer::readAsyncImpl<int8_t>(int8_t *, size_t, size_t,
-                                            BufferDataType,
-                                            std::function<void()>);
-template void Buffer::readAsyncImpl<uint8_t>(uint8_t *, size_t, size_t,
-                                             BufferDataType,
-                                             std::function<void()>);
-template void Buffer::readAsyncImpl<int16_t>(int16_t *, size_t, size_t,
-                                             BufferDataType,
-                                             std::function<void()>);
-template void Buffer::readAsyncImpl<uint16_t>(uint16_t *, size_t, size_t,
-                                              BufferDataType,
-                                              std::function<void()>);
-template void Buffer::readAsyncImpl<int32_t>(int32_t *, size_t, size_t,
-                                             BufferDataType,
-                                             std::function<void()>);
-template void Buffer::readAsyncImpl<uint32_t>(uint32_t *, size_t, size_t,
-                                              BufferDataType,
-                                              std::function<void()>);
-template void Buffer::readAsyncImpl<int64_t>(int64_t *, size_t, size_t,
-                                             BufferDataType,
-                                             std::function<void()>);
-template void Buffer::readAsyncImpl<uint64_t>(uint64_t *, size_t, size_t,
-                                              BufferDataType,
-                                              std::function<void()>);
-template void Buffer::readAsyncImpl<float>(float *, size_t, size_t,
-                                           BufferDataType,
-                                           std::function<void()>);
-template void Buffer::readAsyncImpl<double>(double *, size_t, size_t,
-                                            BufferDataType,
-                                            std::function<void()>);
+bool Buffer::readResult(void *outputData, size_t elementCount, size_t offset,
+                        BufferDataType type) {
+  switch (type) {
+  case kFloat32:
+    return readTyped(static_cast<float *>(outputData), elementCount, offset,
+                     type);
+  case kInt32:
+    return readTyped(static_cast<int32_t *>(outputData), elementCount, offset,
+                     type);
+  case kUInt32:
+    return readTyped(static_cast<uint32_t *>(outputData), elementCount,
+                     offset, type);
+  case kInt8:
+    return readTyped(static_cast<int8_t *>(outputData), elementCount, offset,
+                     type);
+  case kUInt8:
+    return readTyped(static_cast<uint8_t *>(outputData), elementCount, offset,
+                     type);
+  case kInt16:
+    return readTyped(static_cast<int16_t *>(outputData), elementCount, offset,
+                     type);
+  case kUInt16:
+    return readTyped(static_cast<uint16_t *>(outputData), elementCount,
+                     offset, type);
+  case kFloat64:
+    return readTyped(static_cast<double *>(outputData), elementCount, offset,
+                     type);
+  case kInt64:
+    return readTyped(static_cast<int64_t *>(outputData), elementCount, offset,
+                     type);
+  case kUInt64:
+    return readTyped(static_cast<uint64_t *>(outputData), elementCount,
+                     offset, type);
+  default:
+    LOG_ERROR("buffer read: unknown element type %d", (int)type);
+    return false;
+  }
+}
+
+bool Buffer::tryWriteBytesAt(const void *inputData, size_t byteSize,
+                             size_t dstByteOffset) {
+  return writeRaw(inputData, byteSize, dstByteOffset, false);
+}
+
+bool Buffer::tryReadBytesAt(void *outputData, size_t byteSize,
+                            size_t srcByteOffset) {
+  return readRaw(outputData, byteSize, srcByteOffset);
+}
+
+namespace {
+
+// Bytes in [count] elements of [elementSize]; false when that overflows.
+bool elementBytes(size_t count, size_t elementSize, size_t *bytes) {
+  if (count > (std::numeric_limits<size_t>::max)() / elementSize) {
+    LOG_ERROR("buffer write out of range: count=%zu", count);
+    return false;
+  }
+  *bytes = count * elementSize;
+  return true;
+}
+
+} // namespace
+
+// Typed writes upload the elements' little-endian bytes at offset 0, the rest
+// of the last word zero-filled. The 8-, 16- and 64-bit lanes on the device are
+// exactly those bytes, so nothing is repacked or copied first.
+void Buffer::write(const float *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(float), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const int32_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(int32_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const uint32_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(uint32_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const int8_t *inputData, size_t elementCount) {
+  (void)writeRaw(inputData, elementCount, 0, true);
+}
+
+void Buffer::write(const uint8_t *inputData, size_t elementCount) {
+  (void)writeRaw(inputData, elementCount, 0, true);
+}
+
+void Buffer::write(const int16_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(int16_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const uint16_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(uint16_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const double *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(double), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const int64_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(int64_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::write(const uint64_t *inputData, size_t elementCount) {
+  size_t byteSize = 0;
+  if (elementBytes(elementCount, sizeof(uint64_t), &byteSize))
+    (void)writeRaw(inputData, byteSize, 0, true);
+}
+
+void Buffer::read(float *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kFloat32);
+}
+
+void Buffer::read(int32_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kInt32);
+}
+
+void Buffer::read(uint32_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kUInt32);
+}
+
+void Buffer::read(int8_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kInt8);
+}
+
+void Buffer::read(uint8_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kUInt8);
+}
+
+void Buffer::read(int16_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kInt16);
+}
+
+void Buffer::read(uint16_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kUInt16);
+}
+
+void Buffer::read(double *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kFloat64);
+}
+
+void Buffer::read(int64_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kInt64);
+}
+
+void Buffer::read(uint64_t *outputData, size_t elementCount, size_t offset) {
+  (void)readTyped(outputData, elementCount, offset, kUInt64);
+}
+
+namespace {
+
+// The callback-only readAsync forms complete the same way on success and
+// failure; readAsyncResult is the form that reports which.
+std::function<void(bool)> ignoreResult(std::function<void()> callback) {
+  return [callback = std::move(callback)](bool) {
+    if (callback) callback();
+  };
+}
+
+} // namespace
+
+void Buffer::readAsync(float *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kFloat32,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(int32_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kInt32,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(uint32_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kUInt32,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(int8_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kInt8,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(uint8_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kUInt8,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(int16_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kInt16,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(uint16_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kUInt16,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(double *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kFloat64,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(int64_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kInt64,
+                 ignoreResult(std::move(callback)));
+}
+
+void Buffer::readAsync(uint64_t *outputData, size_t elementCount, size_t offset,
+                       std::function<void()> callback) {
+  readAsyncTyped(outputData, elementCount, offset, kUInt64,
+                 ignoreResult(std::move(callback)));
+}
 
 } // namespace mgpu

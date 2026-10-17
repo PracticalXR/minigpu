@@ -116,6 +116,10 @@ final class GpuTexture {
     );
   }
 
+  /// Destroys the texture. Uploads, dispatches and render passes issued
+  /// before this call still run with it, and its GPU memory is freed once they
+  /// have, even while a render pipeline's cached bind group still names one of
+  /// its views. Later use throws [StateError].
   void destroy() {
     if (!_valid) {
       return;

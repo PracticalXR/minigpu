@@ -7,6 +7,12 @@
 #include "minigpu_resources.h"
 #include "minigpu_render.h"
 #include "minigpu_context_lifetime.h"
+#include "minigpu_capture_source.h"
+#include "minigpu_capture_setup.h"
+#include "minigpu_imported_frame.h"
+#include "minigpu_private_output.h"
+#include "minigpu_completion_ticket.h"
+#include "minigpu_private_resources.h"
 #ifdef __cplusplus
 #include "../include/buffer.h"
 #include "../include/compute_shader.h"
@@ -67,6 +73,11 @@ EXPORT void mgpuSetLogLevel(int level);
 /// Dart API (the Emscripten/web build) or the SDK version does not match.
 EXPORT int mgpuInitDartApi(void* initialize_api_dl_data);
 EXPORT void mgpuSetLogPort(int64_t port);
+/// Stop delivery to [port] only: clears the registration if it is still
+/// [port] and returns 1, else leaves a newer isolate's port in place and
+/// returns 0 (always 0 without the Dart API). An isolate that stops logging
+/// calls this instead of mgpuSetLogPort(0).
+EXPORT int32_t mgpuClearLogPortIf(int64_t port);
 /// Free a log message string returned via the log callback.
 /// The log callback passes a heap-allocated copy of each message so the
 /// pointer stays valid until the asynchronous Dart listener reads it.
@@ -114,6 +125,18 @@ EXPORT void mgpuInitializeContextAsyncToPort(int64_t port, int64_t token);
 EXPORT void mgpuDispatchAsyncToPort(MGPUComputeShader *shader, int groupsX,
                                     int groupsY, int groupsZ, int64_t port,
                                     int64_t token);
+/* Compiles the shader's pipeline for its current kernel and bindings without
+ * dispatching (a warm-up). Queued on the GPU worker in FIFO order with this
+ * shader's earlier calls; the same compile a first dispatch would do, with
+ * nothing recorded. Bind before building: the pipeline layout follows the
+ * binding kinds. ok=1 when the pipeline exists afterwards; ok=0 for a null
+ * shader, one refused like a dispatch (closed, being destroyed, exclusively
+ * held), no kernel, no bindings, or a compile/validation failure. The bind
+ * group is built too when the bindings allow; a problem there is reported by
+ * the dispatch that meets it, not here. */
+EXPORT void mgpuComputeShaderBuildPipelineAsyncToPort(MGPUComputeShader *shader,
+                                                      int64_t port,
+                                                      int64_t token);
 EXPORT void mgpuReadAsyncToPort(MGPUBuffer *buffer, void *outputData,
                                 size_t elementCount, size_t elementOffset,
                                 int elementType, int64_t port, int64_t token);
@@ -286,10 +309,19 @@ EXPORT int mgpuGetCurrentDeviceTextureLimits(uint64_t *maxDimension2D,
 EXPORT MGPUComputeShader *mgpuCreateComputeShader();
 EXPORT void mgpuDestroyComputeShader(MGPUComputeShader *shader);
 /* Trusted host cleanup after the input's actual GPU reads finish. Drops cached
- * bind-group/input refs on the GPU FIFO; shader/layout remain reusable. */
+ * bind-group/input refs on the GPU FIFO; shader/layout remain reusable.
+ * Returns MGPU_SHADER_BIND_BUSY for an exclusively held/closed shader. */
 EXPORT int mgpuReleaseTextureBinding(MGPUComputeShader *shader, int slot);
 EXPORT void mgpuLoadKernel(MGPUComputeShader *shader, const char *kernelString);
 EXPORT int mgpuHasKernel(MGPUComputeShader *shader);
+/* mgpuComputeShaderBuildPipelineAsyncToPort, waiting for the answer: 1 when a
+ * pipeline exists afterwards, 0 otherwise. Natively it blocks the caller until
+ * the GPU worker reaches the build (0 when called on that worker), so native
+ * Dart uses the port form. On the web an invalid WGSL module (any validation
+ * error) still reports 1, because the browser reports it asynchronously. */
+EXPORT int mgpuComputeShaderBuildPipeline(MGPUComputeShader *shader);
+/* NULL for a negative size, a size over the device's maxBufferSize, or a
+ * failed allocation. */
 EXPORT MGPUBuffer *mgpuCreateBuffer(int bufferSize, int dataType);
 EXPORT uint32_t mgpuBufferDescriptorVersion(void);
 EXPORT MGPUBuffer *mgpuCreateBufferWithUsage(int sizeBytes, uint32_t usage);
@@ -297,11 +329,10 @@ EXPORT void mgpuDestroyBuffer(MGPUBuffer *buffer);
 EXPORT void mgpuSetBuffer(MGPUComputeShader *shader, int tag,
                           MGPUBuffer *buffer);
 EXPORT uint32_t mgpuBufferBindingVersion(void);
+/* Binding result domain is documented in minigpu_resources.h. */
 EXPORT int mgpuSetBufferRange(MGPUComputeShader *shader, int slot,
                               MGPUBuffer *buffer, int kind, int offsetBytes,
                               int sizeBytes);
-EXPORT void mgpuCreateKernel(MGPUComputeShader *shader, int groupsX,
-                             int groupsY, int groupsZ);
 /* ── Multi-GPU context handles ─────────────────────────────────────────────
  * A context handle is an independent MGPU instance bound to its own adapter
  * (own device, queue, WebGPU thread).  Buffers and shaders created FROM a
@@ -339,13 +370,16 @@ EXPORT void mgpuContextWaitForSubmittedWorkAsyncToPort(
  * joining the WebGPU worker from itself or blocking the caller/UI thread. */
 EXPORT void mgpuDestroyContextHandle(MGPUContextHandle *handle);
 /* Name of the adapter this context selected (empty until initialized).
- * Returns the full name length; writes up to cap-1 chars + NUL. */
+ * Returns the full name length; writes up to cap-1 chars + NUL. A destroyed
+ * or unknown handle returns 0 and writes nothing. */
 EXPORT int mgpuContextGetAdapterName(MGPUContextHandle *handle, char *out,
                                      int cap);
 /* Same query for an independently owned context. */
 EXPORT int mgpuContextGetCurrentDeviceBufferLimits(
     MGPUContextHandle *handle, uint64_t *maxBufferSize,
     uint64_t *maxStorageBufferBindingSize, uint64_t *deviceGeneration);
+/* Creation on a destroyed or unknown handle returns NULL, as a failed one
+ * does. */
 EXPORT MGPUBuffer *mgpuContextCreateBuffer(MGPUContextHandle *handle,
                                            int bufferSize, int dataType);
 EXPORT MGPUBuffer *mgpuContextCreateBufferWithUsage(
@@ -421,6 +455,14 @@ EXPORT void mgpuReadSyncFloat32(MGPUBuffer *buffer, float *outputData,
 EXPORT void mgpuReadSyncFloat64(MGPUBuffer *buffer, double *outputData,
                                       size_t elementCount,
                                       size_t elementOffset);
+/* A synchronous read that reports whether it landed: 1 when elementCount
+ * elements of elementType (an MGPUElementType) from element elementOffset were
+ * copied to outputData, 0 when outputData holds nothing the caller asked for
+ * (null handle, unknown type, bad range, no device, failed map). The typed
+ * mgpuReadSync* forms above only log such a failure. */
+EXPORT int mgpuReadSyncChecked(MGPUBuffer *buffer, void *outputData,
+                               size_t elementCount, size_t elementOffset,
+                               int elementType);
 // Signed Integer Types
 EXPORT void mgpuWriteInt8(MGPUBuffer *buffer, const int8_t *inputData,
                                   size_t byteSize);
@@ -440,8 +482,13 @@ EXPORT void mgpuWriteUint32(MGPUBuffer *buffer,
 EXPORT void mgpuWriteUint64(MGPUBuffer *buffer,
                                     const uint64_t *inputData, size_t byteSize);
 // Partial RAW write at a byte offset (dirty-region upload): copies byteSize
-// bytes into the buffer at dstByteOffset. Both must be 4-byte aligned and stay
-// within the buffer. Bypasses per-type packing (caller supplies final bytes).
+// bytes into the buffer at dstByteOffset; the range must stay within the
+// buffer. An unaligned range needs a CopySrc buffer (its edge words are read
+// back first, which waits for the GPU); otherwise it is logged and skipped.
+// Bypasses per-type packing (caller supplies final bytes). While minigpu's
+// WebGPU thread has work queued, the write queues behind it on a copy of the
+// bytes; once a context holds 64 MiB of such copies, the call first waits for
+// earlier ones to run (also true of the mgpuWrite* typed writes).
 EXPORT void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
                               size_t byteSize, size_t dstByteOffset);
 
@@ -454,16 +501,18 @@ EXPORT void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
  * a producer/consumer stall rather than as bandwidth.
  *
  * WHAT. Ranges staged between Begin and End are copied into a HOST arena
- * (no lock, no GPU call). `mgpuEndUploads` then, once and asynchronously on
- * minigpu's WebGPU thread, issues ONE `wgpuQueueWriteBuffer` into a
+ * (no lock, no GPU call). `mgpuEndUploads` then, once,
+ * issues ONE `wgpuQueueWriteBuffer` into a
  * PERSISTENT staging buffer and records the ranges as `copyBufferToBuffer`
  * commands into the command encoder the batch is already building — no
  * submit, no batch flush, no per-range mutex.
  *
- * ORDERING. Identical to `mgpuWriteBufferAt`: `mgpuEndUploads` runs
- * synchronously on the calling thread under the same device mutex, so
- * commands already recorded into the batch execute before the copies and a
- * dispatch that has not been enqueued yet cannot overtake them. What the
+ * ORDERING. Call order, as for `mgpuWriteBufferAt`: while minigpu's WebGPU
+ * thread has work queued (dispatches, render passes), `mgpuEndUploads` queues
+ * the emission behind it; otherwise it emits on the calling thread under the
+ * same device mutex. Either way commands already recorded into the batch
+ * execute before the copies and a dispatch enqueued after End cannot overtake
+ * them. What the
  * batched path removes is the SUBMIT, not the ordering: a
  * `copyBufferToBuffer` recorded after the pending dispatches is ordered by
  * the encoder, whereas a queue write is ordered by submission and therefore
@@ -486,14 +535,15 @@ EXPORT void mgpuWriteBufferAt(MGPUBuffer *buffer, const void *inputData,
  * depth (>=1), or 0 if the context is unavailable. */
 EXPORT int mgpuBeginUploads(void);
 /* Stages one range. Returns 1 = batched, 0 = performed inline (fallback),
- * -1 = bad arguments. */
+ * -1 = bad arguments or the inline write failed. */
 EXPORT int mgpuStageWrite(MGPUBuffer *buffer, size_t dstByteOffset,
                           const void *inputData, size_t byteSize);
 /* Hints the total byte size of the scope so the host arena does not grow
  * mid-frame. Optional. */
 EXPORT void mgpuStageReserve(size_t byteSize);
 /* Closes one nesting level; at depth 0 emits the batch. Returns the number of
- * copy commands emitted (adjacent ranges coalesce). */
+ * copy commands emitted (adjacent ranges coalesce), or -1 when the emission
+ * failed. */
 EXPORT int mgpuEndUploads(void);
 /* 1 when this build has the batched staging path. */
 EXPORT int mgpuUploadsSupported(void);
@@ -507,7 +557,8 @@ EXPORT int mgpuUploadsSupported(void);
  * Returns 1 on success, 0 if [out] is NULL or too small. */
 EXPORT int mgpuUploadStats(long long *out, int n);
 /* Context-handle variants (multi-GPU). `mgpuStageWrite` needs no variant: it
- * routes through the buffer's own context. */
+ * routes through the buffer's own context. A destroyed or unknown handle
+ * returns 0. */
 EXPORT int mgpuContextBeginUploads(MGPUContextHandle *handle);
 EXPORT int mgpuContextEndUploads(MGPUContextHandle *handle);
 
@@ -517,7 +568,7 @@ EXPORT int mgpuContextEndUploads(MGPUContextHandle *handle);
  * buffer, and each call takes the device mutex, flushes the pending compute
  * batch with its OWN `wgpuQueueSubmit`, creates an encoder, maps its own
  * staging buffer and blocks for GPU completion. A frame that reads N results
- * pays N of each. MEASURED (gsplats420 resident spike, 4K): eight reads
+ * pays N of each. MEASURED (a resident 4K read spike): eight reads
  * totalling 2.72 MB cost 5.85-6.10 ms; with EVERY DISPATCH SKIPPED the same
  * eight reads still cost 2.60 ms -- 1.05 GB/s on an RTX 4090, i.e. the
  * transfer is not the cost. Collapsing the eight calls to two saved 1.18 ms
@@ -545,25 +596,26 @@ EXPORT int mgpuContextEndUploads(MGPUContextHandle *handle);
  * staged read observes its source as of END: do not open a scope across a
  * dispatch that overwrites something already staged.
  *
- * ORDERING / THREADING. `mgpuEndReadbacks` runs INLINE on the calling thread
- * under the same device mutex `mgpuReadSync*` takes, so ordering versus
- * dispatches, inline reads and inline writes is exactly what the per-buffer
- * path already had. (Emitting on minigpu's WebGPU thread would be a race:
- * the inline read/write entry points do not join that FIFO.)
+ * ORDERING / THREADING. Call order, as for `mgpuReadSync*`: while minigpu's
+ * WebGPU thread has work queued, `mgpuEndReadbacks` resolves behind it;
+ * otherwise on the calling thread. Either way it returns once every
+ * destination is filled, and the GPU wait runs without the device mutex.
  *
  * FALLBACK. With no scope open -- or for a range whose offset/size is not
  * 4-byte aligned -- `mgpuStageRead` performs the ordinary inline read before
  * returning, so a caller can route every read through it unconditionally. */
-/* Opens/re-enters a readback scope on the default context. Returns depth. */
+/* Opens/re-enters a readback scope on the default context. Returns depth, or 0
+ * when the scope could not be opened. */
 EXPORT int mgpuBeginReadbacks(void);
 /* Stages one raw byte range. Returns 1 = batched (destination filled at End),
- * 0 = performed inline (destination already filled), -1 = bad arguments. */
+ * 0 = performed inline (destination already filled), -1 = bad arguments or
+ * the inline read failed. */
 EXPORT int mgpuStageRead(MGPUBuffer *buffer, size_t srcByteOffset, void *dst,
                          size_t byteSize);
 /* Optional: pre-grows the persistent readback allocation. */
 EXPORT void mgpuReadbackReserve(size_t byteSize);
 /* Closes one nesting level; at depth 0 resolves every staged read. Returns the
- * number of reads filled. */
+ * number of reads filled, or -1 when none were (no device, failed map). */
 EXPORT int mgpuEndReadbacks(void);
 /* 1 when this build has the batched readback path. */
 EXPORT int mgpuReadbacksSupported(void);
@@ -579,7 +631,8 @@ EXPORT int mgpuReadbacksSupported(void);
  * Returns 1 on success, 0 if [out] is NULL or too small. */
 EXPORT int mgpuReadbackStats(long long *out, int n);
 /* Context-handle variants (multi-GPU). `mgpuStageRead` needs no variant: it
- * routes through the buffer's own context. */
+ * routes through the buffer's own context. A destroyed or unknown handle
+ * returns 0. */
 EXPORT int mgpuContextBeginReadbacks(MGPUContextHandle *handle);
 EXPORT int mgpuContextEndReadbacks(MGPUContextHandle *handle);
 // Floating Point Number Types

@@ -17,10 +17,23 @@ list(APPEND PLUGIN_SOURCES
   "minigpu_view_plugin_impl.h"
   "d3d11_texture_handler.cpp"
   "d3d11_texture_handler.h"
+  "private_preview_owner.cpp"
+  "private_preview_owner.h"
+  "private_preview_dispatcher.cpp"
+  "private_preview_dispatcher.h"
+  "private_output_api.h"
+  "registrar_association.cpp"
+  "registrar_association.h"
+  "private_owner_close.cpp"
+  "private_owner_close.h"
 )
 
 add_library(${PLUGIN_NAME} SHARED
   "include/minigpu_view/minigpu_view_plugin.h"
+  "include/minigpu_view/minigpu_view_private_preview.h"
+  "include/minigpu_view/minigpu_view_private_dispatch.h"
+  "include/minigpu_view/minigpu_view_registrar_association.h"
+  "include/minigpu_view/minigpu_view_private_owner_close.h"
   ${PLUGIN_SOURCES}
 )
 

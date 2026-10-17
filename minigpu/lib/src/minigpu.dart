@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:minigpu/src/buffer.dart';
 import 'package:minigpu/src/compute_shader.dart';
@@ -175,7 +176,18 @@ final class Minigpu {
   /// Trusted lifetime ownership for this wrapper, including external readers.
   GpuDeviceCoordinator get deviceCoordinator =>
       _coordinator ??= GpuDeviceCoordinator._(this);
-  bool isInitialized = false;
+  bool _isInitialized = false;
+
+  /// True from a completed [init] until [destroy] has released the context.
+  bool get isInitialized => _isInitialized;
+
+  /// Kept for source compatibility only: [init] and [destroy] own this state,
+  /// and writing it detaches the wrapper from the real context.
+  @Deprecated('Lifecycle state is owned by init() and destroy()')
+  set isInitialized(bool value) {
+    _isInitialized = value;
+  }
+
   int _deviceEpoch = 0;
 
   /// Increments after each successful device initialization. Shader warm
@@ -285,6 +297,17 @@ final class Minigpu {
   }
   Future<void>? _initializing;
   Future<void>? _retiring;
+
+  /// The [destroy] future whose teardown reached the context release. Its
+  /// failure (a child that would not destroy, a failed in-flight init or
+  /// release) then belongs to the [destroy] callers alone: a backend still
+  /// holding a context it could not release refuses the next init itself. A
+  /// teardown stopped before the release (owners quarantined) blocks [init].
+  Future<void>? _teardownReachedRelease;
+
+  /// Whether that release succeeded: device recovery may only wait for the
+  /// final context receipt of a context that was actually returned.
+  bool _teardownReleased = false;
   Future<void>? _lostWorkRetirement;
   Future<void>? _contextRetirement;
   bool _closing = false;
@@ -296,7 +319,6 @@ final class Minigpu {
   // in tests to catch per-frame allocation leaks without needing DXGI/VRAM
   // measurement (which only detects leaks after the D3D12 pool grows past its
   // high-water mark).
-  int _liveShaderCount = 0;
   int _bufferCreateCount = 0, _bufferRetireCount = 0;
   int _textureCreateCount = 0, _textureRetireCount = 0;
   int _textureViewCreateCount = 0, _textureViewRetireCount = 0;
@@ -316,8 +338,19 @@ final class Minigpu {
   // Dawn/D3D12 silently fails dispatch when too many compute pipelines are
   // active simultaneously. Destroying old shaders between tests (not during
   // active GPU work) is safe and frees D3D12 resources.
-  final List<ComputeShader> _liveShaders = [];
-  final List<GpuRenderPipeline> _liveRenderPipelines = [];
+  // Held weakly, like buffers: a dropped shader or pipeline is collected and
+  // its finalizer retires it (the token holds only the platform object).
+  final Map<WeakReference<ComputeShader>, GpuResourceRetirement>
+  _shaderRegistry = {};
+  final Map<WeakReference<GpuRenderPipeline>, GpuResourceRetirement>
+  _renderPipelineRegistry = {};
+
+  // Imported frames and shared output textures are not counted, but they
+  // retire with the context, so none outlives the device it was made on.
+  final Map<WeakReference<VideoTexture>, GpuResourceRetirement>
+  _liveVideoTextures = {};
+  final Map<WeakReference<SharedOutputTexture>, GpuResourceRetirement>
+  _liveSharedOutputTextures = {};
 
   /// Number of GPU buffers currently alive (created but not yet destroyed).
   ///
@@ -338,10 +371,10 @@ final class Minigpu {
   bool ownsBuffer(Buffer buffer) =>
       isInitialized &&
       buffer.isValid &&
-      _liveBuffers.keys.any((reference) => identical(reference.target, buffer));
+      _bufferInfo[buffer]?.epoch == _deviceEpoch;
 
   /// Number of [ComputeShader]s currently alive (created but not yet destroyed).
-  int get liveShaderCount => _liveShaderCount;
+  int get liveShaderCount => _shaderRegistry.length;
 
   /// Resource lifecycle counters for residency diagnostics and focused tests.
   GpuResourceAllocationSnapshot get resourceAllocationSnapshot =>
@@ -360,10 +393,10 @@ final class Minigpu {
         samplersLive: _liveSamplers.length,
         computeShadersCreated: _shaderCreateCount,
         computeShadersRetired: _shaderRetireCount,
-        computeShadersLive: _liveShaderCount,
+        computeShadersLive: _shaderRegistry.length,
         renderPipelinesCreated: _renderPipelineCreateCount,
         renderPipelinesRetired: _renderPipelineRetireCount,
-        renderPipelinesLive: _liveRenderPipelines.length,
+        renderPipelinesLive: _renderPipelineRegistry.length,
       );
 
   /// Initializes the minigpu context.
@@ -386,7 +419,14 @@ final class Minigpu {
     }
     final retiring = _retiring;
     if (retiring != null) {
-      await retiring;
+      try {
+        await retiring;
+      } catch (_) {
+        // A teardown that reached the release leaves nothing here to fence:
+        // its error went to the destroy() callers, and a backend still holding
+        // the context refuses the init itself. A quarantined one blocks.
+        if (!identical(_teardownReachedRelease, retiring)) rethrow;
+      }
       if (identical(_retiring, retiring)) _retiring = null;
     }
     if (isInitialized) return Future.value();
@@ -409,7 +449,7 @@ final class Minigpu {
         await _platform.initializeContextForReplacement(recoveryTarget);
       }
       if (!_closing) {
-        isInitialized = true;
+        _isInitialized = true;
         _deviceEpoch++;
         _lostWorkRetirement = null;
         _contextRetirement = null;
@@ -436,10 +476,18 @@ final class Minigpu {
   /// [ComputeShader] binds it for an instant when a slot's previous buffer
   /// has been destroyed, so the native layer — which compares raw handles —
   /// sees a change even when the new buffer was handed the destroyed one's
-  /// handle. Created on first need; counted as live until [destroy].
+  /// handle. Created on first need, often mid-frame, so it is kept out of
+  /// [liveBufferCount], the allocation counters and [ownsBuffer]; [destroy]
+  /// releases it.
   Buffer? _rebindSentinel;
-  Buffer get rebindSentinel =>
-      _rebindSentinel ??= createBuffer(16, BufferDataType.uint32);
+  Buffer get rebindSentinel {
+    final existing = _rebindSentinel;
+    if (existing != null) return existing;
+    _checkCanCreate();
+    return _rebindSentinel = Buffer(
+      _platform.createBuffer(16, BufferDataType.uint32),
+    );
+  }
 
   /// Destroys the minigpu context and all owned buffer and shader wrappers.
   Future<void> destroy() {
@@ -495,27 +543,17 @@ final class Minigpu {
       }
     }
 
-    final shaders = List<ComputeShader>.from(_liveShaders);
-    final copyShader = _copyShader;
-    _copyShader = null;
-    if (copyShader != null && !shaders.contains(copyShader)) {
-      shaders.add(copyShader);
-    }
-    for (final shader in shaders) {
-      try {
-        shader.destroy();
-      } catch (error, stackTrace) {
-        recordFailure(error, stackTrace);
-      }
-    }
-
-    for (final pipeline in List<GpuRenderPipeline>.from(_liveRenderPipelines)) {
-      try {
-        pipeline.destroy();
-      } catch (error, stackTrace) {
-        recordFailure(error, stackTrace);
-      }
-    }
+    _copyShader = null; // registered like any other shader, retired below
+    _retireResources(
+      _shaderRegistry,
+      (shader) => shader.destroy(),
+      recordFailure,
+    );
+    _retireResources(
+      _renderPipelineRegistry,
+      (pipeline) => pipeline.destroy(),
+      recordFailure,
+    );
 
     _retireResources(
       _liveTextureViews,
@@ -532,6 +570,16 @@ final class Minigpu {
       (sampler) => sampler.destroy(),
       recordFailure,
     );
+    _retireResources(
+      _liveVideoTextures,
+      (texture) => texture.destroy(),
+      recordFailure,
+    );
+    _retireResources(
+      _liveSharedOutputTextures,
+      (texture) => texture.destroy(),
+      recordFailure,
+    );
 
     final sentinel = _rebindSentinel;
     _rebindSentinel = null;
@@ -543,14 +591,28 @@ final class Minigpu {
         recordFailure(error, stackTrace);
       }
     }
+    // A copy still in flight sees its params invalid and does not return it.
+    for (final params in _copyParams) {
+      try {
+        params.destroy();
+      } catch (error, stackTrace) {
+        recordFailure(error, stackTrace);
+      }
+    }
+    _copyParams.clear();
+    _copyParamsFree.clear();
 
+    var released = false;
     try {
       await _platform.destroyContext();
+      released = true;
     } catch (error, stackTrace) {
       recordFailure(error, stackTrace);
     } finally {
-      isInitialized = false;
+      _isInitialized = false;
       _closing = false;
+      _teardownReachedRelease = completer.future;
+      _teardownReleased = released;
     }
 
     if (failure != null) {
@@ -567,12 +629,14 @@ final class Minigpu {
   /// Pass `null` to revert to the default (native stderr) output.
   ///
   /// [level] controls minimum verbosity (-1=none 0=debug 1=info 2=warn 3=error).
+  /// It defaults to warn, the native default, so installing or clearing a
+  /// callback does not turn info lines on.
   ///
   /// This is a static method — there is one native log channel regardless of
   /// how many [Minigpu] instances exist.
   static void setLogCallback(
     void Function(int level, String message)? callback, {
-    int level = 1,
+    int level = 2,
   }) {
     MinigpuPlatform.instance.setLogCallback(callback, level: level);
   }
@@ -873,14 +937,17 @@ final class Minigpu {
   static List<GpuAdapterInfo> listAdapters() =>
       MinigpuPlatform.instance.listAdapters();
 
-  /// Synchronous variant of [destroy] intended for use in Flutter hot-restart
-  /// teardown hooks where `await` is not available (e.g. inside
-  /// [WidgetsBindingObserver.reassemble]).
+  /// Synchronous variant of [destroy] for teardown paths that cannot `await`.
   ///
   /// Begins the same teardown as [destroy] without waiting for completion.
   ///
   /// A following [init] waits for the pending teardown. Await [destroy] when
   /// the caller needs its completion or cleanup error.
+  ///
+  /// Not a hot-reload hook: [State.reassemble] runs on hot RELOAD, where the
+  /// app's GPU objects survive and nothing re-inits the context, so calling
+  /// this there leaves every later dispatch failing until a restart. A hot
+  /// RESTART never runs `reassemble`.
   void destroySync() {
     if (!isInitialized && _initializing == null && _retiring == null &&
         _recovery?.pending != true && _recovery?.snapshot.canRetry != true) return;
@@ -891,9 +958,13 @@ final class Minigpu {
   ComputeShader createComputeShader() {
     _checkCanCreate();
     final platformShader = _platform.createComputeShader();
-    final shader = CachedComputeShader(platformShader, this);
-    _liveShaders.add(shader);
-    _liveShaderCount++;
+    late final WeakReference<ComputeShader> registration;
+    final retirement = GpuResourceRetirement(platformShader.destroy, () {
+      if (_shaderRegistry.remove(registration) != null) _shaderRetireCount++;
+    });
+    final shader = CachedComputeShader(platformShader, this, retirement);
+    registration = WeakReference(shader);
+    _shaderRegistry[registration] = retirement;
     _shaderCreateCount++;
     return shader;
   }
@@ -915,17 +986,21 @@ final class Minigpu {
   ) async {
     _checkCanCreate();
     descriptor.validate();
-    late final GpuRenderPipeline pipeline;
-    pipeline = GpuRenderPipeline(
-      _platform.createRenderPipeline(descriptor),
+    final platformPipeline = _platform.createRenderPipeline(descriptor);
+    late final WeakReference<GpuRenderPipeline> registration;
+    final retirement = GpuResourceRetirement(platformPipeline.destroy, () {
+      if (_renderPipelineRegistry.remove(registration) != null) {
+        _renderPipelineRetireCount++;
+      }
+    });
+    final pipeline = GpuRenderPipeline(
+      platformPipeline,
       descriptor,
-      () {
-        if (_liveRenderPipelines.remove(pipeline)) {
-          _renderPipelineRetireCount++;
-        }
-      },
+      null,
+      retirement,
     );
-    _liveRenderPipelines.add(pipeline);
+    registration = WeakReference(pipeline);
+    _renderPipelineRegistry[registration] = retirement;
     _renderPipelineCreateCount++;
     try {
       await pipeline.prepare();
@@ -937,14 +1012,11 @@ final class Minigpu {
     }
   }
 
-  /// Called by [ComputeShader.destroy] to decrement [liveShaderCount].
+  /// Called by [ComputeShader.destroy]. [liveShaderCount] already dropped when
+  /// the shader's retirement ran; this forgets the cached copy shader.
   // Accessed from compute_shader.dart (same package — library-private is fine).
   // ignore: use_setters_to_change_properties
   void onShaderDestroyed(ComputeShader shader) {
-    if (_liveShaders.remove(shader) && _liveShaderCount > 0) {
-      _liveShaderCount--;
-      _shaderRetireCount++;
-    }
     if (identical(shader, _copyShader)) _copyShader = null;
   }
 
@@ -954,12 +1026,7 @@ final class Minigpu {
   /// resources accumulated by previous tests. Safe to call when no GPU work
   /// is pending.
   void destroyAllTrackedShaders() {
-    final shaders = List<ComputeShader>.from(_liveShaders);
-    for (final shader in shaders) {
-      try {
-        shader.destroy();
-      } catch (_) {}
-    }
+    _retireResources(_shaderRegistry, (shader) => shader.destroy(), (_, _) {});
   }
 
   /// Creates a buffer.
@@ -967,7 +1034,12 @@ final class Minigpu {
     _checkCanCreate();
 
     final platformBuffer = _platform.createBuffer(bufferSize, dataType);
-    return _registerBuffer(platformBuffer);
+    return _registerBuffer(
+      platformBuffer,
+      null,
+      bufferSize,
+      dataType.bytesPerElement,
+    );
   }
 
   Buffer createBufferFromDescriptor(BufferDescriptor descriptor) {
@@ -976,12 +1048,17 @@ final class Minigpu {
     return _registerBuffer(
       _platform.createBufferFromDescriptor(descriptor),
       descriptor,
+      descriptor.sizeBytes,
     );
   }
 
+  /// [sizeBytes] is null when the creator cannot know it; [elementBytes] is
+  /// the element size [copyBuffer] counts in (4 for untyped buffers).
   Buffer _registerBuffer(
     PlatformBuffer platformBuffer, [
     BufferDescriptor? descriptor,
+    int? sizeBytes,
+    int elementBytes = 4,
   ]) {
     late final WeakReference<Buffer> registration;
     final retirement = GpuResourceRetirement(platformBuffer.destroy, () {
@@ -990,9 +1067,14 @@ final class Minigpu {
     final buffer = Buffer(platformBuffer, null, descriptor, retirement);
     registration = WeakReference(buffer);
     _liveBuffers[registration] = retirement;
+    _bufferInfo[buffer] = _BufferInfo(_deviceEpoch, sizeBytes, elementBytes);
     _bufferCreateCount++;
     return buffer;
   }
+
+  /// O(1) provenance for [ownsBuffer] and sizes for [copyBuffer], like
+  /// [_textureOwnership] for textures.
+  final _bufferInfo = Expando<_BufferInfo>();
 
   GpuTexture _registerTexture(
     PlatformTexture platformTexture,
@@ -1115,7 +1197,26 @@ final class Minigpu {
     _checkCanCreate();
     final platformTex = _platform.importVideoFrame(buf);
     if (platformTex == null) return null;
-    return VideoTexture(platformTex, this);
+    late final WeakReference<VideoTexture> registration;
+    final retirement = GpuResourceRetirement(platformTex.destroy, () {
+      _liveVideoTextures.remove(registration);
+    });
+    // toRGBA() buffers register like createBuffer's, so they are counted,
+    // owned and retired with this context too. An async conversion can finish
+    // after this device retired, and then its buffer belongs to no context.
+    final epoch = _deviceEpoch;
+    Buffer adopt(PlatformBuffer platformBuffer) {
+      if (_deviceEpoch != epoch || !isInitialized || _closing ||
+          _deviceInvalidated) {
+        platformBuffer.destroy();
+        throw StateError('toRGBA() finished on a retired GPU device');
+      }
+      return _registerBuffer(platformBuffer);
+    }
+    final texture = VideoTexture(platformTex, this, retirement, adopt);
+    registration = WeakReference(texture);
+    _liveVideoTextures[registration] = retirement;
+    return texture;
   }
 
   /// Create a cross-API shared output RGBA8 texture suitable for zero-copy
@@ -1125,7 +1226,14 @@ final class Minigpu {
     _checkCanCreate();
     final platformTex = _platform.createSharedOutputTexture(width, height);
     if (platformTex == null) return null;
-    return SharedOutputTexture(platformTex, this);
+    late final WeakReference<SharedOutputTexture> registration;
+    final retirement = GpuResourceRetirement(platformTex.destroy, () {
+      _liveSharedOutputTextures.remove(registration);
+    });
+    final texture = SharedOutputTexture(platformTex, this, retirement);
+    registration = WeakReference(texture);
+    _liveSharedOutputTextures[registration] = retirement;
+    return texture;
   }
 
   /// Returns an `ID3D11Device*` (as an integer address) created on the same
@@ -1141,27 +1249,48 @@ final class Minigpu {
   // Buffer copy
   // -------------------------------------------------------------------------
 
-  /// WGSL kernel: copies [elementCount] u32 words from src to dst.
+  /// WGSL kernel: copies `params[0]` whole u32 words, then the low
+  /// `params[1]` bytes of the next word, from src to dst. `params[2]` is the
+  /// threads per dispatch row, so a copy past 65535 groups folds into y.
   static const _kCopyWgsl = r'''
 @group(0) @binding(0) var<storage, read_write> src : array<u32>;
 @group(0) @binding(1) var<storage, read_write> dst : array<u32>;
+@group(0) @binding(2) var<storage, read_write> params : array<u32>;
 
 @compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-  let n = arrayLength(&src);
-  if (gid.x >= n) { return; }
-  dst[gid.x] = src[gid.x];
+  let i = gid.y * params[2] + gid.x;
+  if (i >= arrayLength(&src) || i >= arrayLength(&dst)) { return; }
+  if (i < params[0]) {
+    dst[i] = src[i];
+  } else if (i == params[0] && params[1] != 0u) {
+    let mask = (1u << (params[1] * 8u)) - 1u;
+    dst[i] = (dst[i] & ~mask) | (src[i] & mask);
+  }
 }
 ''';
 
   /// Lazily-created shader for [copyBuffer].
   ComputeShader? _copyShader;
 
-  /// GPU-side buffer copy — copies [elementCount] elements from [src] to [dst]
-  /// entirely on the GPU using a WGSL compute shader (no CPU round-trip).
+  /// [copyBuffer]'s params buffers. A dispatch reads its params when it runs,
+  /// after the call returned, and a buffer write is not ordered behind queued
+  /// dispatches, so each copy in flight owns one until its dispatch completed.
+  /// Kept out of [liveBufferCount] like [rebindSentinel]; [destroy] frees them.
+  final _copyParams = <Buffer>[];
+  final _copyParamsFree = <Buffer>[];
+
+  /// GPU-side buffer copy — copies the first [elementCount] elements of [src]
+  /// to the start of [dst] entirely on the GPU using a WGSL compute shader
+  /// (no CPU round-trip).
   ///
-  /// Both buffers must have been created on this [Minigpu] instance and must
-  /// be large enough for [elementCount] elements at their respective data types.
+  /// Both buffers must have been created on this [Minigpu] instance with
+  /// storage usage. Elements are counted in [src]'s data type (4 bytes for a
+  /// buffer made from a descriptor) and the copy is byte-exact: nothing of
+  /// [dst] past those bytes is written, also when they end inside a 4-byte
+  /// word. Throws [RangeError] when [elementCount] is negative or exceeds the
+  /// size either buffer was created with. Copying a buffer onto itself is a
+  /// no-op.
   ///
   /// [elementCount] must be provided — use [getBufferSizeForType] divided by
   /// the element byte-size if you only know the byte size.
@@ -1185,14 +1314,69 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
         'Destination buffer was not created with storage usage',
       );
     }
+    if (!src.isValid || !dst.isValid) {
+      throw StateError('Cannot copy from or to a destroyed buffer');
+    }
+    if (elementCount < 0) {
+      throw RangeError.value(elementCount, 'elementCount', 'Must be >= 0');
+    }
+    final byteCount = elementCount * (_bufferInfo[src]?.elementBytes ?? 4);
+    void checkFits(Buffer buffer, String name) {
+      final sizeBytes = _bufferInfo[buffer]?.sizeBytes;
+      if (sizeBytes != null && byteCount > sizeBytes) {
+        throw RangeError(
+          'elementCount $elementCount is $byteCount bytes, more than the '
+          '$sizeBytes bytes of $name',
+        );
+      }
+    }
 
-    _copyShader ??= createComputeShader()..loadKernelString(_kCopyWgsl);
+    checkFits(src, 'src');
+    checkFits(dst, 'dst');
+    // Both bindings are writable, and WebGPU rejects aliasing them.
+    if (byteCount == 0 || identical(src, dst)) return;
 
-    _copyShader!
-      ..setBufferAtSlot(0, src)
-      ..setBufferAtSlot(1, dst);
+    final words = byteCount ~/ 4;
+    final tail = byteCount % 4;
+    final groups = (words + (tail == 0 ? 0 : 1) + 63) ~/ 64;
+    const maxGroups = ComputeShader.maxWorkgroupsPerDim;
+    final groupsX = groups < maxGroups ? groups : maxGroups;
+    final groupsY = (groups + groupsX - 1) ~/ groupsX;
 
-    final int groups = (elementCount + 63) ~/ 64;
-    await _copyShader!.dispatch(groups, 1, 1);
+    final shader = _copyShader ??= createComputeShader()
+      ..loadKernelString(_kCopyWgsl);
+    final Buffer params;
+    if (_copyParamsFree.isNotEmpty) {
+      params = _copyParamsFree.removeLast();
+    } else {
+      _checkCanCreate();
+      params = Buffer(_platform.createBuffer(16, BufferDataType.uint32));
+      _copyParams.add(params);
+    }
+    try {
+      // Issued together with no await between them, so a copy that is not
+      // awaited cannot have its bindings replaced before it dispatches.
+      shader
+        ..setBufferAtSlot(0, src)
+        ..setBufferAtSlot(1, dst)
+        ..setBufferAtSlot(2, params);
+      final written = params.write(
+        Uint32List.fromList([words, tail, groupsX * 64, 0]),
+        4,
+      );
+      final dispatched = shader.dispatch(groupsX, groupsY, 1);
+      await Future.wait([written, dispatched]);
+    } finally {
+      if (params.isValid) _copyParamsFree.add(params);
+    }
   }
+}
+
+/// What a [Minigpu] recorded when it created a buffer.
+final class _BufferInfo {
+  const _BufferInfo(this.epoch, this.sizeBytes, this.elementBytes);
+
+  final int epoch;
+  final int? sizeBytes;
+  final int elementBytes;
 }

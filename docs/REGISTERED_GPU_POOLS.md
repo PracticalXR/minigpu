@@ -22,17 +22,22 @@ A trusted host selects fence purpose; native opening cannot establish authorized
 encoder provenance. The integrating registrar enforces that provenance, exact
 allocation identity, consent and route binding.
 
-The source protocol is producer key 0 -> consumer key 1 -> key 0. A separate
-native coordinator polls producer readiness and calls AcquireSync(1, 0), checking
-S_OK explicitly; WAIT_TIMEOUT is nonnegative and is not successful acquisition.
+The source protocol is producer key 0 -> consumer key 1 -> key 0; the producer
+releases key 1 before Submit. A separate native coordinator waits for the
+producer fence with an event (SetEventOnCompletion) and polls only
+AcquireSync(1, 0), checking S_OK explicitly; WAIT_TIMEOUT is nonnegative and is
+not successful acquisition.
 Foreign textures/mutexes never enter Dawn. The receiving worker copies into one
 of three preallocated mutex-free host outputs, then signals and flushes a trusted
 host fence. Only after actual copy completion and ReleaseSync(0) does the producer
-receive SourceDone. There is one GPU copy and no CPU video readback. Each host
+receive SourceDone. Every SourceDone, including CANCELED or TIMEOUT before the
+copy, leaves key 0 with the producer. There is one GPU copy and no CPU video
+readback. Each host
 allocation is imported once and has one reusable texture view.
 
 SourceDone, OutputReady and OutputDone have separate lifetimes. AcquireOutput
-claims an initial Dawn consumer; RetainOutput permits four total consumers.
+claims an initial Dawn consumer and returns CONFLICT for an output that is
+already acquired; RetainOutput permits four total consumers.
 Dawn release fences the exact creation queue, including after logical retirement.
 Native encoder consumers release against separately registered host-consumer
 fences; producer-fence IDs are refused. Every consumer finishes before EndAccess
@@ -51,7 +56,8 @@ post-submit uncertainty faults admission and retains charged resources until
 actual completion. Scheduling/task exceptions quarantine fixed storage instead
 of terminating either worker. Destruction does not allocate synchronous jobs.
 Drain events and consumers before final nonconcurrent Release, which joins the
-coordinator and drains/cleans on a host worker, never the GPU worker.
+coordinator and drains/cleans on a host worker, never the GPU worker. After device
+loss or replacement, quarantined outputs no longer block Release.
 
 The focused `minigpu_external_pool_test` passes on Windows x64 MSVC Release using
 cached Dawn D3D11. A real separate producer supplies GPU-generated pixels sampled

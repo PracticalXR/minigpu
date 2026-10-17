@@ -1,10 +1,13 @@
 #include "../include/minigpu.h"
+#include "../include/minigpu_context_owner.h"
+#include "../include/dart_port.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -12,6 +15,10 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 extern "C" mgpu::MGPU minigpu;
 
@@ -80,6 +87,12 @@ struct PipelineState {
   std::vector<std::unique_ptr<CachedBindGroup>> bindGroupCache;
   std::mutex mutex;
   std::string diagnostic;
+  std::string compileError; // first WGSL error with its position
+  // Told once when status leaves 0; taken under [mutex], run outside it.
+  std::vector<std::function<void(bool)>> settleWaiters;
+#ifdef __EMSCRIPTEN__
+  int handleId = 0; // the MGPURenderPipeline* handed out, for the JS hook
+#endif
   ~PipelineState() {
     for (auto &cached : bindGroupCache) {
       if (cached->group) {
@@ -95,6 +108,91 @@ struct PipelineState {
       wgpuDeviceRelease(device);
   }
 };
+
+using SettleWaiters = std::vector<std::function<void(bool)>>;
+
+// Moves [state] from status 0 to [status] and hands over its waiters; false
+// when it had already settled. Under state.mutex.
+bool settleLocked(PipelineState &state, int status, SettleWaiters &waiters) {
+  if (state.status.load() != 0)
+    return false;
+  state.status.store(status);
+  waiters.swap(state.settleWaiters);
+  return true;
+}
+
+// Tells the waiters of a pipeline that just settled. Never under a lock: a
+// waiter may post to Dart or call straight back in.
+void announceSettled(const PipelineState &state, SettleWaiters waiters,
+                     bool ok) {
+  for (auto &waiter : waiters) {
+    try {
+      waiter(ok);
+    } catch (...) {
+    }
+  }
+#ifdef __EMSCRIPTEN__
+  EM_ASM({ var f = Module['mgpuRenderPipelineSettled']; if (f) f($0); },
+         state.handleId);
+#else
+  (void)state;
+#endif
+}
+
+// Fails a pipeline still compiling, with [message] as its diagnostic.
+void settleFailed(PipelineState &state, const char *message) {
+  SettleWaiters waiters;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.status.load() != 0)
+      return;
+    state.diagnostic = message;
+    settleLocked(state, 2, waiters);
+  }
+  announceSettled(state, std::move(waiters), false);
+}
+
+// Closes [state] (status 3); one still compiling settles now, not ok.
+void closePipeline(PipelineState &state) {
+  SettleWaiters waiters;
+  bool settled;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    settled = settleLocked(state, 3, waiters);
+    state.status.store(3);
+  }
+  if (settled)
+    announceSettled(state, std::move(waiters), false);
+}
+
+// Every pipeline still referenced, so a context teardown can close its own.
+struct PipelineRegistry {
+  std::mutex mutex;
+  std::vector<std::weak_ptr<PipelineState>> pipelines;
+  size_t pruneAt = 64;
+};
+
+// Leaked on purpose: the process-global context can be torn down after
+// static destructors have run.
+PipelineRegistry &pipelineRegistry() {
+  static auto *registry = new PipelineRegistry;
+  return *registry;
+}
+
+void registerPipeline(const std::shared_ptr<PipelineState> &state) {
+  auto &registry = pipelineRegistry();
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  auto &all = registry.pipelines;
+  if (all.size() >= registry.pruneAt) {
+    all.erase(std::remove_if(all.begin(), all.end(),
+                             [](const std::weak_ptr<PipelineState> &weak) {
+                               return weak.expired();
+                             }),
+              all.end());
+    registry.pruneAt = std::max<size_t>(64, all.size() * 2);
+  }
+  all.push_back(state);
+}
 
 constexpr size_t kMaxBindGroupsPerPipeline = 64;
 
@@ -383,22 +481,60 @@ void pipelineCallback(WGPUCreatePipelineAsyncStatus result,
   std::unique_ptr<std::shared_ptr<PipelineState>> box(
       static_cast<std::shared_ptr<PipelineState> *>(userdata1));
   auto state = *box;
-  std::lock_guard<std::mutex> lock(state->mutex);
-  if (state->status.load() != 0) {
-    if (pipeline)
-      wgpuRenderPipelineRelease(pipeline);
-    return;
+  const bool ok = result == WGPUCreatePipelineAsyncStatus_Success && pipeline;
+  SettleWaiters waiters;
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->status.load() != 0) {
+      if (pipeline)
+        wgpuRenderPipelineRelease(pipeline);
+      return;
+    }
+    if (ok) {
+      state->pipeline = pipeline;
+    } else {
+      if (pipeline)
+        wgpuRenderPipelineRelease(pipeline);
+      if (!state->compileError.empty())
+        state->diagnostic = state->compileError;
+      else if (message.data && message.length)
+        // WGPU_STRLEN marks a NUL-terminated message, which may be shorter.
+        state->diagnostic.assign(message.data,
+                                 message.length == WGPU_STRLEN
+                                     ? strnlen(message.data, 512)
+                                     : std::min<size_t>(message.length, 512));
+    }
+    settleLocked(*state, ok ? 1 : 2, waiters);
   }
-  if (result == WGPUCreatePipelineAsyncStatus_Success && pipeline) {
-    state->pipeline = pipeline;
-    state->status.store(1);
-  } else {
-    if (pipeline)
-      wgpuRenderPipelineRelease(pipeline);
-    if (message.data && message.length)
-      state->diagnostic.assign(message.data,
-                               std::min<size_t>(message.length, 512));
-    state->status.store(2);
+  announceSettled(*state, std::move(waiters), ok);
+}
+
+// Keeps Tint's first error with its line and column: an invalid module
+// otherwise surfaces only as "[Invalid ShaderModule] is invalid".
+void compilationInfoCallback(WGPUCompilationInfoRequestStatus result,
+                             const WGPUCompilationInfo *info, void *userdata1,
+                             void *) {
+  std::unique_ptr<std::shared_ptr<PipelineState>> box(
+      static_cast<std::shared_ptr<PipelineState> *>(userdata1));
+  if (result != WGPUCompilationInfoRequestStatus_Success || !info)
+    return;
+  for (size_t i = 0; i < info->messageCount; ++i) {
+    const WGPUCompilationMessage &m = info->messages[i];
+    if (m.type != WGPUCompilationMessageType_Error)
+      continue;
+    std::string text = "line " + std::to_string(m.lineNum) + ":" +
+                       std::to_string(m.linePos) + ": ";
+    if (m.message.data)
+      text.append(m.message.data, m.message.length == WGPU_STRLEN
+                                      ? strlen(m.message.data)
+                                      : m.message.length);
+    auto &state = **box;
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.compileError = text.substr(0, 512);
+    // On the web this can arrive after the pipeline already failed.
+    if (state.status.load() == 2)
+      state.diagnostic = state.compileError;
+    return;
   }
 }
 
@@ -410,13 +546,7 @@ void beginCompile(const std::shared_ptr<PipelineState> &state,
     if (state->status.load() == 3)
       return;
   }
-  auto fail = [&](const char *message) {
-    std::lock_guard<std::mutex> lock(state->mutex);
-    if (state->status.load() == 0) {
-      state->diagnostic = message;
-      state->status.store(2);
-    }
-  };
+  auto fail = [&](const char *message) { settleFailed(*state, message); };
   WGPUShaderSourceWGSL source{};
   source.chain.sType = WGPUSType_ShaderSourceWGSL;
   source.code = {code.data(), code.size()};
@@ -425,6 +555,23 @@ void beginCompile(const std::shared_ptr<PipelineState> &state,
   WGPUShaderModule module = wgpuDeviceCreateShaderModule(state->device, &smd);
   if (!module) {
     fail("shader module creation failed");
+    return;
+  }
+  // Dawn reports the (already known) messages inline, so a WGSL error fails
+  // here with its position instead of reaching pipeline creation.
+  WGPUCompilationInfoCallbackInfo ci{};
+  ci.mode = WGPUCallbackMode_AllowSpontaneous;
+  ci.callback = compilationInfoCallback;
+  ci.userdata1 = new std::shared_ptr<PipelineState>(state);
+  wgpuShaderModuleGetCompilationInfo(module, ci);
+  std::string compileError;
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    compileError = state->compileError;
+  }
+  if (!compileError.empty()) {
+    wgpuShaderModuleRelease(module);
+    fail(compileError.c_str());
     return;
   }
   std::vector<WGPUBindGroupLayoutEntry> les;
@@ -580,6 +727,11 @@ MGPURenderPipeline *createPipeline(mgpu::MGPU &owner, const char *wgsl,
     state->bindings = parsed.bindings;
     auto handle =
         std::make_unique<MGPURenderPipelineImpl>(MGPURenderPipelineImpl{state});
+#ifdef __EMSCRIPTEN__
+    // Before the compile task: the web runs it inline, so it can settle here.
+    state->handleId = static_cast<int>(reinterpret_cast<intptr_t>(handle.get()));
+#endif
+    registerPipeline(state);
     std::string code(wgsl, n), ve(vs), fe(fs);
     owner.getWebGPUThread().enqueueAsync(
         [state, parsed = std::move(parsed), code = std::move(code),
@@ -588,11 +740,7 @@ MGPURenderPipeline *createPipeline(mgpu::MGPU &owner, const char *wgsl,
             beginCompile(state, std::move(parsed), std::move(code),
                          std::move(ve), std::move(fe));
           } catch (...) {
-            std::lock_guard<std::mutex> lock(state->mutex);
-            if (state->status.load() == 0) {
-              state->diagnostic = "render pipeline preparation failed";
-              state->status.store(2);
-            }
+            settleFailed(*state, "render pipeline preparation failed");
           }
         });
     return reinterpret_cast<MGPURenderPipeline *>(handle.release());
@@ -642,7 +790,57 @@ bool range(uint64_t offset, uint64_t size, uint64_t total) {
   return size && offset <= total && size <= total - offset;
 }
 
+// Runs [done] once [pipeline] has left status 0 (at once when it already
+// has), with true when it became ready. Never under a lock. Throws only
+// before [done] was taken, so the caller still owns it then.
+void whenSettled(MGPURenderPipeline *pipeline, std::function<void(bool)> done) {
+  std::shared_ptr<PipelineState> state;
+  if (pipeline)
+    state = reinterpret_cast<MGPURenderPipelineImpl *>(pipeline)->state;
+  if (state) {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (state->status.load() == 0) {
+      state->settleWaiters.push_back(std::move(done));
+      return;
+    }
+  }
+  done(state && state->status.load() == 1);
+}
+
 } // namespace
+
+namespace mgpu {
+// From externalOnContextDestroyed: closes (status 3) every pipeline of the
+// context just torn down, so status and submit stop at the status check
+// instead of reaching that context, and one still compiling settles now.
+void renderOnContextDestroyed(const void *context) {
+  try {
+    std::vector<std::shared_ptr<PipelineState>> closing;
+    {
+      auto &registry = pipelineRegistry();
+      std::lock_guard<std::mutex> lock(registry.mutex);
+      auto &all = registry.pipelines;
+      closing.reserve(all.size());
+      all.erase(std::remove_if(
+                    all.begin(), all.end(),
+                    [&](const std::weak_ptr<PipelineState> &weak) {
+                      auto state = weak.lock();
+                      if (state &&
+                          static_cast<const void *>(state->owner) != context)
+                        return false;
+                      if (state)
+                        closing.push_back(std::move(state));
+                      return true;
+                    }),
+                all.end());
+    }
+    for (auto &state : closing)
+      closePipeline(*state);
+  } catch (...) {
+    // Bookkeeping must not fail the teardown that called it.
+  }
+}
+} // namespace mgpu
 
 extern "C" {
 
@@ -662,8 +860,9 @@ MGPURenderPipeline *mgpuContextCreateRenderPipeline(MGPUContextHandle *c,
                                                     const char *f,
                                                     const uint32_t *d, int n) {
   try {
-    return c ? createPipeline(*reinterpret_cast<mgpu::MGPU *>(c), w, v, f, d, n)
-             : nullptr;
+    // A destroyed or unknown handle is refused, not dereferenced.
+    auto owner = mgpu::retainHandleOwner(c);
+    return owner ? createPipeline(owner->gpu(), w, v, f, d, n) : nullptr;
   } catch (...) {
     return nullptr;
   }
@@ -683,6 +882,15 @@ int mgpuRenderPipelineStatus(MGPURenderPipeline *p) {
     return ok ? s->status.load() : 3;
   } catch (...) {
     return 3;
+  }
+}
+void mgpuRenderPipelineNotifySettledToPort(MGPURenderPipeline *p, int64_t port,
+                                           int64_t token) {
+  auto post = [port, token](bool ok) { mgpu::completionPost(port, token, ok); };
+  try {
+    whenSettled(p, post);
+  } catch (...) {
+    post(false); // thrown before the waiter was taken
   }
 }
 int mgpuRenderPipelineDiagnostic(MGPURenderPipeline *p, char *out, int cap) {
@@ -735,10 +943,8 @@ void mgpuDestroyRenderPipeline(MGPURenderPipeline *p) {
     return;
   try {
     auto *h = reinterpret_cast<MGPURenderPipelineImpl *>(p);
-    if (h->state) {
-      std::lock_guard<std::mutex> lock(h->state->mutex);
-      h->state->status.store(3);
-    }
+    if (h->state)
+      closePipeline(*h->state); // its waiters run while [p] is still valid
     delete h;
   } catch (...) {
   }
@@ -972,14 +1178,11 @@ int mgpuSubmitRender(MGPURenderPipeline *p, MGPUTextureView *color,
           [state, cv, dv, bufferPins, vr = std::move(vr), sr = std::move(sr),
            cmds = std::move(cmds), clears, loadFlags]() mutable {
             auto &br = *bufferPins;
+            // Only a device change drops an admitted pass. The task pins the
+            // pipeline and every resource, and their destroys queue behind
+            // it, so wrappers destroyed after submit are still encoded.
             WGPUDevice d = state->owner->retainReadyDevice();
-            bool resourcesAlive = cv->isAlive() && (!dv || dv->isAlive());
-            for (auto &v : vr)
-              resourcesAlive = resourcesAlive && v->isAlive();
-            for (auto &s : sr)
-              resourcesAlive = resourcesAlive && s->alive.load();
-            if (!d || d != state->device || state->status.load() != 1 ||
-                !resourcesAlive) {
+            if (!d || d != state->device) {
               if (d)
                 wgpuDeviceRelease(d);
               return;

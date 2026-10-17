@@ -60,15 +60,24 @@ Future<PerfResult> bench(
 // ---------------------------------------------------------------------------
 
 const _saxpyShader = '''
-@group(0) @binding(0) var<storage, read>       x: array<f32>;
+@group(0) @binding(0) var<storage, read_write> x: array<f32>;
 @group(0) @binding(1) var<storage, read_write> y: array<f32>;
 @compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) groups: vec3<u32>) {
+  // Dispatches past 65535 workgroups fold into y; see _dispatchFlat.
+  let i = gid.x + gid.y * groups.x * 256u;
   if (i >= arrayLength(&y)) { return; }
   y[i] = 2.0 * x[i] + y[i];
 }
 ''';
+
+/// Dispatches [groups] workgroups of [_saxpyShader]. WebGPU allows at most
+/// 65535 per dimension, so the excess folds into y.
+Future<void> _dispatchFlat(ComputeShader shader, int groups) {
+  final gx = groups < 65535 ? groups : 65535;
+  return shader.dispatch(gx, (groups + gx - 1) ~/ gx, 1);
+}
 
 // Each output element is the sum of `stride` consecutive input elements.
 // Dispatch one thread per output element; no workgroup shared memory needed.
@@ -233,8 +242,9 @@ void main() {
       x.destroy();
       y.destroy();
       expect(r.msPerIter, lessThan(200));
-      // y[i] grows by 2*x[i] = 2 each iteration; just check it's non-zero
-      expect(out[0], greaterThan(0.0));
+      // y starts at 1 and each of the 3 warm-up and 20 timed dispatches adds
+      // 2 * x = 2, so a dispatch that never ran would leave it at 1.
+      expect(out[0], 1.0 + 2.0 * 23);
     });
   });
 
@@ -267,7 +277,7 @@ void main() {
         final r = await bench(
           'SAXPY $label',
           20,
-          () => shader.dispatch((n + 255) ~/ 256, 1, 1),
+          () => _dispatchFlat(shader, (n + 255) ~/ 256),
           throughputFn: (iters, dur) {
             // 3 floats read/written per element (read x, read y, write y)
             final bytes = iters * n * 3 * 4;
@@ -275,6 +285,13 @@ void main() {
             return '${gbps.toStringAsFixed(2)} GB/s effective memory BW';
           },
         );
+
+        // Every element, including those past the first 65535 workgroups,
+        // saw the 3 warm-up and 20 timed dispatches.
+        final out = Float32List(n);
+        await y.read(out, n, dataType: BufferDataType.float32);
+        expect(out.first, 2.0 * 23);
+        expect(out.last, 2.0 * 23);
 
         shader.destroy();
         x.destroy();

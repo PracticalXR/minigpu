@@ -48,7 +48,8 @@ class MinigpuPreviewController extends ChangeNotifier {
   Size get size => _size;
 
   /// Stream of host-side acknowledgement timestamps (microseconds since
-  /// Unix epoch). Producers can use this for backpressure.
+  /// Unix epoch). These can pace host submissions, but do not acknowledge
+  /// raster/GPU-read completion or authorize resource reuse/destruction.
   Stream<int> get presentedAtUs => _presentedAtUs.stream;
 
   /// Push a new GPU frame.
@@ -145,6 +146,38 @@ class MinigpuPreviewController extends ChangeNotifier {
       }
     }();
     return done.future;
+  }
+
+  /// Drops the host registration of [source], a frame this controller
+  /// presented earlier and has since replaced with a different source (a
+  /// resize, say). Completes once the engine has let go of it, so the
+  /// producer texture behind [source] may then be destroyed.
+  ///
+  /// The host stops painting [source] at once, so call this only after a
+  /// frame showing its replacement has been drawn, and never for the source
+  /// presented last.
+  Future<void> retire(PreviewSource source) async {
+    // Clear and dispose drop every registration of this instance, [source]'s
+    // included, and complete once the host has.
+    if (_disposed) {
+      await _disposing;
+      return;
+    }
+    final clearing = _clearing;
+    if (clearing != null) {
+      await clearing;
+      return;
+    }
+    if (!_registrationAttempted) return;
+    try {
+      await _channel.invokeMethod<void>('retire', {
+        'instanceId': _instanceId,
+        'kind': source.kind.name,
+        ...source.toChannelMessage(),
+      });
+    } on MissingPluginException {
+      // A host that keeps one registration per instance has none to drop.
+    }
   }
 
   void _notifyViewChanged() {

@@ -86,7 +86,10 @@ it; local preflight failure does not consume it or submit a partial pass. Discar
 host references. `submit` acknowledges host enqueue, NOT GPU completion;
 `Minigpu.waitForSubmittedWork()` remains the completion fence. No command can
 mutate or re-submit a consumed recorder. Native queued work owns its resources
-independently until encoding completes; submitted GPU use has WebGPU lifetime.
+independently until encoding completes: uploads and passes admitted before a
+texture's destroy still run, and the destroy frees the GPU memory once they
+have, even while a pipeline's cached bind group still names one of its views.
+Submitted GPU use has WebGPU lifetime.
 
 Context retirement closes pending/ready render pipelines before views/textures/
 samplers/buffers and detaches afterward. Old-device pipelines and resources
@@ -105,6 +108,8 @@ MGPURenderPipeline* mgpuCreateRenderPipeline(
 MGPURenderPipeline* mgpuContextCreateRenderPipeline(
   MGPUContextHandle*, const char*, const char*, const char*, const uint32_t*, int);
 int mgpuRenderPipelineStatus(MGPURenderPipeline*); // 0 preparing, 1 ready, 2 failed, 3 closed/stale
+// Posts (token << 1) | ok to the Dart port once, when the status leaves 0.
+void mgpuRenderPipelineNotifySettledToPort(MGPURenderPipeline*, int64_t port, int64_t token);
 int mgpuRenderPipelineDiagnostic(MGPURenderPipeline*, char* destination, int capacity);
 double mgpuRenderPipelineBindingStat(MGPURenderPipeline*, int selector);
 void mgpuDestroyRenderPipeline(MGPURenderPipeline*);
@@ -121,9 +126,12 @@ WGSL is <=1MiB UTF-8 excluding NUL; entry identifiers ASCII identifier syntax,
 1..64 bytes. Copy strings/descriptors before returning. Use asynchronous WebGPU
 pipeline creation, shared backing state, retained creation device and a callback
 that never touches a destroyed owner. Native worker may pump compilation events;
-browser must yield naturally, never block/spin the JS event loop. Status polling
-by the Dart adapter is only during cold preparation (10ms intervals); it must
-stop on wrapper closure and cache failure, with bounded 30-second caller wait.
+browser must yield naturally, never block/spin the JS event loop. During cold
+preparation the Dart adapter waits for the settle signal: the native port post
+above, or on the web the module calling `Module.mgpuRenderPipelineSettled(handle)`
+once per pipeline. A backend without the signal is polled from 1ms, backing off
+to 16ms. Either way it must stop on wrapper closure and cache failure, with
+bounded 30-second caller wait.
 Timeout destroys that pipeline and prevents late completion from resurrecting it.
 Diagnostic copies at most min(capacity-1,512) UTF-8 bytes, NUL terminates when
 capacity>0, returns copied length. No pointer to internal string storage escapes.

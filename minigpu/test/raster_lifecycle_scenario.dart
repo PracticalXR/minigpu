@@ -1,6 +1,7 @@
 // Shared public-Dart raster lifecycle checks: the bounded retained bind-group
-// cache, pipeline closure during preparation, the bounded preparation wait and
-// cross-context refusal. Reused by the native and browser smokes beside it.
+// cache, pipeline closure during preparation, the settle signal, the bounded
+// preparation wait and cross-context refusal. Reused by the native and browser
+// smokes beside it.
 import 'dart:async';
 import 'dart:typed_data';
 
@@ -522,6 +523,74 @@ Future<Map<String, Object>> runRasterPendingCloseScenario({
       'pipelines_live': reopened.renderPipelinesLive,
     };
   } finally {
+    if (gpu.isInitialized) await gpu.destroy();
+  }
+}
+
+/// The settle signal preparation waits on: a pipeline's `settled` completes
+/// once its compile ends, with the final status already readable, whether it
+/// became ready, failed, or was closed while still compiling. An older build
+/// without the signal fails here; preparation there polls instead.
+Future<Map<String, Object>> runRasterSettleSignalScenario() async {
+  final gpu = Minigpu();
+  final pipelines = <PlatformRenderPipeline>[];
+  PlatformRenderPipeline create(RenderPipelineDescriptor descriptor) {
+    final pipeline = gpu.withPlatformForHostInterop(
+      (backend) => backend.createRenderPipeline(descriptor),
+    );
+    pipelines.add(pipeline);
+    return pipeline;
+  }
+
+  Future<void> settles(Future<void> signal, String what) => signal.timeout(
+    rasterPreparationBound,
+    onTimeout: () => throw StateError('$what never settled'),
+  );
+
+  try {
+    await gpu.init();
+    final device = _device(gpu);
+
+    final ready = create(_fillDescriptor(401));
+    final signal = ready.settled;
+    _check(signal != null, 'Render pipeline settle signal unavailable');
+    await settles(signal!, 'A compiling pipeline');
+    _check(ready.status == 1, 'A settled pipeline reads ${ready.status}');
+    await settles(ready.settled!, 'An already settled pipeline');
+
+    // Same layout and entry points; the fragment's type error fails it.
+    final valid = _fillDescriptor(402);
+    final failing = create(
+      RenderPipelineDescriptor(
+        code: valid.code.replaceFirst('params.color +', 'params.color + 1u +'),
+        colorFormat: valid.colorFormat,
+        bindings: valid.bindings,
+      ),
+    );
+    await settles(failing.settled!, 'A failing pipeline');
+    _check(failing.status == 2, 'A failed pipeline reads ${failing.status}');
+    _check(failing.diagnostic.isNotEmpty, 'A failed pipeline has no diagnostic');
+
+    final closing = create(_fillDescriptor(403));
+    final statusAtClose = closing.status;
+    final closed = closing.settled!;
+    closing.destroy();
+    await settles(closed, 'A pipeline closed while compiling');
+    _check(closing.status == 3, 'A closed pipeline reads ${closing.status}');
+
+    // The signal never stands in for the outcome: preparation still works.
+    await _renderProbe(gpu, 'after the settle checks', _fillDescriptor(401));
+    return {
+      'device': device,
+      'ready_status': ready.status,
+      'failed_status': failing.status,
+      'status_at_close': statusAtClose,
+      'closed_status': closing.status,
+    };
+  } finally {
+    for (final pipeline in pipelines) {
+      pipeline.destroy();
+    }
     if (gpu.isInitialized) await gpu.destroy();
   }
 }

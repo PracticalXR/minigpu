@@ -24,6 +24,16 @@ EXPORT MGPURenderPipeline *mgpuContextCreateRenderPipeline(
     MGPUContextHandle *context, const char *wgsl, const char *vertexEntry,
     const char *fragmentEntry, const uint32_t *descriptor, int wordCount);
 EXPORT int mgpuRenderPipelineStatus(MGPURenderPipeline *pipeline);
+// Posts `(token << 1) | ok` to [port] (wire format in minigpu.h) exactly once,
+// when [pipeline] leaves status 0: ok when it became ready (1), not ok when
+// it failed (2) or was closed (3: destroyed, or its context torn down). A
+// pipeline that has already settled posts at once; NULL posts not ok. Read
+// mgpuRenderPipelineStatus after the post: a device replaced later still
+// turns it to 3. The web build posts nothing (no Dart port); instead every
+// settle there calls Module.mgpuRenderPipelineSettled(id), when set, with
+// the pipeline handle's value as id (it may fire inside create or destroy).
+EXPORT void mgpuRenderPipelineNotifySettledToPort(MGPURenderPipeline *pipeline,
+                                                  int64_t port, int64_t token);
 EXPORT int mgpuRenderPipelineDiagnostic(MGPURenderPipeline *pipeline,
                                         char *destination, int capacity);
 // Monotonic retained-bind-group cache counters: 0 created, 1 reused,

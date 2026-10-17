@@ -1,26 +1,59 @@
 # minigpu
 
+## 1.9.0
+
+- `copyBuffer` copies exactly the requested elements. It no longer writes
+  past them in the destination or stops at 65,535 workgroups. A destroyed
+  buffer throws `StateError`, a count past either buffer throws `RangeError`,
+  and copying a buffer onto itself or copying 0 elements does nothing.
+- On native, an awaited `dispatch` throws `StateError` when the work was not
+  submitted: the kernel failed to build, a bound resource was destroyed, or
+  the device is gone. It used to finish as if it had run. A negative group
+  count throws `ArgumentError`; a count of 0 dispatches nothing.
+- On native, `createBuffer` throws `RangeError` for a size that does not fit
+  in 32 bits; it used to create a smaller buffer without saying so.
+- `warmShaders` compiles each kernel without running it, binds each buffer
+  the way the kernel declares it, and reports a kernel that fails to build.
+  It keeps the shader it built, so the app's own copy of that kernel reuses
+  the compiled pipeline.
+- New `ComputeShader.buildPipeline()`: compiles the pipeline for the current
+  bindings without running the kernel.
+- Shaders and render pipelines dropped without `destroy()` are freed when
+  they are garbage collected. `destroy()` and device recovery also release
+  video textures, shared output textures and `toRGBA` buffers.
+- A failed `destroy()` no longer blocks a later `init()`.
+- `ownsBuffer` takes constant time, and minigpu's internal placeholder buffer
+  no longer counts as a live buffer.
+- `setBuffer` keeps the original error type. The `isInitialized` setter is
+  deprecated.
+- `setBuffer` and `setBufferAtSlot` bind a buffer with the access its
+  kernel declares, so a kernel can take read-only inputs
+  (`var<storage, read>`). Binding one used to stop the kernel from building.
+- A render pipeline is seen as ready as soon as it compiles: preparing it
+  waits for a signal from the backend instead of polling every 10 ms. A
+  backend without the signal is polled, starting at 1 ms.
+- On native, `toRGBA` follows the source's colour matrix and range: set
+  `yuvMatrix` (`YuvMatrix.bt709`, `bt601` or `bt2020`) and `yuvFullRange` on
+  `ExternalVideoBuffer`. The defaults keep the old BT.709 full-range output.
+- New `VideoTexture.toRGBAAsync()`, which converts without blocking the
+  calling thread on native. Destroying the texture during a conversion frees
+  it once the conversion ends.
+- On the web, a buffer read that fails throws `StateError` instead of
+  returning stale data.
+- New `ComputeShader.isValid` and `SharedOutputTexture.copyFromBufferF32Async`.
+- `setLogCallback` defaults to warnings and errors.
+- Docs: `GpuTexture.destroy` timing, `toRGBA` formats and errors, and the
+  blocking shared-output copies.
+
 ## 1.8.1
 
-- **Fixed: a shader could keep dispatching against a destroyed buffer.**
-  `setBuffer` treats a bind of the same native handle as no change. Backends
-  recycle handles, so a buffer created after another was destroyed can come
-  back with the destroyed one's handle — and a long-lived shader then kept
-  the bind group built for the dead buffer and read zeros (or someone else's
-  memory) from it. Seen on the web as an encoder that emitted nothing after
-  a smaller one replaced a larger one in the same page, and as a later
-  instance misreading a few rows. `ComputeShader` now remembers the `Buffer`
-  object bound at each slot; when that object has been destroyed, the next
-  bind passes through a per-context sentinel buffer so the handle change is
-  visible and the bind group is rebuilt. No API change; one 16-byte buffer
-  per context, created on first need and freed with the context.
-
-- **Precompile kernels ahead of first use, with progress and named failures —
-  `warmShaders()`.** Compilation is lazy: a kernel is turned into a backend
-  shader on its FIRST `dispatch`, while the GPU mutex is held. So the cost does
-  not land where a caller can plan for it, it lands on the first frame or the
-  first inference and looks like a hang. The workaround has been to dispatch a
-  throwaway job at startup and hope; this makes that an API.
+- **Fix: a long-lived shader could keep reading a destroyed buffer** (zeros
+  or unrelated data) when a new buffer reused the destroyed one's handle and
+  `setBuffer` saw no change. Typical symptom: a later instance producing
+  nothing or misreading a few rows. No API change.
+- **New `warmShaders()`: compile kernels before first use, with progress and
+  named failures.** A kernel is compiled on its first `dispatch`, so the cost
+  lands on the first frame or first inference and looks like a hang.
 
   ```dart
   final warm = warmShaders(gpu, [
@@ -30,116 +63,58 @@
   final result = await warm.done;   // never throws — inspect result.phase
   ```
 
-  Kernels build **one at a time**, awaiting each, which yields to the event
-  loop between them — that is what makes it usable at launch on platforms with
-  no spare thread. There is deliberately no concurrency option: the backend
-  serialises GPU work anyway, and compiling a batch back-to-back is a good way
-  to make a mobile driver stop answering.
+  Kernels build one at a time and yield to the event loop in between, so it
+  can run at app launch. There is deliberately no concurrency option: GPU work
+  is serialised anyway, and compiling a batch back to back can make a mobile
+  driver stop responding. `WarmProgress` reports `completed` / `total` /
+  `fraction`, the kernel being built, and `WarmError`s naming the kernel and
+  the stage (`create`, `dispatch`, `timeout`, `deviceLost`). A timeout fails
+  only that kernel; a lost device ends the run. `progress` replays its latest
+  value to late listeners. It complements the 1.7.0 disk cache, which makes
+  later launches cheap.
+- **The web build can now be loaded inside a Web Worker**, so GPU work on the
+  web no longer has to run on the main thread. The device is published on
+  `globalThis` instead of `window`.
+- New `Buffer.webBufferHandle`: the underlying WebGPU buffer handle on web (0
+  on native), for zero-copy presentation of buffer contents.
 
-  `WarmProgress` carries `completed`/`total`/`fraction`, the label of the
-  kernel being built, and a list of `WarmError`s naming the kernel and the
-  stage (`create`, `dispatch`, `timeout`, `deviceLost`). Per-kernel timeouts
-  fail that kernel only; a lost device ends the set rather than paying one
-  timeout per remaining kernel. `progress` replays its latest value to late
-  subscribers, so a panel attached after startup still renders real state.
-
-  This is the first compile-failure signal the Dart API has had — previously a
-  pipeline that would never build was indistinguishable from one that had not
-  built yet.
-
-  Complements the disk cache added in 1.7.0 rather than replacing it: the cache
-  makes the second run cheap, this makes the first run visible and survivable.
-
-- **The web build can now be loaded inside a Web Worker.** It was compiled
-  `-sENVIRONMENT=web`, which hard-codes `ENVIRONMENT_IS_WORKER = false` and
-  strips the worker bootstrap, so the module could only ever be instantiated on
-  the main thread. Since GPU pipelines cannot be transferred between threads,
-  that confined every GPU workload on the web to the main thread. Now built
-  `web,worker`, and the device is published to `globalThis` rather than
-  `window` (which does not exist in a worker).
-
-- Add `webBufferHandle` on `Buffer`: the underlying WGPUBuffer handle on web (0 on native), enabling zero-copy GPU presentation of buffer contents.
 ## 1.7.0
 
-- **Compiled shaders are now cached on disk, so WGSL compilation is a
-  once-per-machine cost instead of a once-per-process one.** On by default —
-  no code change is needed to get it. Turning WGSL into a backend shader is the
-  most expensive thing a process does at startup: on Windows/D3D11 it runs
-  through FXC, whose optimiser cost grows superlinearly with kernel size, so a
-  large compute kernel can spend tens of seconds there on every launch.
-  Measured on a 3-kernel probe: total time in compute pipeline creation
-  **34 ms cold → 1 ms warm**, with byte-identical outputs.
-
-  New API, all optional: `Minigpu.configureShaderCache(enabled:, directory:,
-  maxBytes:, extraKey:)`, `Minigpu.shaderCacheStats`,
-  `Minigpu.shaderCacheDirectory`, `Minigpu.clearShaderCache()`, and the
-  `ShaderCacheStats` value type. Configuration is PRE-INIT and process-global,
-  the same contract as `preferDisplayAdapter`.
-
-  `MGPU_SHADER_CACHE=0` disables it and `MGPU_SHADER_CACHE_DIR=<path>`
-  redirects it, both outranking the programmatic settings — so "is the cache
-  the problem?" is answerable on a build you cannot edit.
-
-  Stored under the OS cache convention (`%LOCALAPPDATA%` / `~/Library/Caches` /
-  `$XDG_CACHE_HOME`), capped at 256 MB with LRU eviction. **Android has no
-  default** — an app-private cache directory cannot be discovered from C++, so
-  caching stays off there until a host passes one to `configureShaderCache`.
-  Web is a no-op: no Dawn, no FXC, nothing to cache.
-
-  Every failure mode is a cache miss, never a failed device: an unwritable or
-  missing directory, a full disk, a corrupt or truncated entry, a lock, or a
-  race with another process all degrade to "compile it" and continue. A cache
-  that could break startup would be worse than no cache.
-
-  Stale entries are prevented rather than tolerated. The key covers the Dawn
-  version, adapter, driver version and compile options, so a driver update or a
-  GPU swap MISSES instead of loading a blob built by different software. Each
-  entry also stores its own full key and is verified on read — a filename hash
-  collision costs a recompile rather than silently binding the wrong pipeline,
-  which matters because the blob-level hash Dawn validates proves a blob is
-  intact, not that it belongs to the key that was asked for.
-
-  No Dart-authored cache providers, by construction: Dawn's load callback is
-  synchronous and can arrive on a Dawn-internal thread, and a Dart isolate can
-  only be entered asynchronously from a foreign thread
-  (`NativeCallable.listener`), which cannot return a blob to a blocked native
-  caller.
-
-- **`Buffer.writeRawBytes` is now copy-free on the way to the GPU, on BOTH
-  native and web.** No API change; the payload is simply no longer duplicated
-  into an intermediate list/scratch before it is handed to the driver. On a
-  streaming path (one whole frame per call) that duplicate was a whole-frame
-  host copy per frame — at 4K, half of the entire upload cost. Measured on a
-  4K 240-frame encode: `upload` **3.71 → 1.84 ms/frame**. See minigpu_ffi and
-  minigpu_web for the platform details; the web fix also removes a whole-frame
-  ALLOCATION per frame, which was a garbage source as well as a copy.
-
-- **Read staging no longer churns a GPU buffer per call.** A read whose length
-  differs from the previous read used to destroy and recreate the staging
-  buffer; capacity now only grows. This is invisible to a caller reading a
-  fixed-size tensor and worth 33 ms per 723 reads at 4K to one reading a
-  variable-length payload.
-
-- **`Minigpu.drainWorkQueue()`** — blocks until every GPU task already queued
-  has run. Dispatches, readbacks and shared-texture blits execute on a native
-  worker thread, so destroying a buffer or texture can free a resource a queued
-  task is about to touch; draining first makes teardown ordered instead of
-  hopeful. SYNCHRONOUS on purpose: the caller that needs it most is one that
-  cannot await — Flutter's `State.reassemble`, the only hook you get on hot
-  reload before the framework rebuilds on top of your GPU resources. Use it as
-  `stop producing → drainWorkQueue() → release`, never per frame. No-op on web.
-- Picks up the minigpu_ffi completion-delivery fix. Async GPU work
-  (`ComputeShader.dispatch`, `Buffer.read`, the shared-texture present, context
-  init) used to signal Dart through a per-call `NativeCallable` that was closed
-  when the operation finished. A completion arriving after that close aborted
-  the whole process with `Callback invoked after it has been deleted` — and
-  isolate teardown deleted the callbacks too, so hot restart and any worker
-  isolate exiting with GPU work in flight were fatal as well. Completions now
-  arrive on a Dart native port, which is silently inert once its isolate is
-  gone. No API change; existing code gets the fix by upgrading.
-  Flutter hot reload was the reliable trigger, because it pauses the isolate at
-  a safepoint for hundreds of milliseconds while the GPU worker thread keeps
-  completing work.
+- **Compiled shaders are cached on disk**, so shader compilation is paid once
+  per machine instead of on every launch. On by default. It matters most on
+  Windows (D3D11), where a large compute kernel can take tens of seconds to
+  compile.
+  - Optional API: `Minigpu.configureShaderCache(enabled:, directory:,
+    maxBytes:, extraKey:)`, `Minigpu.shaderCacheStats`,
+    `Minigpu.shaderCacheDirectory`, `Minigpu.clearShaderCache()` and
+    `ShaderCacheStats`. Configure it before init; settings are process-wide,
+    like `preferDisplayAdapter`.
+  - `MGPU_SHADER_CACHE=0` turns it off and `MGPU_SHADER_CACHE_DIR=<path>`
+    moves it. Both override settings made in code.
+  - Stored in the OS cache directory (`%LOCALAPPDATA%`, `~/Library/Caches`,
+    `$XDG_CACHE_HOME`), capped at 256 MB, least recently used entries evicted
+    first. **Android has no default**: caching stays off until you pass a
+    directory to `configureShaderCache`. No effect on web.
+  - A cache problem (missing or unwritable directory, full disk, corrupt
+    entry, another process) only costs a recompile; it never fails device
+    creation. A driver update or a different GPU recompiles rather than
+    loading a stale shader.
+- **`Buffer.writeRawBytes` no longer copies the data before handing it to the
+  GPU**, on native or web, which halves upload time for a 4K frame. On web it
+  also removes a whole-frame allocation per call. No API change.
+- Reads whose length changes from call to call no longer recreate the GPU
+  staging buffer each time; it only grows.
+- **New `Minigpu.drainWorkQueue()`**: blocks until every GPU task already
+  queued has run. Dispatches, reads and shared-texture copies run on a native
+  worker thread, so destroying a buffer or texture with work still queued can
+  free something that work uses. Use it in teardown (`stop producing →
+  drainWorkQueue() → release`), never per frame. It is synchronous so it can
+  be called from Flutter's `State.reassemble` on hot reload. No-op on web.
+- **Fix: async GPU work could abort the whole process** with `Callback invoked
+  after it has been deleted`, most often during Flutter hot reload, and also
+  on hot restart or when a worker isolate exited with GPU work in flight.
+  Completions now arrive on a Dart native port, which is ignored once its
+  isolate is gone. No API change.
 
 ## 1.6.1
 
@@ -147,120 +122,86 @@
 
 ## 1.6.0
 
-- Picks up minigpu_ffi 1.6.0: the process-global native context is now
-  serialized and reference-counted, so several isolates initializing the GPU
-  concurrently share one device instead of racing to free each other's. No API
+- Picks up minigpu_ffi 1.6.0: several isolates initializing the GPU at the
+  same time now share one device instead of destroying each other's. No API
   change in this package.
 
 ## 1.5.9
 
-- **`ComputeShader.setBuffer` and `setBufferAtSlot` are now always ORDERED** —
-  the bind joins the WebGPU-thread FIFO, so it is correct against `dispatchFire`
-  as well as `dispatch`. This removes a silent-corruption trap rather than
-  documenting it: the binds used to run inline on the caller's thread while
-  `dispatchFire` enqueued, so rebinds raced ahead and **every fired dispatch saw
-  the LAST binding**. Measured on a 3-iteration bind→fire→rebind→fire loop, the
-  old inline binds produced `[[0,0], [0,0], [31,31]]` — two destinations never
-  written, no error raised — where the ordered binds produce
-  `[[11,11], [21,21], [31,31]]`. Nothing prevented the bad pairing but choosing
-  the right one of four bind methods.
-- `ComputeShader.setBufferFire` is **deprecated** — it is now an alias for
-  `setBuffer`. `setBufferAtSlotFire` (added and never released during 1.5.9
-  development) is removed; use `setBufferAtSlot`.
-- **A compute shader is no longer destroyed inline.** `mgpuDestroyComputeShader`
-  queues the delete on the same FIFO, so it lands after any bind or dispatch
-  already queued against that shader. Ordered binds capture the shader pointer
-  to mutate its binding tables when they run, so an inline delete would free it
-  under a pending bind — the hazard `setBufferFire`'s docs previously pushed onto
-  callers ("do not destroy the shader until a read has been awaited"). That
-  constraint is now gone. (Buffers never had it: a queued bind captures only the
-  raw WGPU handle by value, which is why `mgpuDestroyBuffer` can still delete
-  immediately.)
-- New test `test/minigpu_fire_bind_test.dart`: fire-then-read synchronization,
-  rebind-between-fires ordering, equivalence with the fully awaited chain, and
-  the 65535 cap on `dispatchFire`.
+- **`ComputeShader.setBuffer` and `setBufferAtSlot` are now always ordered**
+  with dispatches, including `dispatchFire`. Before, a bind ran at once while
+  fired dispatches waited in a queue, so a bind → fire → rebind → fire loop
+  silently ran every dispatch with the last binding.
+- `ComputeShader.setBufferFire` is **deprecated**; it is now an alias for
+  `setBuffer`.
+- Destroying a compute shader now waits behind any bind or dispatch already
+  queued for it, so you no longer need to await a read before destroying a
+  shader.
 
 ## 1.5.8
 
-- **Breaking-ish fix: `Minigpu()` is now a per-isolate SINGLETON and the context
-  is destroyed only by explicit `destroy()` / `destroySync()`.** Each
-  construction used to attach a `Finalizer` calling `destroyContext()`, but there
-  is only ONE process-global native context — so any temporary wrapper (e.g.
-  `Minigpu().isInitialized` in a test `setUp`) destroyed the device, whenever the
-  GC ran, out from under every live buffer and shader. Resources created before
-  the loss were invalid on the auto-reinitialized device and their dispatches
-  were silently dropped: zero outputs, no Dart-visible error.
-- **`Minigpu.init()` is now idempotent and concurrency-safe** — returns
-  immediately when already initialized, awaits the in-flight init when raced, and
-  no longer throws `MinigpuAlreadyInitError`. Update any code relying on that
-  throw.
-- **`ComputeShader.dispatch` / `dispatchFire` now throw `ArgumentError` above
-  `ComputeShader.maxWorkgroupsPerDim` (65535).** Exceeding WebGPU's per-dimension
-  cap invalidated the whole CommandBuffer, and since validation errors are
-  STICKY, every later submit on the device failed too — one oversized dispatch
-  silently poisoned unrelated work. The error names the offending dims and gives
-  the canonical fold (`gx = min(n, 65535); gy = (n + gx - 1) ~/ gx`, flat index
-  rebuilt in the shader as
-  `gid.x + gid.y * (num_workgroups.x * workgroup_size_x)`).
-- New `ComputeShader.dispatchFire(x, y, z)` — fire-and-forget dispatch with no
-  per-dispatch completer round trip. Call order is still honoured, so awaiting
-  any later buffer read synchronizes every fired dispatch. **Bindings are
-  snapshotted when the dispatch RUNS, not when it is fired**: do not `setBuffer`
-  on a shader with an unsynchronized fired dispatch outstanding. Use
-  `setBufferFire` (the bind joins the same FIFO) or a shader instance per call
-  site.
-- New `Minigpu.forAdapter(String adapterFilter)` — an INDEPENDENT context on the
-  adapter whose name contains `adapterFilter` (case-insensitive substring), with
-  its own device, queue and task FIFO. Not the singleton: `init()` before use,
-  `destroy()` when done, and never mix two instances' resources in one dispatch.
-  Throws `UnsupportedError` on web. Instance getter `adapterName` reports which
-  adapter THIS context bound.
-- New `Minigpu.listAdapters()` — hardware adapters with dedicated-VRAM total and
-  usage (DXGI on Windows; empty elsewhere). Returns `GpuAdapterInfo` from
+- **Behaviour change: `Minigpu()` is a per-isolate singleton, and the GPU
+  context is destroyed only by an explicit `destroy()` / `destroySync()`.**
+  Before, garbage collection of any temporary `Minigpu()` (such as
+  `Minigpu().isInitialized` in a test `setUp`) destroyed the shared device
+  under live buffers and shaders, whose dispatches then silently produced
+  zeros.
+- **`Minigpu.init()` is idempotent and safe to call concurrently**: it
+  returns at once when already initialized and waits for an init in
+  progress. It no longer throws `MinigpuAlreadyInitError`; update code that
+  relied on that.
+- **`ComputeShader.dispatch` / `dispatchFire` throw `ArgumentError` above
+  `ComputeShader.maxWorkgroupsPerDim` (65535) in any dimension.** An
+  oversized dispatch used to make every later GPU submit on the device fail
+  silently. To cover more work items, fold into two dimensions:
+  `gx = min(n, 65535); gy = (n + gx - 1) ~/ gx`, and rebuild the flat index
+  in the shader as `gid.x + gid.y * (num_workgroups.x * workgroup_size_x)`.
+- New `ComputeShader.dispatchFire(x, y, z)`: dispatch without waiting for
+  completion. Call order is kept, so awaiting any later buffer read waits for
+  every fired dispatch. Bindings are read when the dispatch runs, not when it
+  is fired; in this release, rebinding a shader with fired dispatches
+  outstanding needed `setBufferFire` (from 1.5.9 every bind is ordered).
+- New `Minigpu.forAdapter(String adapterFilter)`: a separate context on the
+  adapter whose name contains `adapterFilter` (case-insensitive), with its own
+  device and queue. It is not the singleton: call `init()` before use and
+  `destroy()` when done, and never mix two contexts' resources in one
+  dispatch. Throws `UnsupportedError` on web. `adapterName` reports the
+  adapter a context uses.
+- New `Minigpu.listAdapters()`: hardware adapters with total and used
+  dedicated VRAM (Windows; empty elsewhere), as `GpuAdapterInfo` from
   `package:minigpu_platform_interface/minigpu_platform_interface.dart`.
-- New `Buffer.writeRawBytes(bytes, {dstByteOffset = 0})` — raw 4-byte-aligned
-  upload streamed in 32 MB chunks, so neither host scratch nor driver staging
-  holds the whole payload. For LARGE transfers where a single `write` would spike
-  or pin host RAM.
-- New `Minigpu.drainSpinBudgetMs` — the event-drain spin budget the LOADED native
-  binary implements; `null` on web, or on a binary predating the export, which
-  for a native build means the drain fix below is NOT in it. Latency-sensitive
-  callers should assert `> 0` at startup, since loading a stale native artifact
-  is silent.
-- Native (`minigpu_ffi` 1.5.8), reaching consumers of this package through the
-  shared context — see `minigpu_ffi/CHANGELOG.md` for the contracts:
-  - **The Dawn event drain no longer costs a Windows timer quantum (~15.6 ms)
-    per GPU wait**: present p50 15.69 → 2.57 ms at 1280x720 and 15.69 →
-    10.07 ms at 3840x2160 on an RTX 4090. Strictly better — waits can only
-    return sooner. `MGPU_DRAIN_SPIN_MS=<0..1000>` tunes it (default 8).
-  - Additive batched staging upload and readback scopes: N scattered host writes
-    become one queue write plus N recorded copies, and N per-buffer
-    `mgpuReadSync*` calls become one submit, one fence and one map (8 reads of
-    2.72 MB: 1.098 → 0.465 ms of API time). **No Dart API on this package yet**
-    — reachable through the `minigpu_ffi` bindings.
-  - Multi-adapter context handles and `mgpuEnumAdapters`, backing
-    `Minigpu.forAdapter` and `Minigpu.listAdapters` above.
-  - Three build fixes worth knowing if you have ever fought the Dawn step:
-    `MINIGPU_DAWN_DIR` is now honoured when building through Flutter / dart pub
-    (it previously only moved the prebuilt-library search, not the Dawn root
-    given to cmake); a Windows Dawn root no longer breaks a from-source Dawn
-    build with `Invalid character escape '\d'`; and the Emscripten build's
-    emdawnwebgpu port file is detected rather than hardcoded. See
-    `minigpu_ffi/README.md` → Troubleshooting.
+- New `Buffer.writeRawBytes(bytes, {dstByteOffset = 0})`: uploads
+  4-byte-aligned raw bytes in 32 MB chunks, for large transfers where a
+  single `write` would spike host memory.
+- New `Minigpu.drainSpinBudgetMs`: shows whether the loaded native library
+  has the GPU-wait fix below (`null` on web or with an older library). A
+  stale native library loads silently, so latency-sensitive apps can assert
+  it is `> 0` at startup.
+- From minigpu_ffi 1.5.8:
+  - GPU waits on Windows no longer cost a ~15.6 ms timer tick each (a 720p
+    shared-texture present went from 15.7 ms to 2.6 ms).
+    `MGPU_DRAIN_SPIN_MS=<0..1000>` tunes it (default 8).
+  - Batched upload and readback scopes that turn many small writes or reads
+    into one submit. No Dart API in this package yet; use the `minigpu_ffi`
+    bindings.
+  - Build fixes: `MINIGPU_DAWN_DIR` is honoured when building through Flutter
+    or `dart pub`; a Windows Dawn path no longer breaks a from-source Dawn
+    build with `Invalid character escape '\d'`; the Emscripten build finds
+    Dawn's emdawnwebgpu port. See `minigpu_ffi/README.md` → Troubleshooting.
 
 ## 1.5.7
 
-- Release cut of the adapter-selection and Tier B/Tier C work documented under
-  1.5.6; no additional API change in this package.
+- Release of the adapter-selection work listed under 1.5.6; no further API
+  change in this package.
 
 ## 1.5.6
 
-- New statics `Minigpu.preferDisplayAdapter([enable])` and
-  `Minigpu.selectedAdapterName`: pre-init hint that binds Dawn to the adapter
-  driving the PRIMARY display (Windows) so screen capture, GPU processing and
-  HW encode share one GPU (same-adapter zero-copy) on hybrid systems, and a
-  query for which adapter Dawn actually selected. Call the hint before any
-  minigpu use; `MGPU_ADAPTER_NAME` still overrides.
+- New `Minigpu.preferDisplayAdapter([enable])` and
+  `Minigpu.selectedAdapterName`. The hint, called before any minigpu use,
+  makes Dawn use the GPU that drives the primary display (Windows), so on
+  hybrid systems screen capture, GPU processing and hardware encode stay on
+  one GPU and can share frames without copies. `selectedAdapterName` reports
+  the adapter Dawn actually chose. `MGPU_ADAPTER_NAME` still overrides.
 
 ## 1.5.5
 
@@ -270,31 +211,20 @@
 
 ## 1.5.3
 
-- Add async shared-output-texture copy: `SharedOutputTexture.copyFromBufferAsync`
-  and `VideoTexture.bgraToRgbaSharedOutputAsync`. These run the GPU copy and the
-  cross-device present sync on minigpu's WebGPU worker thread and complete a
-  `Future` when finished, instead of busy-polling the present-wait on the calling
-  isolate — removing the dominant per-frame blocking cost on the shared-output
-  (zero-copy encode) path. The synchronous `copyFromBuffer` /
-  `bgraToRgbaSharedOutput` are unchanged.
+- New `SharedOutputTexture.copyFromBufferAsync` and
+  `VideoTexture.bgraToRgbaSharedOutputAsync`: the copy and present sync run on
+  minigpu's GPU worker thread and complete a `Future`, instead of
+  busy-waiting on the calling isolate, which was the largest per-frame cost
+  on the shared-output (zero-copy encode) path. The synchronous versions are
+  unchanged.
 
 ## 1.5.2
 
-- Add `Minigpu.copyBuffer(src, dst, {required int elementCount})`: GPU-side
-  buffer-to-buffer copy using a WGSL compute shader — no CPU round-trip. The
-  copy shader (64-element workgroup, `array<u32>` storage bindings) is created
-  once per `Minigpu` instance on first call and reused for all subsequent calls.
-  Non-multiple-of-64 element counts are handled correctly via an `arrayLength`
-  guard in the shader.
-- `Minigpu.onShaderDestroyed` now nulls the cached copy-shader reference when
-  that shader is destroyed, preventing a double-destroy if
-  `destroyAllTrackedShaders()` is called before `destroy()`.
-- `Minigpu.destroy()` explicitly tears down the cached copy shader before
-  releasing the Dawn context.
-- New test suite `test/minigpu_copy_buffer_test.dart`: 14 tests covering
-  correctness (u32, f32, bit-pattern sentinel), partial copy, workgroup
-  boundary alignment, shader reuse, and `liveShaderCount` / `liveBufferCount`
-  stability.
+- New `Minigpu.copyBuffer(src, dst, {required int elementCount})`: a GPU-side
+  buffer-to-buffer copy with no CPU round trip. Any element count works; the
+  copy shader is created on first use and reused.
+- `destroy()` and `destroyAllTrackedShaders()` release that copy shader
+  without destroying it twice.
 
 ## 1.5.1
 
@@ -334,21 +264,24 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback.
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter; fixes the wrong adapter
+  being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -361,7 +294,8 @@
 ## 1.4.0
 
 - adds minigpu_view, gpu_pipeline libraries
-- adds `Minigpu.destroySync()` for use in synchronous hot-reload teardown hooks (e.g. `MinigpuBinding` from `minigpu_flutter`)
+- adds `Minigpu.destroySync()` for synchronous hot-reload teardown hooks (e.g.
+  `MinigpuBinding` from `minigpu_flutter`)
 
 ## 1.3.0
 
@@ -382,18 +316,21 @@
 
 ## 1.2.1
 
-- Fix: fresh builds need dawn find off
-- Change: 1.2.0 migrates minigpu to direct webgpu usage
 - Breaking: Changed setData and references to .write
+- Change: 1.2.0 migrates minigpu to direct webgpu usage
+- Fix: fresh builds need dawn find off
 - Fix: broken compute shader and buffer finalizers
+
 ## 1.2.0
 
 ## 1.1.9
 
 - fix pubspec version issue
+
 ## 1.1.8
 
 - fixed concurrent buffer op crash
+
 ## 1.1.6
 
 - fixed problem with audio input capture providing raw data
@@ -409,7 +346,7 @@
 
 - breaking: import package instead of buffer and shader separately
 - fix: pubspec repository url
-- adds: tensor package protoype
+- adds: tensor package prototype
 - fix: issue with reading buffer segments fixed
 
 ## 1.1.2
@@ -456,12 +393,11 @@
 
 ## 1.0.2
 
-- new: explicity set supported platforms in pubspec.yaml for pub.dev
+- new: explicitly set supported platforms in pubspec.yaml for pub.dev
 
 ## 1.0.1
 
-- breaking: Uses dart native assets
-see updated readme.
+- breaking: Uses dart native assets; see updated readme.
 - implements platform stub for native assets to coexist with flutter plugins.
 - uses native_toolchain_cmake 0.0.4
 

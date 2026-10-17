@@ -7,21 +7,40 @@
 #include <wrl/client.h>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 
 namespace minigpu_view {
 
+// Counts texture unregistrations the engine has not finished. UnregisterTexture
+// only POSTS the removal to the raster thread, so a reply that promises "this
+// texture is gone" has to wait for End.
+class UnregisterTracker {
+ public:
+  virtual ~UnregisterTracker() = default;
+  // Platform thread, as a handler unregisters. The ticket goes to End.
+  virtual uint64_t Begin() = 0;
+  // Any thread, once the engine has removed the texture.
+  virtual void End(uint64_t ticket) = 0;
+};
+
 // Wraps a single producer-side ID3D11Texture2D* and exposes it to
 // Flutter via FlutterDesktopGpuSurfaceDescriptor (TextureVariant::
 // GpuSurfaceTexture, kFlutterDesktopGpuSurfaceTypeD3d11Texture2D).
 //
-// The texture is BORROWED — this class does NOT own the lifetime. The
-// producer (minigpu's SharedOutputTexture) keeps it alive.
+// The raw-texture path retains an independent COM reference. The shared-handle
+// path borrows the legacy handle and relies on the producer retaining the
+// underlying resource. Neither path supplies per-frame GPU-read completion or
+// permission to overwrite/release the producer's resource after a present reply.
 class D3D11TextureHandler {
  public:
-  explicit D3D11TextureHandler(flutter::TextureRegistrar* registrar);
+  // [unregistrations], when given, hears when the engine has really dropped
+  // this handler's texture after its destruction.
+  explicit D3D11TextureHandler(
+      flutter::TextureRegistrar* registrar,
+      std::shared_ptr<UnregisterTracker> unregistrations = nullptr);
   ~D3D11TextureHandler();
 
   D3D11TextureHandler(const D3D11TextureHandler&) = delete;
@@ -49,16 +68,17 @@ class D3D11TextureHandler {
   // frame-available marker so Flutter rasterizes the next frame.
   void UpdateFromSharedHandle(void* shared_handle, int width, int height);
 
-  // Probes whether [shared_handle] (a LEGACY DXGI share handle) opens on
-  // the DEFAULT adapter — the adapter Flutter's ANGLE device lives on
-  // (EnumAdapters(0), the one driving the primary display). Legacy shared
-  // handles cannot cross adapters, so a producer texture created on
+  // Probes whether [shared_handle] (a legacy DXGI share handle or an NT
+  // handle) opens on the DEFAULT adapter — the adapter Flutter's ANGLE
+  // device lives on (EnumAdapters(0), the one driving the primary display).
+  // Shared handles cannot cross adapters, so a producer texture created on
   // another GPU (e.g. Dawn picked the discrete GPU while the iGPU drives
   // the display) registers fine but fails every raster-time bind
   // ("Binding D3D surface failed." from the engine) with nothing
   // surfaced to Dart. Returning the failure from present() instead lets
-  // the app fall back to a CPU preview. Caches the last probed handle;
-  // fails OPEN (returns true) when no probe device can be created.
+  // the app fall back to a CPU preview. Probes every call (no verdict
+  // cache) and replaces a removed probe device once per call; fails OPEN
+  // (returns true) when no probe device can be created.
   static bool ProbeSharedHandleBindable(void* shared_handle,
                                         std::string* why);
 
@@ -103,6 +123,7 @@ class D3D11TextureHandler {
   bool RegisterWithEngine(FlutterDesktopGpuSurfaceType type);
 
   flutter::TextureRegistrar* registrar_ = nullptr;
+  std::shared_ptr<UnregisterTracker> unregistrations_;
   std::shared_ptr<flutter::TextureVariant> variant_;
   std::shared_ptr<SurfaceState> state_ = std::make_shared<SurfaceState>();
   int64_t texture_id_ = -1;

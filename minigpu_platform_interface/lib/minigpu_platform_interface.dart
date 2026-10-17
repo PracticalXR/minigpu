@@ -343,10 +343,11 @@ abstract class MinigpuPlatform {
   /// Pass `null` to revert to the default (native stderr) output.
   ///
   /// [level] sets the minimum verbosity; messages below this level are
-  /// suppressed before the callback is invoked. -1 silences everything.
+  /// suppressed before the callback is invoked. -1 silences everything. The
+  /// default is 2 (WARN), the native default.
   void setLogCallback(
     void Function(int level, String message)? callback, {
-    int level = 1,
+    int level = 2,
   }) {}
 
   /// Returns dedicated VRAM usage in bytes for the primary GPU.
@@ -586,6 +587,18 @@ enum ExternalPixelFormat {
   yuv420pAsRGBPlanes,
 }
 
+/// The matrix that maps a YUV frame's luma and chroma samples to RGB.
+enum YuvMatrix {
+  /// ITU-R BT.709: HD video and most screen capture. The default.
+  bt709,
+
+  /// ITU-R BT.601: SD video and many webcams.
+  bt601,
+
+  /// ITU-R BT.2020: UHD and HDR video.
+  bt2020,
+}
+
 /// D3D11-only provenance stored in [ExternalPlane.drmFormatModifier].
 ///
 /// The producer must have completed all GPU writes to a unique snapshot and
@@ -653,6 +666,17 @@ class ExternalVideoBuffer {
   /// only reader and casts it back.
   final Object? externalHandle;
 
+  /// The matrix [PlatformVideoTexture.toRGBA] converts a YUV frame with
+  /// ([ExternalPixelFormat.nv12] and both `yuv420p` layouts). Other formats
+  /// ignore it, and so does the web, where the browser converts a `VideoFrame`
+  /// with the colour space the frame carries.
+  final YuvMatrix yuvMatrix;
+
+  /// Whether YUV and gray samples span the full 0-255 range; false for
+  /// limited (video) range, luma 16-235 and chroma 16-240. Packed RGBA/BGRA
+  /// frames and the web ignore it.
+  final bool yuvFullRange;
+
   const ExternalVideoBuffer({
     required this.contentType,
     required this.pixelFormat,
@@ -662,6 +686,8 @@ class ExternalVideoBuffer {
     this.fence = const ExternalFence(),
     this.timestampUs = 0,
     this.externalHandle,
+    this.yuvMatrix = YuvMatrix.bt709,
+    this.yuvFullRange = true,
   });
 
   /// Whether the producer explicitly permits immutable D3D11 snapshot import.
@@ -717,12 +743,24 @@ abstract class PlatformVideoTexture {
 
   /// Convert to RGBA8 via an internal compute pass.
   /// Returns a [PlatformBuffer] (RGBA8, row-major). Caller owns it.
+  /// YUV and gray frames convert with the [ExternalVideoBuffer.yuvMatrix] and
+  /// [ExternalVideoBuffer.yuvFullRange] they were imported with.
+  /// Throws [UnsupportedError] for an unknown format and [StateError] when
+  /// the frame is missing a plane or the device is gone.
   PlatformBuffer toRGBA();
+
+  /// [toRGBA] without blocking the caller while the GPU converts: completes
+  /// with the buffer once the conversion has finished, and throws as [toRGBA]
+  /// does. The texture may be destroyed meanwhile; a backend keeps it alive
+  /// until the conversion is done. The default runs the synchronous [toRGBA].
+  Future<PlatformBuffer> toRGBAAsync() async => toRGBA();
 
   /// Convert a BGRA source video texture into the given cross-API shared
   /// output RGBA texture (zero-copy on Windows via D3D12/D3D11 shared NT
-  /// handle). Returns true on success. Returns false if unsupported or on
-  /// validation/dispatch failure.
+  /// handle). Returns true once the GPU has finished the copy. Returns false
+  /// if unsupported, on validation/dispatch failure, or when that wait timed
+  /// out. Blocks the caller until then: on a UI isolate prefer
+  /// [bgraToRgbaSharedOutputAsync].
   bool bgraToRgbaSharedOutput(PlatformSharedOutputTexture dst) => false;
 
   /// Async variant of [bgraToRgbaSharedOutput] that completes when the GPU
@@ -759,7 +797,9 @@ abstract class PlatformSharedOutputTexture {
 
   /// Copy the contents of [src] (an RGBA8 GPU storage buffer, e.g. the output
   /// of a GpuEffect dispatch) into this shared texture on the GPU.
-  /// Returns true on success, false if unsupported or on failure.
+  /// Returns true once the GPU has finished the copy, false if unsupported, on
+  /// failure, or when that wait timed out. Blocks the caller until then: on a
+  /// UI isolate prefer [copyFromBufferAsync].
   bool copyFromBuffer(PlatformBuffer src) => false;
 
   /// Async variant of [copyFromBuffer] that completes when the GPU copy
@@ -773,7 +813,16 @@ abstract class PlatformSharedOutputTexture {
   /// Variant of [copyFromBuffer] for buffers that hold 4 f32 components per
   /// pixel (R,G,B,A in [0,1]) instead of packed RGBA8 u32.  Used by
   /// visualizers (e.g. the spectrogram) that produce float colors directly.
+  /// Where it copies on the GPU it blocks and reports like [copyFromBuffer]:
+  /// on a UI isolate prefer [copyFromBufferF32Async].
   bool copyFromBufferF32(PlatformBuffer src) => false;
+
+  /// Async variant of [copyFromBufferF32]: completes true once the GPU has
+  /// finished the copy, false if unsupported, on failure, or when that wait
+  /// timed out, without blocking the calling isolate. The default runs the
+  /// synchronous [copyFromBufferF32].
+  Future<bool> copyFromBufferF32Async(PlatformBuffer src) async =>
+      copyFromBufferF32(src);
 
   /// Debug-only: synchronously read the first pixel (BGRA8 packed u32) of the
   /// underlying D3D11 texture using the cached Dawn-adapter D3D11 device.
@@ -827,6 +876,17 @@ abstract class PlatformComputeShader {
 
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ);
 
+  /// Compiles the pipeline for the loaded kernel and the current bindings
+  /// without running the kernel, in order with this shader's other work. Bind
+  /// first: the pipeline layout follows the binding kinds. Throws a
+  /// [StateError] when no pipeline results: no kernel or bindings, a closed or
+  /// busy shader, or a compile failure. The web reports WGSL validation errors
+  /// later, so there a bad kernel builds and its first dispatch fails.
+  ///
+  /// A backend without a separate build runs the kernel once over a single
+  /// workgroup instead.
+  Future<void> buildPipeline() => dispatch(1, 1, 1);
+
   /// Fire-and-forget dispatch: enqueues the compute pass and returns without
   /// waiting for queue submission.  Ordering is still guaranteed — dispatches,
   /// writes and reads execute in call order — so a subsequent awaited
@@ -879,6 +939,12 @@ abstract class PlatformRenderPipeline {
   /// created, reused, retired and live. Null means the loaded backend predates
   /// this diagnostic; it does not imply that bindings are retained.
   List<int>? get bindingCacheStats => null;
+
+  /// Completes once [status] leaves 0 (pending): the pipeline became ready,
+  /// failed, or was destroyed. Read [status] afterwards to learn which. It
+  /// never completes with an error. Null when the backend cannot signal, in
+  /// which case the caller polls [status].
+  Future<void>? get settled => null;
 
   Future<void> submitRender({
     required PlatformTextureView color,

@@ -23,6 +23,7 @@ import 'dart:typed_data';
 import 'package:minigpu/minigpu.dart';
 
 import 'planar_convert.dart';
+import 'planar_upload.dart';
 
 /// The destination a frame copies itself into, plus scratch it may borrow.
 ///
@@ -75,7 +76,8 @@ abstract class GpuFrame {
 /// reports the frame done, so this imports and blits when asked and retains
 /// nothing. Two consequences, and both bite the deferred path:
 ///
-///  * `GpuPane.show(frame)` is safe — the copy happens before you return.
+///  * `GpuPane.show(frame)` is safe — it presents and returns only after the
+///    GPU has FINISHED the copy, so the handle may be released once it does.
 ///  * `markDirty` + a LATER `flush` is not, for a handle whose validity ends
 ///    when the producer moves on. By flush time it may be closed (the copy
 ///    fails and the pane keeps its previous contents — a silently dropped
@@ -130,6 +132,9 @@ class SharedHandleGpuFrame extends GpuFrame {
     ));
     if (tex == null) return false;
     try {
+      // Completes once the GPU has finished the blit, not when it is
+      // submitted: the pane presents next, and the caller then releases the
+      // handle, and neither may race a copy still running.
       return await tex.bgraToRgbaSharedOutputAsync(target.texture);
     } finally {
       tex.destroy();
@@ -219,6 +224,7 @@ class PlanarCpuGpuFrame extends GpuFrame {
     required this.width,
     required this.height,
     this.range = PlanarColorRange.limited,
+    this.matrix = YuvMatrix.bt709,
   });
 
   final PlanarFormat format;
@@ -230,6 +236,10 @@ class PlanarCpuGpuFrame extends GpuFrame {
   /// planar_convert.dart about why guessing this wrong is silent.
   final PlanarColorRange range;
 
+  /// The YUV → RGB matrix. BT.709 unless the producer says otherwise; ignored
+  /// for BGRA.
+  final YuvMatrix matrix;
+
   @override
   final int width;
 
@@ -238,47 +248,41 @@ class PlanarCpuGpuFrame extends GpuFrame {
 
   @override
   Future<bool> copyInto(GpuPaneTarget target) async {
-    if (planes.length < format.planeCount || width <= 0 || height <= 0) {
-      return false;
-    }
+    // Pack every plane into ONE upload, at the 4-aligned offsets the plan
+    // gives the kernel. One transfer beats one per plane, and it keeps the
+    // buffer pool to a single allocation.
+    final plan = PlanarUploadPlan.of(
+      format: format,
+      planes: planes,
+      width: width,
+      height: height,
+    );
+    if (plan == null) return false;
+    final slots = plan.slots;
 
-    // Pack every plane into ONE upload, recording each one's byte offset so
-    // the kernel can find it. One transfer beats one per plane, and it keeps
-    // the buffer pool to a single allocation.
-    final offsets = <int>[];
-    var total = 0;
-    for (final p in planes) {
-      offsets.add(total);
-      total += p.byteLength;
-      // Rows are addressed as bytes in the shader, so 4-byte alignment of each
-      // plane's start keeps the u32 indexing honest.
-      total = (total + 3) & ~3;
-    }
-
-    final src = target.uploadBuffer(total);
-    for (var i = 0; i < planes.length; i++) {
-      await src.writeRawBytes(
-        Uint8List.fromList(planes[i].bytes),
-        dstByteOffset: offsets[i],
-      );
-    }
-
+    final src = target.uploadBuffer(plan.totalBytes);
     final rgba = target.scratchBuffer(width * height * 4);
     final cfg = Uint32List(kPlanarCfgWords)
       ..[0] = width
       ..[1] = height
       ..[2] = format.shaderCode
-      ..[3] = offsets[0]
+      ..[3] = slots[0].offset
       ..[4] = planes[0].strideBytes
-      ..[5] = offsets.length > 1 ? offsets[1] : 0
-      ..[6] = planes.length > 1 ? planes[1].strideBytes : 0
-      ..[7] = offsets.length > 2 ? offsets[2] : 0
-      ..[8] = planes.length > 2 ? planes[2].strideBytes : 0
-      ..[9] = range == PlanarColorRange.full ? 1 : 0;
+      ..[5] = slots.length > 1 ? slots[1].offset : 0
+      ..[6] = slots.length > 1 ? planes[1].strideBytes : 0
+      ..[7] = slots.length > 2 ? slots[2].offset : 0
+      ..[8] = slots.length > 2 ? planes[2].strideBytes : 0
+      ..[9] = range == PlanarColorRange.full ? 1 : 0
+      ..[10] = matrix.shaderCode;
 
     final cfgBuffer = target.configBuffer(kPlanarCfgWords);
-    await cfgBuffer.write(cfg, kPlanarCfgWords,
-        dataType: BufferDataType.uint32);
+    // Issued together and awaited once: the queue already orders them before
+    // the dispatch, and awaiting each cost a worker round trip apiece.
+    await Future.wait([
+      for (var i = 0; i < slots.length; i++)
+        ..._writePlane(src, planes[i].bytes, slots[i]),
+      cfgBuffer.write(cfg, kPlanarCfgWords, dataType: BufferDataType.uint32),
+    ]);
 
     final shader = target.planarConverter()
       ..setBufferAtSlot(0, src)
@@ -288,4 +292,30 @@ class PlanarCpuGpuFrame extends GpuFrame {
 
     return target.texture.copyFromBufferAsync(rgba);
   }
+}
+
+/// The writes that upload one plane: its whole words straight from the
+/// caller's list (no copy), then any 1-3 trailing bytes in a zero-padded word,
+/// since the upload takes whole words only.
+List<Future<void>> _writePlane(
+  Buffer dst,
+  List<int> bytes,
+  PlanarUploadSlot slot,
+) {
+  final body = slot.bodyBytes, tail = slot.tailBytes;
+  final data = bytes is Uint8List
+      ? bytes
+      : (Uint8List(slot.writeBytes)..setRange(0, slot.writeBytes, bytes));
+  return [
+    if (body > 0)
+      dst.writeRawBytes(
+        Uint8List.sublistView(data, 0, body),
+        dstByteOffset: slot.offset,
+      ),
+    if (tail > 0)
+      dst.writeRawBytes(
+        Uint8List(4)..setRange(0, tail, data, body),
+        dstByteOffset: slot.offset + body,
+      ),
+  ];
 }

@@ -1,4 +1,5 @@
 #include "../include/minigpu.h"
+#include "../include/minigpu_context_owner.h"
 
 #include <algorithm>
 #include <cmath>
@@ -36,6 +37,11 @@ OwnedTextureViewState::~OwnedTextureViewState() {
 bool OwnedTextureViewState::isAlive() const {
   return alive.load(std::memory_order_acquire) && textureState &&
          textureState->alive.load(std::memory_order_acquire);
+}
+
+bool OwnedTextureViewState::liveOnWorker() const {
+  return !destroyedOnWorker.load(std::memory_order_acquire) && textureState &&
+         !textureState->destroyedOnWorker.load(std::memory_order_acquire);
 }
 
 OwnedSamplerState::~OwnedSamplerState() {
@@ -291,6 +297,44 @@ bool currentDeviceMatches(mgpu::MGPU &owner, WGPUDevice creationDevice) {
   return matches;
 }
 
+// Frees the memory at destroy instead of when the last reference (a render
+// pipeline's cached bind group) lets go. On the worker, behind the uploads
+// and passes queued before it, and after a batch flush so recorded
+// dispatches are submitted first; Dawn keeps the memory until they finish.
+void queueTextureDestroy(const std::shared_ptr<mgpu::OwnedTextureState> &state) {
+  try {
+    state->owner->getWebGPUThread().enqueueAsync([state] {
+      mgpu::lock_guard<mgpu::mutex> lock(state->owner->getGpuMutex());
+      state->owner->flushBatchLocked();
+      // Under the GPU lock: a dispatch that checked the flag before this has
+      // already recorded, and one after it is refused.
+      state->destroyedOnWorker.store(true, std::memory_order_release);
+      if (state->texture) wgpuTextureDestroy(state->texture);
+    });
+  } catch (...) {
+    // The worker has exited: the last release frees the memory.
+    state->destroyedOnWorker.store(true, std::memory_order_release);
+  }
+}
+
+// The same ordering for a view or sampler, which frees no GPU memory at
+// destroy: marked on the worker behind the work queued before the destroy.
+template <typename State>
+void markDestroyedOnWorker(mgpu::MGPU *owner,
+                           const std::shared_ptr<State> &state) {
+  if (owner) {
+    try {
+      owner->getWebGPUThread().enqueueAsync([state] {
+        state->destroyedOnWorker.store(true, std::memory_order_release);
+      });
+      return;
+    } catch (...) {
+      // The worker has exited: nothing queued can run any more.
+    }
+  }
+  state->destroyedOnWorker.store(true, std::memory_order_release);
+}
+
 } // namespace
 
 extern "C" {
@@ -311,11 +355,12 @@ MGPUTexture *mgpuCreateTexture2D(int width, int height, int format, int usage,
 MGPUTexture *mgpuContextCreateTexture2D(MGPUContextHandle *context, int width,
                                         int height, int format, int usage,
                                         int layers, int mipLevels) {
-  if (!context) return nullptr;
   try {
-    auto &owner = *reinterpret_cast<mgpu::MGPU *>(context);
-    auto state = createTexture(owner, width, height, format, usage, layers,
-                               mipLevels);
+    // A destroyed or unknown handle is refused, not dereferenced.
+    auto owner = mgpu::retainHandleOwner(context);
+    if (!owner) return nullptr;
+    auto state = createTexture(owner->gpu(), width, height, format, usage,
+                               layers, mipLevels);
     return state ? new MGPUTexture{std::move(state)} : nullptr;
   } catch (...) {
     return nullptr;
@@ -396,11 +441,11 @@ MGPUSampler *mgpuContextCreateSampler(MGPUContextHandle *context, int addressU,
                                       int addressV, int addressW, int mag,
                                       int min, int mip, float lodMin,
                                       float lodMax, int compare) {
-  if (!context) return nullptr;
   try {
-    auto &owner = *reinterpret_cast<mgpu::MGPU *>(context);
-    auto state = createSampler(owner, addressU, addressV, addressW, mag, min,
-                               mip, lodMin, lodMax, compare);
+    auto owner = mgpu::retainHandleOwner(context);
+    if (!owner) return nullptr;
+    auto state = createSampler(owner->gpu(), addressU, addressV, addressW, mag,
+                               min, mip, lodMin, lodMax, compare);
     return state ? new MGPUSampler{std::move(state)} : nullptr;
   } catch (...) {
     return nullptr;
@@ -439,8 +484,9 @@ int mgpuWriteTextureRegion2D(MGPUTexture *texture, const uint8_t *bytes,
         [state, owned = std::move(owned), originX, originY,
          regionWidth, regionHeight, mipLevel,
          arrayLayer]() {
-          if (!state->alive.load(std::memory_order_acquire) ||
-              !currentDeviceMatches(*state->owner, state->creationDevice)) return;
+          // Admitted writes land even if the texture is destroyed meanwhile:
+          // its destroy is queued behind this task.
+          if (!currentDeviceMatches(*state->owner, state->creationDevice)) return;
           mgpu::lock_guard<mgpu::mutex> lock(state->owner->getGpuMutex());
           state->owner->flushBatchLocked();
           WGPUQueue queue = state->owner->tryGetQueue();
@@ -510,8 +556,8 @@ int mgpuSetOwnedTexture(MGPUComputeShader *shader, int slot,
         : kind == 1 ? mgpu::BindingKind::kSampledTextureUnfilterable
         : kind == 2 ? mgpu::BindingKind::kDepthTexture
                     : mgpu::BindingKind::kStorageTextureWriteOnly;
-    nativeShader->setOwnedTextureQueued(slot, std::move(state), bindingKind);
-    return 0;
+    return nativeShader->setOwnedTextureQueued(slot, std::move(state), bindingKind)
+        ? 0 : MGPU_SHADER_BIND_BUSY;
   } catch (...) {
     return 3;
   }
@@ -543,8 +589,8 @@ int mgpuSetOwnedSampler(MGPUComputeShader *shader, int slot,
         kind == 0 ? mgpu::BindingKind::kFilteringSampler
         : kind == 1 ? mgpu::BindingKind::kNonFilteringSampler
                     : mgpu::BindingKind::kComparisonSampler;
-    nativeShader->setOwnedSamplerQueued(slot, std::move(state), bindingKind);
-    return 0;
+    return nativeShader->setOwnedSamplerQueued(slot, std::move(state), bindingKind)
+        ? 0 : MGPU_SHADER_BIND_BUSY;
   } catch (...) {
     return 3;
   }
@@ -552,8 +598,8 @@ int mgpuSetOwnedSampler(MGPUComputeShader *shader, int slot,
 int mgpuReleaseTextureBinding(MGPUComputeShader *shader, int slot) {
   if (!shader || slot < 0 || slot > 63) return 1;
   try {
-    reinterpret_cast<mgpu::ComputeShader *>(shader)->releaseTextureBindingQueued(slot);
-    return 0;
+    return reinterpret_cast<mgpu::ComputeShader *>(shader)
+        ->releaseTextureBindingQueued(slot) ? 0 : MGPU_SHADER_BIND_BUSY;
   } catch (...) {
     return 3;
   }
@@ -562,8 +608,10 @@ int mgpuReleaseTextureBinding(MGPUComputeShader *shader, int slot) {
 void mgpuDestroyTexture(MGPUTexture *texture) {
   if (!texture) return;
   try {
-    if (texture->state)
+    if (texture->state) {
       texture->state->alive.store(false, std::memory_order_release);
+      queueTextureDestroy(texture->state);
+    }
     delete texture;
   } catch (...) {
   }
@@ -572,7 +620,13 @@ void mgpuDestroyTexture(MGPUTexture *texture) {
 void mgpuDestroyTextureView(MGPUTextureView *view) {
   if (!view) return;
   try {
-    if (view->state) view->state->alive.store(false, std::memory_order_release);
+    if (view->state) {
+      view->state->alive.store(false, std::memory_order_release);
+      markDestroyedOnWorker(view->state->textureState
+                                ? view->state->textureState->owner
+                                : nullptr,
+                            view->state);
+    }
     delete view;
   } catch (...) {
   }
@@ -581,8 +635,10 @@ void mgpuDestroyTextureView(MGPUTextureView *view) {
 void mgpuDestroySampler(MGPUSampler *sampler) {
   if (!sampler) return;
   try {
-    if (sampler->state)
+    if (sampler->state) {
       sampler->state->alive.store(false, std::memory_order_release);
+      markDestroyedOnWorker(sampler->state->owner, sampler->state);
+    }
     delete sampler;
   } catch (...) {
   }

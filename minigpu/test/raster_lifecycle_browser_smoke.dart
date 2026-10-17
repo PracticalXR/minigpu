@@ -96,6 +96,9 @@ Future<void> main() async {
         requireEveryPending: true,
       );
     }
+    if (runs('settle_signal')) {
+      receipt['settle_signal'] = await runRasterSettleSignalScenario();
+    }
     if (runs('preparation_timeout')) {
       hold = _BrowserPipelineHold.install();
       receipt['preparation_timeout'] =

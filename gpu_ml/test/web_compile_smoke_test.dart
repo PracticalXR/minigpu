@@ -22,7 +22,7 @@ void main() {
 
   Future<void> compile(List<String> args) async {
     final result = await Process.run(
-      Platform.resolvedExecutable,
+      _dartExecutable(),
       args,
       workingDirectory: Directory.current.path,
     );
@@ -49,4 +49,16 @@ void main() {
       '${outDir.path}${Platform.pathSeparator}smoke.wasm',
     ]);
   });
+}
+
+/// The `dart` launcher. Under `flutter test` this runs inside flutter_tester,
+/// which does not understand `compile` and never exits, so use the Dart SDK
+/// that ships beside it in the Flutter cache.
+String _dartExecutable() {
+  final exe = Platform.resolvedExecutable;
+  if (!exe.toLowerCase().contains('flutter_tester')) return exe;
+  // <flutter>/bin/cache/artifacts/engine/<platform>/flutter_tester
+  final cache = File(exe).parent.parent.parent.parent.path;
+  return [cache, 'dart-sdk', 'bin', Platform.isWindows ? 'dart.exe' : 'dart']
+      .join(Platform.pathSeparator);
 }

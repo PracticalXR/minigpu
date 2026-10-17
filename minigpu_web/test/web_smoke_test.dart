@@ -31,10 +31,9 @@ import 'package:test/test.dart';
 @JS('navigator.gpu')
 external JSAny? get _navigatorGpu;
 
-bool get _hasWebGPU {
-  final v = _navigatorGpu;
-  return v != null && !v.isUndefined;
-}
+// A JS null or undefined arrives as Dart null; dart2wasm cannot tell them
+// apart, so `isUndefined` throws there.
+bool get _hasWebGPU => _navigatorGpu != null;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -85,6 +84,7 @@ void main() {
         height: 4,
       );
       expect(() => tex.toRGBA(), throwsUnsupportedError);
+      expect(tex.toRGBAAsync(), throwsUnsupportedError);
     });
 
     test('destroy does not throw', () {
@@ -158,7 +158,7 @@ void main() {
       final input = Float32List.fromList(List.generate(n, (i) => i.toDouble()));
       final output = Float32List(n);
 
-      final buf = gpu.createBuffer(n, BufferDataType.float32);
+      final buf = gpu.createBuffer(input.lengthInBytes, BufferDataType.float32);
       await buf.write(input, n);
       await buf.read(output, n);
       buf.destroy();
@@ -176,7 +176,7 @@ void main() {
       final input = Float32List.fromList(List.generate(n, (i) => i + 1.0));
       final output = Float32List(n);
 
-      final buf = gpu.createBuffer(n, BufferDataType.float32);
+      final buf = gpu.createBuffer(input.lengthInBytes, BufferDataType.float32);
       await buf.write(input, n);
 
       final shader = gpu.createComputeShader();

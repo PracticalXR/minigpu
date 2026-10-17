@@ -24,7 +24,8 @@
 /// Host pages that preload the glue the old way (`minigpu_web.loader.js` in
 /// index.html — gui_bench, minigpu_av, the view example) still work: their
 /// glue really does live at `globalThis.Module`, and [_load] ADOPTS it as
-/// `MinigpuModule` instead of loading twice.
+/// `MinigpuModule` instead of loading twice (awaiting the loader's in-flight
+/// promise when that glue has not run yet).
 library;
 
 import 'dart:async';
@@ -216,10 +217,33 @@ bool get isMinigpuModuleLoaded =>
 
 /// Load (or adopt) the minigpu wasm module once. Safe to await repeatedly.
 /// Throws on fetch/instantiation failure — callers surface that as "no GPU
-/// on this platform" rather than a silent hang.
+/// on this platform" rather than a silent hang — and the next call tries again.
 Future<void> ensureMinigpuModuleLoaded() {
   if (isMinigpuModuleLoaded) return Future<void>.value();
-  return _loading ??= _load();
+  return _loading ??= _loadOnce();
+}
+
+/// [_load], forgotten when it fails: a cached failure would answer every later
+/// call without trying again (a fetch that failed once can succeed later).
+Future<void> _loadOnce() async {
+  try {
+    await _load();
+  } catch (_) {
+    _loading = null;
+    rethrow;
+  }
+}
+
+/// The promise of a host page's `_minigpu.loader.load()` while it is in
+/// flight (minigpu_web.loader.js keeps it until the load settles), else null.
+JSPromise<JSAny?>? _hostLoad(JSObject g) {
+  final minigpu = g.getProperty<JSAny?>('_minigpu'.toJS);
+  if (minigpu.isUndefinedOrNull || !minigpu.isA<JSObject>()) return null;
+  final loader = (minigpu as JSObject).getProperty<JSAny?>('loader'.toJS);
+  if (loader.isUndefinedOrNull || !loader.isA<JSObject>()) return null;
+  final loading = (loader as JSObject).getProperty<JSAny?>('loading'.toJS);
+  if (loading.isUndefinedOrNull || !loading.isA<JSPromise>()) return null;
+  return loading as JSPromise<JSAny?>;
 }
 
 Future<void> _load() async {
@@ -228,8 +252,24 @@ Future<void> _load() async {
   // will read `adapter.info` the moment a context is created.
   installWebGpuAdapterInfoShim();
 
-  // Legacy adoption: a host page that injected the glue globally. Ready now →
-  // adopt now; still initializing (loader.js in flight) → chain its handler.
+  // A host page's loader.js load in flight: share it. Its glue may not have
+  // run yet (no `Module` to adopt), and a scoped load beside it would make a
+  // second wasm whose handles and `WebGPU` table do not match the instance
+  // the page publishes.
+  final hostLoad = _hostLoad(g);
+  if (hostLoad != null) {
+    try {
+      await hostLoad.toDart;
+    } catch (_) {
+      // Its one page-relative glue URL can miss; the scoped load below tries
+      // every asset location.
+    }
+    if (isMinigpuModuleLoaded) return;
+  }
+
+  // Legacy adoption: a host page that injected the glue globally, runtime
+  // ready. Any other `Module` (another wasm's, or ours after a failed host
+  // load) is left alone: fall through to the scoped load.
   final legacy = g.getProperty<JSObject?>('Module'.toJS);
   if (legacy != null && !legacy.isUndefinedOrNull) {
     final ready =
@@ -238,23 +278,6 @@ Future<void> _load() async {
       g.setProperty('MinigpuModule'.toJS, legacy);
       return;
     }
-    if (!g.getProperty<JSAny?>('_minigpu'.toJS).isUndefinedOrNull) {
-      final done = Completer<void>();
-      final prev =
-          legacy.getProperty<JSFunction?>('onRuntimeInitialized'.toJS);
-      legacy.setProperty(
-        'onRuntimeInitialized'.toJS,
-        (() {
-          if (prev != null && !prev.isUndefinedOrNull) prev.callAsFunction();
-          g.setProperty('MinigpuModule'.toJS, legacy);
-          if (!done.isCompleted) done.complete();
-        }).toJS,
-      );
-      await done.future;
-      return;
-    }
-    // A global `Module` that is NOT ours and NOT being loaded by our loader —
-    // another wasm's. Leave it alone; fall through to the scoped load.
   }
 
   // Fetch the glue source (same-origin asset; typed interop so this package

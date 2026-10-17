@@ -122,6 +122,7 @@ MiniavGpuPreview(
 | `textureId` | The Flutter texture id (`null` before the first `present`). |
 | `size` | Natural pixel size of the most recent frame. |
 | `presentedAtUs` | Broadcast stream of host-side ack timestamps (µs). Use for backpressure. |
+| `retire(PreviewSource)` | Drops one replaced source. Completes after the engine has let go of its texture. |
 | `dispose()` | Releases platform resources. Must be called when no longer needed. |
 
 `MinigpuPreviewController` is a `ChangeNotifier` — widgets rebuild automatically when `textureId` or `size` changes.
@@ -141,7 +142,7 @@ MiniavGpuPreview(
 | Extension | Source | Notes |
 |---|---|---|
 | `SharedOutputTexture.asPreviewSource()` | minigpu | Zero-copy on Windows via DXGI shared handle. |
-| `MiniAVBuffer.asPreviewSource()` | miniav | Returns `null` for CPU buffers; use your existing CPU path in that case. |
+| `MiniAVBuffer.asPreviewSource()` | miniav | Returns `null` for CPU buffers and for Windows GPU buffers (their handle closes when the buffer is released). Show those with `asGpuFrame(gpu)` and a `GpuPane`. |
 
 ### Exceptions
 

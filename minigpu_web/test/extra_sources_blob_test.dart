@@ -1,11 +1,10 @@
-/// Validates the MGPU_EXTRA_SOURCES single-blob build: when the livetensor
-/// crosscoder is folded into minigpu_web.wasm (GSPLATS420 sec.9), the gs_*
-/// codec must work in the browser — encode, decode, and (when WebGPU is
-/// available) the GPU backend byte-exact against the CPU backend, all
-/// in-module.
+/// Validates the MGPU_EXTRA_SOURCES single-blob build: when an extra codec is
+/// compiled into minigpu_web.wasm, its gs_* exports must work in the browser —
+/// encode, decode, and (when WebGPU is available) the GPU backend byte-exact
+/// against the CPU backend, all in-module.
 ///
 /// Run with:
-///   flutter test -p chrome test/crosscoder_blob_test.dart \
+///   flutter test -p chrome test/extra_sources_blob_test.dart \
 ///     --web-browser-flag="--enable-unsafe-webgpu" \
 ///     --web-browser-flag="--disable-dawn-features=disallow_unsafe_apis" \
 ///     --web-browser-flag="--enable-features=SharedArrayBuffer"
@@ -134,7 +133,7 @@ void main() {
     }
 
     final ver = _cstr(await _call('gs_version', []));
-    expect(ver, contains('gsplats420'));
+    expect(ver, isNotEmpty);
 
     final webgpu = await _call('gs_webgpu_available', []);
     // ignore: avoid_print
