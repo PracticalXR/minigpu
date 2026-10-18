@@ -69,13 +69,13 @@ ffigen:
 
 build_weblib:
 	@echo "Building ffi lib to web via emscripten..."
-	@cd $(BUILD_WEB_DIR) && emcmake cmake .. -DCMAKE_TOOLCHAIN_FILE=$(EMSDK)/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake && cmake --build .
+	@cd $(BUILD_WEB_DIR) && emcmake cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$(EMSDK)/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake && cmake --build .
 	@$(MAKE) copy_weblib
 
 copy_weblib:
 	@echo "Copying web artifacts to minigpu_web/lib/web/ for publishing..."
-	@$(CP_CMD) $(BUILD_WEB_DIR)minigpu_web.js  $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.js
-	@$(CP_CMD) $(BUILD_WEB_DIR)minigpu_web.wasm $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.wasm
+	@$(CP_CMD) $(BUILD_WEB_DIR)generated$(SLASH)minigpu_web.js  $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.js
+	@$(CP_CMD) $(BUILD_WEB_DIR)generated$(SLASH)minigpu_web.wasm $(WEB_DIR)lib$(SLASH)web$(SLASH)minigpu_web.wasm
 	@echo "  copied minigpu_web.js and minigpu_web.wasm"
 
 build_ffilib:
@@ -103,7 +103,7 @@ help:
 	@echo *  make run_web: Runs the web example project."
 	@echo *  make ffigen: Generates dart ffi bindings."
 	@echo *  make build_weblib: Builds the ffi lib to web via emscripten + copies artifacts to lib/web/."
-	@echo *  make copy_weblib: Copies pre-built wasm artifacts from build_web/ to minigpu_web/lib/web/ for publishing."
+	@echo *  make copy_weblib: Copies pre-built wasm artifacts from build_web/generated/ to minigpu_web/lib/web/ for publishing."
 	@echo *  make build_ffilib: Builds the ffi lib to native."
 	@echo *  make clean_weblib: Cleans the web lib."
 	@echo *  make clean_ffilib: Cleans the native lib."

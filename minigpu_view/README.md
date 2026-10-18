@@ -31,6 +31,13 @@ On **Windows** the plugin registers a `kFlutterDesktopGpuSurfaceTypeDxgiSharedHa
 
 On **Web** the plugin registers a WebGPU canvas element as an `HtmlElementView`.
 
+GPU-buffer previews accept tightly packed `rgba8` (one little-endian `u32` per
+pixel) and `rgba32float` (four `f32` values per pixel). The producer buffer needs
+storage usage and must belong to the same WebGPU device as the canvas. A direct
+render pass reads its pixels without row padding, intermediate textures or CPU
+readback. The sink caches its pipelines and a 16-byte size uniform; dispose the
+preview controller to release that uniform and the canvas.
+
 ## Installation
 
 ```yaml
@@ -115,6 +122,7 @@ MiniavGpuPreview(
 | `textureId` | The Flutter texture id (`null` before the first `present`). |
 | `size` | Natural pixel size of the most recent frame. |
 | `presentedAtUs` | Broadcast stream of host-side ack timestamps (µs). Use for backpressure. |
+| `retire(PreviewSource)` | Drops one replaced source. Completes after the engine has let go of its texture. |
 | `dispose()` | Releases platform resources. Must be called when no longer needed. |
 
 `MinigpuPreviewController` is a `ChangeNotifier` — widgets rebuild automatically when `textureId` or `size` changes.
@@ -134,7 +142,7 @@ MiniavGpuPreview(
 | Extension | Source | Notes |
 |---|---|---|
 | `SharedOutputTexture.asPreviewSource()` | minigpu | Zero-copy on Windows via DXGI shared handle. |
-| `MiniAVBuffer.asPreviewSource()` | miniav | Returns `null` for CPU buffers; use your existing CPU path in that case. |
+| `MiniAVBuffer.asPreviewSource()` | miniav | Returns `null` for CPU buffers and for Windows GPU buffers (their handle closes when the buffer is released). Show those with `asGpuFrame(gpu)` and a `GpuPane`. |
 
 ### Exceptions
 

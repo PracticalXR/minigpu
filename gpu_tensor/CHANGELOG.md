@@ -1,12 +1,23 @@
 # gpu_tensor
 
+## 1.9.1
+
+- Version bump for the minigpu 1.9.1 family. No functional change in this
+  package.
+
+## 1.9.0
+
+- Version alignment with the minigpu 1.9.0 family release.
+
+## 1.8.1
+
+- Version alignment with the minigpu 1.8.1 family release.
+
 ## 1.7.0
 
-- Version bump to keep the minigpu 1.7.0 family aligned; inherits the
-  persistent shader cache from minigpu_ffi 1.7.0. Every WGSL kernel this
-  package compiles is now cached on disk and reused on the next process launch,
-  so tensor kernels pay compilation once per machine rather than once per run.
-  No API change in this package.
+- Version bump for the minigpu 1.7.0 family. Tensor kernels now use the
+  on-disk shader cache from minigpu_ffi 1.7.0, so they compile once per
+  machine instead of on every launch. No API change in this package.
 
 ## 1.6.1
 
@@ -14,9 +25,9 @@
 
 ## 1.6.0
 
-- Version bump to keep the minigpu 1.6.0 family aligned; inherits the
-  serialized, reference-counted native context from minigpu_ffi 1.6.0. No API
-  change in this package.
+- Version bump for the minigpu 1.6.0 family; picks up the shared,
+  reference-counted native context from minigpu_ffi 1.6.0. No API change in
+  this package.
 
 ## 1.5.9
 
@@ -76,21 +87,24 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback.
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter; fixes the wrong adapter
+  being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -123,9 +137,9 @@
 
 ## 1.2.1
 
-- Fix: fresh builds need dawn find off
-- Change: 1.2.0 migrates minigpu to direct webgpu usage
 - Breaking: Changed setData and references to .write
+- Change: 1.2.0 migrates minigpu to direct webgpu usage
+- Fix: fresh builds need dawn find off
 - Fix: broken compute shader and buffer finalizers
 
 ## 1.2.0
@@ -153,10 +167,7 @@
 
 ## 1.0.0
 
-- Initial version includes:
-  - `gpu_tensor` package with GPU tensor operations.
-  - Basic tensor operations: addition, subtraction, multiplication, and division.
-  - GPU accelerated FFT 1D and 2D operations.
-  - Tensor data operations such as slice, reshape, getElement, head, and tail.
-  - Unit tests for all tensor operations.
-  - Example usage in the README file.
+- Initial version:
+  - GPU tensor operations: addition, subtraction, multiplication and division.
+  - GPU-accelerated 1D and 2D FFT.
+  - Tensor data operations: slice, reshape, getElement, head and tail.

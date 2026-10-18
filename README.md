@@ -56,14 +56,14 @@ dart pub get
 
 ### Flutter apps: use `minigpu_flutter` instead
 
-If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that runs your registered GPU teardown at hot reload — the one moment a long-lived context has no other disposal hook.
+If you are building a Flutter app, add `minigpu_flutter` rather than `minigpu` directly.  It re-exports the full `minigpu` API and adds a thin widget that runs your registered callbacks at hot reload.
 
 ```yaml
 dependencies:
   minigpu_flutter: ^1.5.2
 ```
 
-Wrap your root widget with `MinigpuBinding` and register a `destroySync` callback for any long-lived `Minigpu` instance:
+Wrap your root widget with `MinigpuBinding` and register callbacks that drop objects your app rebuilds the next time it uses them. A hot reload keeps every GPU object and does not run `gpu.init()` again, so never register `gpu.destroySync`: every later dispatch would fail until a restart. A hot restart never runs these callbacks.
 
 ```dart
 import 'package:minigpu_flutter/minigpu_flutter.dart';
@@ -72,12 +72,11 @@ void main() {
   runApp(const MinigpuBinding(child: MyApp()));
 }
 
-// After gpu.init():
-MinigpuFlutterBinding.addDisposeCallback(gpu.destroySync);
+// The cache rebuilds an effect from the reloaded code when next asked for it:
+MinigpuFlutterBinding.addDisposeCallback(effectCache.clear);
 
-// When the resource is torn down normally (not via hot reload):
-MinigpuFlutterBinding.removeDisposeCallback(gpu.destroySync);
-await gpu.destroy();
+// When the cache is torn down normally:
+MinigpuFlutterBinding.removeDisposeCallback(effectCache.clear);
 ```
 
 ## Getting Started
@@ -436,7 +435,9 @@ final tex = gpu.importVideoFrame(ExternalVideoBuffer(
   ],
 ));
 
-// toRGBA() applies BT.709 full-range NV12→RGBA conversion on the GPU.
+// toRGBA() converts NV12 to RGBA on the GPU with the buffer's yuvMatrix and
+// yuvFullRange (BT.709 full range unless set). On native, toRGBAAsync() does
+// the same without blocking.
 final outBuf = tex!.toRGBA();
 ```
 

@@ -385,6 +385,39 @@ void ensureDirLocked(CacheState &s) {
   s.dirResolved = true;
 }
 
+/// True for a file this cache wrote: `<64 hex>.blob`, or the
+/// `<64 hex>.blob.tmp-*` a store leaves behind if it dies mid-write. A
+/// configured directory is the host's own (Android has no default, so the
+/// host hands over an app directory), so scan, eviction and clear touch only
+/// these names, never the other files in it. Works on the native string:
+/// narrowing a foreign non-ASCII name could throw.
+bool isCacheFileName(const fs::path &file) {
+  using C = fs::path::value_type;
+  const fs::path::string_type name = file.filename().native();
+  constexpr size_t kHexLen = 64;
+  static const char kBlob[] = ".blob";
+  static const char kTmp[] = ".tmp-";
+  constexpr size_t kBlobLen = sizeof(kBlob) - 1;
+  constexpr size_t kTmpLen = sizeof(kTmp) - 1;
+  if (name.size() < kHexLen + kBlobLen) return false;
+  for (size_t i = 0; i < kHexLen; ++i) {
+    const C c = name[i];
+    if (!((c >= C('0') && c <= C('9')) || (c >= C('a') && c <= C('f')))) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < kBlobLen; ++i) {
+    if (name[kHexLen + i] != C(kBlob[i])) return false;
+  }
+  const size_t rest = kHexLen + kBlobLen;
+  if (name.size() == rest) return true;
+  if (name.size() <= rest + kTmpLen) return false;
+  for (size_t i = 0; i < kTmpLen; ++i) {
+    if (name[rest + i] != C(kTmp[i])) return false;
+  }
+  return true;
+}
+
 /// Seeds bytesOnDisk / entryCount from the directory once, so the size cap and
 /// the stats mean something on a warm start. Called with the lock held.
 void scanLocked(CacheState &s) {
@@ -397,6 +430,7 @@ void scanLocked(CacheState &s) {
        it.increment(ec)) {
     std::error_code fe;
     if (!it->is_regular_file(fe) || fe) continue;
+    if (!isCacheFileName(it->path())) continue;
     const auto sz = it->file_size(fe);
     if (fe) continue;
     bytes += sz;
@@ -406,9 +440,10 @@ void scanLocked(CacheState &s) {
   s.entryCount = count;
 }
 
-/// LRU eviction by last-write time. Runs only when the running total exceeds
-/// the cap, and evicts down to 90% of it so a store near the boundary does not
-/// rescan the directory every time.
+/// LRU eviction by last-write time, which a hit refreshes (touchEntry), so the
+/// oldest mtime is the least recently USED entry. Runs only when the running
+/// total exceeds the cap, and evicts down to 90% of it so a store near the
+/// boundary does not rescan the directory every time.
 ///
 /// This runs on the compile path, which on a miss is already seconds of FXC —
 /// a directory scan is noise there. Deleting an entry another process is
@@ -429,6 +464,7 @@ void evictLocked(CacheState &s) {
        it.increment(ec)) {
     std::error_code fe;
     if (!it->is_regular_file(fe) || fe) continue;
+    if (!isCacheFileName(it->path())) continue;
     const auto sz = it->file_size(fe);
     if (fe) continue;
     const auto mt = it->last_write_time(fe);
@@ -461,6 +497,14 @@ void evictLocked(CacheState &s) {
 
 fs::path entryPathLocked(const CacheState &s, const void *key, size_t keyLen) {
   return s.dir / (hexDigest(key, keyLen) + ".blob");
+}
+
+/// Marks an entry as just used. Blobs are written once, so without this the
+/// kernels every launch loads are the oldest-WRITTEN entries and eviction
+/// takes them first. Best effort: a read-only or vanished entry keeps its time.
+void touchEntry(const fs::path &p) {
+  std::error_code ec;
+  fs::last_write_time(p, fs::file_time_type::clock::now(), ec);
 }
 
 /// Reads an entry and returns its payload, or false for any miss reason:
@@ -700,9 +744,11 @@ extern "C" size_t mgpu_shader_cache_dawn_load(const void *key, size_t keySize,
   }
 
   std::vector<uint8_t> payload;
+  fs::path path;
   bool ok = false;
   try {
-    ok = readEntry(entryPathLocked(s, key, keySize), key, keySize, payload);
+    path = entryPathLocked(s, key, keySize);
+    ok = readEntry(path, key, keySize, payload);
   } catch (...) {
     ok = false;  // A cache can never be the reason a device fails to come up.
   }
@@ -721,6 +767,7 @@ extern "C" size_t mgpu_shader_cache_dawn_load(const void *key, size_t keySize,
     // Sizing call: remember the payload so phase 2 is served from memory and
     // cannot disagree with what we just reported.
     ++s.hits;
+    touchEntry(path);
     s.memoKey.assign((const uint8_t *)key, (const uint8_t *)key + keySize);
     s.memoValue = payload;
     s.memoValid = true;
@@ -911,7 +958,9 @@ int mgpuShaderCacheClear(void) {
   for (fs::directory_iterator it(s.dir, ec), end; !ec && it != end;
        it.increment(ec)) {
     std::error_code fe;
-    if (it->is_regular_file(fe) && !fe) victims.push_back(it->path());
+    if (it->is_regular_file(fe) && !fe && isCacheFileName(it->path())) {
+      victims.push_back(it->path());
+    }
   }
   for (const auto &p : victims) {
     std::error_code de;

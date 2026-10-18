@@ -1,179 +1,222 @@
 # minigpu_ffi CHANGELOG
 
+## 1.9.1
+
+- The web (Emscripten) build in `src/` is an optimized release build unless a
+  build type is given. Pass `-DCMAKE_BUILD_TYPE=Debug` for debug info. Native
+  builds are unchanged.
+
+## 1.9.0
+
+- The shipped library is no longer tuned to the build machine's CPU
+  (`-march=native`, which could crash on other CPUs) or built with fast-math
+  (which removed the NaN and infinity checks).
+- A typed write past the end of a buffer throws `RangeError` instead of
+  aborting the process. A failed read throws `StateError` instead of handing
+  back stale bytes. A `ByteData` read gets the raw bytes at its start. New
+  `mgpuReadSyncChecked` returns whether a blocking read landed.
+- The device is created with Dawn's own locking on, so minigpu's threads no
+  longer race inside Dawn (for example a submitted-work wait against a write).
+- A C++ exception no longer aborts the process from an exported call. Each
+  export reports the failure through its usual result (null, 0, -1 or
+  `false`), and a refused call that takes a callback still calls it.
+- Destroying a buffer while a read of it is queued, or while an open upload
+  or readback scope still uses it, waits for them instead of freeing memory
+  under them.
+- Reads and writes at offsets that are not a multiple of 4 bytes work; they
+  used to return stale bytes or write nothing. 8- and 16-bit reads at an odd
+  element offset return the right elements, and 8-, 16- and 64-bit reads and
+  writes no longer convert element by element.
+- `mgpuStageRead` and `mgpuStageWrite` return -1 when their direct fallback
+  fails, instead of reporting success.
+- Writes, uploads and the end of an upload or readback scope keep call order
+  with queued dispatches and render passes, so a write after
+  `await pass.submit()` no longer reaches the GPU first. At most 64 MB of such
+  writes wait in the queue; past that, a write waits for the GPU thread.
+- Waiting for a buffer map, for submitted work or for a GPU error check no
+  longer spins a core, and a map wait no longer holds the device lock. The GPU
+  thread runs other work while a submitted-work wait is pending.
+- Native logging defaults to warnings and errors, and a call below the level
+  costs almost nothing. Clearing the log callback in one isolate no longer
+  disconnects another isolate's listener.
+- A failed context init calls its callback and frees its Dawn instance. The
+  Windows adapter list stops at the first failure instead of reading a null
+  adapter.
+- Calls that take a context handle refuse a destroyed or unknown context
+  instead of reading freed memory.
+- `createBuffer` returns null for a negative size or one over the device's
+  limit, instead of an error buffer that looked valid. From Dart, a size that
+  does not fit in 32 bits throws `RangeError` instead of being truncated.
+- At exit, the GPU thread finishes before the state it uses is destroyed, and
+  a task that throws no longer stops the thread.
+- An awaited dispatch reports whether it was submitted. A dispatch over the
+  device's workgroup limit, or a kernel or bind group that fails to build, is
+  skipped and logged instead of breaking every other dispatch in the same
+  batch. A binding slot out of range is refused instead of closing the shader.
+- A kernel's pipeline compiles without holding the GPU lock, so other threads
+  no longer wait behind a long compile. New `mgpuComputeShaderBuildPipeline`
+  and `mgpuComputeShaderBuildPipelineAsyncToPort` build it without
+  dispatching.
+- A shader keeps its last 8 buffer bind groups, so going back to buffers it
+  has used no longer builds a new bind group for each dispatch.
+- A buffer bound without a binding kind takes the access its kernel
+  declares: read-only for `var<storage, read>` or a bare `var<storage>`,
+  read-write for `var<storage, read_write>`. A read-only input bound this
+  way used to stop the kernel from building. The binding layout is rebuilt
+  with the pipeline, so it follows a newly loaded kernel.
+- Binding to a shader that a scoped use holds, or that is closing, returns
+  busy (4) instead of reporting success and dropping the binding. From Dart it
+  throws `StateError`; the call can be retried once the holder lets go.
+- Work queued before a texture, view or sampler is destroyed still runs, and
+  the texture's GPU memory is freed once it has, even while a cached bind
+  group still names it. Shared output and video textures are destroyed behind
+  the copies queued on them.
+- The shader cache deletes only its own files, and evicts the least recently
+  used entries first.
+- `toRGBA` converts GRAY8 to grey and I420 to colour, refuses unknown
+  formats, keeps one pipeline per input layout, and runs on the GPU thread.
+  It follows the frame's colour matrix (BT.709, BT.601 or BT.2020) and range,
+  set with the new `mgpuVideoTextureSetYuvColor`; the default stays BT.709
+  full range. New `mgpuVideoTextureToRGBAAsyncToPort` converts without
+  blocking.
+- BGRA presents and the blocking shared-output copies return after the GPU
+  copy has finished. New `mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort`.
+- A video frame that carries a producer fence is refused instead of read too
+  early.
+- Windows: D3D11/D3D12-specific calls first check which backend Dawn runs.
+  Shared-texture access is checked and its state freed. The CPU bridge maps
+  NV12 and more DXGI formats and reuses its staging texture. Imported
+  same-adapter frames copy through a four-slot ring, and cross-adapter objects
+  are released with the context. Cross-adapter frames use a three-slot ring
+  and take the CPU path when every slot is busy, instead of waiting.
+- Registered output pools: a cancelled or timed-out frame hands the keyed
+  mutex back to the producer; a failed consumer signal is reported as device
+  loss; the coordinator waits on fence events instead of polling; acquiring an
+  acquired output returns `CONFLICT`; device loss no longer blocks release. A
+  shader bound to a pool output keeps its texture view alive until rebound,
+  so releasing the pool first no longer frees the view under it.
+- A render pipeline's WGSL errors name the line and column.
+- New `mgpuRenderPipelineNotifySettledToPort` posts once when a render
+  pipeline finishes building; on the web the module calls
+  `Module.mgpuRenderPipelineSettled(handle)` instead. Destroying a context
+  closes its render pipelines, which settles any still building.
+- Texture uploads from Dart no longer copy every frame into a temporary
+  allocation. `importVideoFrame` zero-fills unused plane slots and checks the
+  plane count.
+- A failed `forAdapter` init frees its native context.
+- The build hook takes Dawn's library from the paths CMake links instead of
+  the first match of a recursive search.
+- Windows: scoped capture sources need MSVC v143 (VS 2022) for x64. Another
+  toolset still builds the library, with a CMake warning, and reports those
+  sources as unsupported at run time.
+- Web build settings: no fast-math, and a 1 MB Asyncify stack instead of
+  64 MB.
+- Removed the unused conversion kernels, `yuv_helpers.wgsl` and the
+  `mgpuCreateKernel` declaration, which had no definition.
+
+- Add exact-lease native D3D11 immutable output writers and bounded preview
+  loans. Writers reuse their pipeline and intermediate image; each shared output
+  is written once. Checked producer cleanup is separate from consumer removal,
+  with retained charges for ambiguous ownership and no device/CPU fallback.
+- Add checked final cleanup for dedicated native shaders and buffers. Admission
+  failure preserves caller ownership without a callback; accepted cleanup retains
+  the exact creation context through a native-reference-release acknowledgement.
+  Uncertain cleanup retains its owner, separate from GPU/use retirement.
+- Add strict creation-lease D3D11 BGRA snapshot import, opaque frame ownership,
+  one-frame shader attachment and checked queue/access retirement. Uncertain
+  cleanup returns a retained quarantine owner; no copy/device fallback occurs.
+  Frame counts and logical retained bytes have fixed native bounds and diagnostics.
+- Add bounded native exclusive shader scopes: exact creation-context retention,
+  gated shader mutation, deferred deletion and completion-checked retirement.
+  Callers retain their supporting resources; frame import/access retirement is
+  separate. Emscripten refuses these native scopes without GPU work.
+- Report failed async shader submission accurately to Dart ports and preserve
+  callbacks on refusals. External-pool binds now enter the shader FIFO directly.
+- Add a native callback form of the exact creation-lease submitted-work fence.
+  It reports success after queue completion, separately from dispatch submission,
+  and retains its own creation pin through acknowledgement. Dart keeps using
+  the port form; Emscripten explicitly refuses the native callback form.
+- Report submitted-work waiter allocation failure without throwing out of the
+  GPU worker. Missing or failed completion never authorizes resource release.
+
+## 1.8.1
+
+- Implement the new `PlatformBuffer.webBufferHandle` accessor (always 0 on
+  native).
+
 ## 1.7.0
 
-- **Persistent shader cache — Dawn's blob cache is now wired to disk, so
-  compiled shaders survive process exit.** Dawn has always cached compiled
-  shaders in memory, but it only writes through to storage when the embedder
-  supplies `loadDataFunction` / `storeDataFunction` on a
-  `DawnCacheDeviceDescriptor` chained onto the device descriptor. Nothing was
-  chained, so every launch recompiled everything. On the D3D11 backend that
-  means FXC, whose optimiser cost grows superlinearly with kernel size.
-  Measured with a 3-kernel probe: total time in `wgpuDeviceCreateComputePipeline`
-  **34 ms cold → 1 ms warm**, outputs byte-identical.
-
-  New `src/src/shader_cache.cpp` implements the storage; `buffer.cpp` chains
-  the descriptor at device creation and logs ONE summary line per device at
-  INFO (per-entry hit/miss detail is DEBUG — this channel defaults to INFO and
-  a line per blob would bury real warnings). `compute_shader.cpp` times
-  pipeline creation into `pipelineCreateMs`.
-
-  New exports: `mgpuShaderCacheSetEnabled`, `mgpuShaderCacheSetDirectory`,
-  `mgpuShaderCacheSetCapBytes`, `mgpuShaderCacheSetExtraKey`,
-  `mgpuShaderCacheSetProvider`, `mgpuShaderCacheClear`,
-  `mgpuGetShaderCacheStats`, `mgpuGetShaderCacheDirectory`.
-
-  Two environment overrides, following the `MGPU_BACKEND` / `MGPU_ADAPTER_NAME`
-  / `MGPU_WAIT_PROF` convention: **`MGPU_SHADER_CACHE=0`** turns caching off and
-  **`MGPU_SHADER_CACHE_DIR=<path>`** redirects it. Both OUTRANK the
-  programmatic setters — an env var exists to change a binary you cannot edit,
-  so a caller that hard-codes a setting must not be able to defeat it. This is
-  the first thing to try when a shader misbehaves and you need to know whether
-  the cache is involved.
-
-  Implementation notes worth knowing before touching it:
-
-  - **Entries store their full key and it is compared on read.** The filename
-    is only a hash of the key. Dawn's own hash validation binds hash→value, not
-    value→key, so on a filename collision it would accept a blob that is
-    internally valid but belongs to a different pipeline. The stored-key
-    compare is the only thing between a collision and a silently wrong
-    pipeline; a mismatch is a miss.
-  - **Nothing can fail device creation.** Unwritable directory, full disk,
-    corrupt/truncated entry, lock, concurrent process — all become a miss.
-  - Writes are atomic (temp file in the same directory, flushed, then renamed),
-    and readers open with full sharing so eviction cannot fault an in-flight
-    read.
-  - Dawn's two-phase load (size, then fetch) is bridged by a single-entry memo,
-    so the two calls cannot disagree and the file is read once per hit.
-  - `mgpuShaderCacheSetProvider` is intentionally NOT exposed to Dart: Dawn's
-    load callback is synchronous and may arrive on a Dawn-internal thread,
-    while a Dart isolate can only be entered asynchronously from a foreign
-    thread (`NativeCallable.listener`), which cannot return a blob to a blocked
-    caller.
-  - The file is inert under `__EMSCRIPTEN__` — the web build compiles the same
-    source glob and has neither Dawn nor a filesystem.
-
-- **`Buffer.writeRawBytes` no longer copies at all on the way to the GPU —
-  `upload` measured 3.71 → 1.84 ms/frame at 4K (-50%).** The chunked path used
-  to memcpy the payload into a native scratch first, purely so the FFI call had
-  a stable address to pass; `wgpuQueueWriteBuffer` then copied it AGAIN into
-  Dawn's staging ring. On a streaming path that is a whole-frame host memcpy per
-  frame (33.2 MB at 4K) buying nothing. `TypedData.address` in a leaf call hands
-  C the caller's own backing store, so the payload is copied exactly once, by
-  the driver. The isolate-wide raw scratch is gone with it — one fewer 32 MiB
-  pinned host allocation. Chunking (32 MiB) and byte ordering are unchanged; the
-  chunked branch uses `Uint8List.sublistView`, which aliases rather than copies.
-  Profiled confirmation that the removed time was pure waste: the time inside
-  `wgpuQueueWriteBuffer` itself did not move (1.83 → 1.78 ms).
-
-- **`mgpuWriteBufferAt` no longer lets a C++ exception escape into the caller.**
-  `writeBytesAt` throws on an invalid context or an out-of-range write, and
-  unwinding out of an FFI entry point is undefined behaviour for any caller — it
-  never became a Dart exception, it corrupted the frame it unwound through.
-  Now caught and logged. This became load-bearing with the leaf binding above,
-  where the VM has not transitioned out of Dart state and an escaping exception
-  is reliably fatal rather than merely undefined.
-
-- **The read path's staging buffer grows on demand instead of being resized to
-  fit every call.** It was destroyed and recreated whenever the next read asked
-  for a different length — fine for a fixed-size tensor, pathological for the
-  case this path actually serves, a compacted payload whose length changes every
-  frame. Measured over 723 reads at 4K, the destroy/create cycle cost 33.05 ms;
-  grow-on-demand costs 0.28 ms (-99%). Capacity only ever grows, to the next
-  power of two, bounded by the source buffer's own size, and is released with
-  the buffer — the same contract the batched-readback arena already shipped
-  with. This is the sibling of the raw-upload scratch bug above: a per-frame
-  allocate/free cycle wrapped around a transfer, costing more than the transfer.
-
-- **New: `MGPU_WAIT_PROF=1` — per-site attribution for the blocking waits and
-  per-call allocations on the transfer path**, with `MGPU_WAIT_PROF_MS=<n>` to
-  log every individual event over n ms as it happens. It reports each site's
-  count / total / mean / max AND the SPIN ITERATION COUNT of the waits, which is
-  the one thing host-side stage timers cannot tell you: a wait that is long
-  because the device is busy spins thousands of times, while a wait that is long
-  because the OS descheduled the thread shows a long wall against a handful of
-  iterations. Sites: the read path's lock / flush / staging-alloc / submit /
-  map-wait / copy-out / trailing event pump, the write path's lock / flush /
-  queue-write, the worker thread's enqueue-to-start latency, and the shared
-  texture drain. Off by default (one cached bool check).
-
-- **`Buffer.writeRawBytes` no longer `malloc`s its staging scratch per call —
-  ~3 ms/frame and a much fatter tail off any streaming upload.** It is the
-  whole-frame path (one call per frame, tens of times a second), and at 4K the
-  allocator cost more than the copy it was wrapping: 33.2 MB x 240 iterations
-  measured 4.55–4.67 ms median for allocate + copy + free against 1.31–1.69 ms
-  for the same copy through a scratch allocated once, with p99 6.14–8.72 ms
-  against 2.56–4.06 and a 12.8–15.6 ms worst case against 3.4–6.1. A per-frame
-  33 MB commit / first-touch / decommit cycle is a frame-time spike source in
-  its own right, which is what the tail numbers are showing. The scratch is now
-  one ISOLATE-WIDE buffer, grown on demand and bounded by the existing 32 MiB
-  chunk size no matter how many buffers stream through it — deliberately not a
-  per-buffer field, because pinning a transfer-sized scratch on every live
-  buffer is exactly what the 1 MiB `_maxPooledScratchBytes` cap exists to
-  prevent (thousands of live weight buffers). No API or semantic change; byte
-  ordering and chunking are unchanged.
-
-- **Async completions are delivered on a Dart native port — fixes the VM abort
-  `runtime_entry.cc: Callback invoked after it has been deleted` (whole-process
-  death, surfaced to the user as `Lost connection to device.`).** Every async
-  entry point built a `NativeCallable.listener` per call and `close()`d it in a
-  `finally`. That is unsound: `close()` DELETES the trampoline, this library
-  cannot be told to forget a pointer it has already been handed (there is no
-  cancel), and the dart:ffi contract for invoking a closed callable is
-  undefined behaviour that the VM implements as an unconditional `FATAL` —
-  uncatchable, no stack, takes the app with it. Completions fire on the WebGPU
-  worker thread, so a busy pipeline re-armed the race 5–10 times per frame.
-  `FfiBuffer.destroy()` was the same bug without a race: it closed the pooled
-  readback listener with no in-flight check at all. And `close()` was never the
-  only deleter — ISOLATE TEARDOWN deletes every callback the isolate owns, so
-  hot restart, a hard kill, and any worker isolate exiting with work in flight
-  were fatal too, which no amount of Dart-side discipline could have covered.
-  Posting to a Dart port that is closed, or whose isolate is gone, is a
-  defined, silent no-op instead. New exports carry the destination with each
-  call — no registration, so completions cannot be misrouted between isolates:
-  `mgpuInitializeContextAsyncToPort`, `mgpuContextInitializeAsyncToPort`,
-  `mgpuDispatchAsyncToPort`, `mgpuReadAsyncToPort`,
-  `mgpuCopyBufferToSharedOutputTextureAsyncToPort` and
-  `mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort`. Call
-  `mgpuInitDartApi(NativeApi.initializeApiDLData)` once first (the same bridge
-  the log port uses). WIRE FORMAT: one int64 per completion, `(token << 1) |
-  ok`; tokens are allocated by Dart and never reused, so a late or duplicate
-  completion is a lookup miss rather than somebody else's future resolving
-  early — a silent-corruption window the callback form could not close. Every
-  port entry point posts EXACTLY ONCE, including on argument-validation
-  failures, so a bad call now fails instead of hanging forever.
-  The `MGPUCallback` variants remain for embedders that own their function's
-  lifetime, and back a pooled never-closed fallback used only where the Dart
-  API is unavailable (the Emscripten build). Delivery is the same mechanism
-  either way — `NativeCallable.listener` is itself a port post underneath — so
-  there is no latency cost, and the per-call trampoline allocation is gone.
-  `MGPU_UNSAFE_CALLBACK_COMPLETIONS=1` forces the old callback path; it exists
-  only so the abort can be reproduced on demand (an isolate exiting with work
-  in flight kills the process under it, passes without it) and must never be
-  set in production.
-  FULLY BACKWARD COMPATIBLE: no Dart or C signature changed, every previous
-  export still exists and still behaves as before, and the Dart side PROBES for
-  one of the new symbols before committing to the port path — the Dart API
-  bridge shipped before these entry points did, so a binary older than the Dart
-  code (or a stale one served from a build cache) falls back cleanly instead of
-  throwing from the middle of a frame.
-- **`mgpuDrainWorkQueue()`**, surfaced in Dart as
-  `MinigpuPlatform.drainWorkQueue()` — blocks until everything already queued on
-  the WebGPU worker thread has run. Teardown ordering: destroying a resource an
-  enqueued task still references frees it under that task. Synchronous, because
-  the caller that needs it most cannot await (Flutter's `reassemble` on hot
-  reload). No-op when called from the worker thread itself, which cannot drain
-  the queue it heads, and on a binary predating the export.
-- **The build hook now declares `src/**` as build dependencies.** Only the Dawn
-  DLL was declared, so editing the C/C++ never re-ran the hook and the runner
-  served the previously built library — edits appeared to do nothing, silently,
-  because the Dart side still compiled and the stale binary behaved exactly as
-  it always had. Recognise it by a newly added export missing from the DLL
-  while everything else works, and verify a NEW SYMBOL, never the mtime.
-- Element-type codes for `mgpuReadAsyncToPort` are a dedicated `MGPUElementType`
-  enum rather than `BufferDataType`: the Dart and C++ `BufferDataType` enums are
-  ordered DIFFERENTLY, so an `.index` crossing the boundary is ambiguous.
+- **Compiled shaders are cached on disk**: Dawn's blob cache now writes to
+  storage, so shaders compile once per machine instead of on every launch. On
+  D3D11 each compile runs FXC, whose cost grows steeply with kernel size.
+  - New exports: `mgpuShaderCacheSetEnabled`, `mgpuShaderCacheSetDirectory`,
+    `mgpuShaderCacheSetCapBytes`, `mgpuShaderCacheSetExtraKey`,
+    `mgpuShaderCacheSetProvider`, `mgpuShaderCacheClear`,
+    `mgpuGetShaderCacheStats` (including `pipelineCreateMs`, the total time
+    spent creating compute pipelines) and `mgpuGetShaderCacheDirectory`.
+  - `MGPU_SHADER_CACHE=0` turns caching off and
+    `MGPU_SHADER_CACHE_DIR=<path>` moves it. Both override the setters, so you
+    can rule the cache in or out on a build you cannot change.
+  - A cache problem (unwritable directory, full disk, corrupt entry, lock,
+    another process) is a cache miss and never fails device creation. Each
+    entry stores its full key and is checked on read, so a hash collision
+    recompiles instead of loading the wrong pipeline.
+  - `mgpuShaderCacheSetProvider` is not available from Dart: Dawn calls a
+    provider synchronously, possibly on its own thread, which a Dart callback
+    cannot answer.
+  - Logs one summary line per device at INFO; per-entry detail is at DEBUG.
+    No effect on the web build.
+- **`Buffer.writeRawBytes` no longer copies or allocates on the way to the
+  GPU.** The payload used to be copied into a native scratch buffer before
+  the driver copied it again; the driver now reads the caller's bytes
+  directly, which halves upload time for a 4K frame and drops a pinned 32 MiB
+  host allocation. Chunking (32 MiB) and byte order are unchanged.
+- **`mgpuWriteBufferAt` no longer lets a C++ exception escape** on an invalid
+  context or an out-of-range write; the error is caught and logged instead of
+  crashing the caller.
+- **The read staging buffer grows instead of being recreated** whenever a
+  read asks for a different length. It grows to the next power of two, up to
+  the source buffer's size, and is freed with the buffer. This matters for
+  reads whose length changes every frame.
+- **New `MGPU_WAIT_PROF=1`**: per-site count, total, mean, max and spin count
+  for the blocking waits and per-call allocations on the transfer path;
+  `MGPU_WAIT_PROF_MS=<n>` also logs each event longer than n ms. A long wait
+  with many spins means the GPU was busy; with few spins, the thread was
+  descheduled. Off by default.
+- **Fix: async completions could abort the process** with
+  `runtime_entry.cc: Callback invoked after it has been deleted` (seen as
+  `Lost connection to device.`) on hot reload, hot restart, or when an isolate
+  exited with GPU work in flight. Completions are now posted to a Dart native
+  port, which is a safe no-op once the port or its isolate is gone.
+  - New exports take the port with each call:
+    `mgpuInitializeContextAsyncToPort`, `mgpuContextInitializeAsyncToPort`,
+    `mgpuDispatchAsyncToPort`, `mgpuReadAsyncToPort`,
+    `mgpuCopyBufferToSharedOutputTextureAsyncToPort` and
+    `mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort`. Call
+    `mgpuInitDartApi(NativeApi.initializeApiDLData)` once first.
+  - Each completion is one int64, `(token << 1) | ok`. Tokens are never
+    reused, so a late or duplicate completion cannot resolve the wrong future.
+    Each entry point posts exactly once, even on invalid arguments, so a bad
+    call fails instead of hanging.
+  - `mgpuReadAsyncToPort` takes its element type as the new `MGPUElementType`
+    enum, not `BufferDataType` (the Dart and C++ `BufferDataType` enums are
+    ordered differently).
+  - The `MGPUCallback` variants remain for embedders that manage their
+    callback's lifetime; the web build uses them.
+  - Backward compatible: no signature changed and every old export still
+    works. The Dart side checks for the new exports and falls back on an older
+    native library.
+  - `MGPU_UNSAFE_CALLBACK_COMPLETIONS=1` forces the old callback path. It
+    exists only to reproduce the crash; never set it in production.
+- **New `mgpuDrainWorkQueue()`** (Dart: `MinigpuPlatform.drainWorkQueue()`):
+  blocks until everything already queued on the WebGPU worker thread has run,
+  so teardown cannot free a resource a queued task still uses. Synchronous,
+  so it can run from Flutter's `reassemble` on hot reload. No-op when called
+  on the worker thread itself, and with an older native library.
+- **The build hook now rebuilds when anything under `src/` changes.** Before,
+  edits to the C/C++ sources did not trigger a rebuild and the previously
+  built library kept being used; a new export missing from the library was
+  the sign.
 
 ## 1.6.1
 
@@ -181,219 +224,132 @@
 
 ## 1.6.0
 
-- **The process-global context is now serialized and reference-counted.**
-  `mgpuInitializeContext` / `mgpuInitializeContextAsync` ATTACH,
-  `mgpuDestroyContext` DETACHES, and teardown happens only when the last
-  attached consumer leaves; new export `mgpuContextRefCount()` reports the
-  outstanding attaches. Init is idempotent under concurrency: a caller that
-  arrives while another thread is creating the device waits for it and shares
-  the result. Lazy internal re-initialization (`getDevice` / `getQueue` /
-  `isDeviceValid` / `ensureDeviceValid`) does NOT take a reference.
-  Single-consumer behaviour is unchanged: attach → 1 → real init, detach → 0 →
-  real teardown. TRAP this fixes: `initializeContext()` bailed out only on
-  `ctx && ctx->initialized`, so while one thread sat in the multi-millisecond
-  adapter/device request with `initialized` still false, another thread's lazy
-  `getDevice()` fell straight through the guard and re-assigned `ctx` — freeing
-  a live Context under a thread still holding raw pointers into it. Any host
-  that puts several independent consumers in ONE process (Dart isolates being
-  the obvious case) hit it as an access violation, and the surviving symptom
-  when it did not crash was one consumer's teardown killing another's device.
-  SECOND TRAP, for anyone touching this code: the lock must NOT be held across
-  the device request — teardown drains the WebGPU thread with a synchronous
-  enqueue, so a lock held across the slow work deadlocks. The state machine
-  holds it only across transitions, and the async init now runs on a one-shot
-  thread rather than the WebGPU thread for the same reason. Consequence worth
-  knowing: a consumer that exits without detaching keeps the context alive for
-  the life of the process — deliberate, and much cheaper than the alternative.
-  `MGPU_UNSAFE_NO_CTX_LOCK=1` restores the old unguarded behaviour (it exists
-  only to demonstrate the regression; it is the bug).
-- **`minigpu_external`'s cached D3D11 device/immediate context are locked and
-  dropped on teardown.** The lazy creation was an unlocked double-check —
-  concurrent callers each created a device and the second assignment released
-  the first out from under a pointer already handed out — and
-  `ID3D11DeviceContext` is not free-threaded, so every immediate-context use in
-  that file now takes the same lock (consumer-side debug device likewise; lock
-  order is consumer → producer). TRAP: on the D3D11 backend the cached
-  `ID3D11Device` IS Dawn's own device, so it used to survive a destroy/re-init
-  pointing at the dead one and the next `createSharedOutputTexture` silently
-  took the cross-device path and returned null.
-
-- **`setLogCallback` now delivers over a Dart native port, not a
-  `NativeCallable`.** New exports `mgpuInitDartApi(void*)` and
-  `mgpuSetLogPort(int64)`; log lines arrive as `[int32 level, Uint8List utf8]`
-  (bytes, because driver strings are not always valid UTF-8 — nothing to free,
-  `mgpuFreeLogMessage` does not apply to this path). TRAP this fixes: the log
-  registry is PROCESS-GLOBAL, so a `NativeCallable` registered by one isolate
-  outlived it — after that isolate exited, the next line a Dawn worker thread
-  logged ran a deleted trampoline and aborted the whole VM process
-  (`Callback invoked after it has been deleted`). A whole-suite `dart test` run
-  reproduced it every time and took down unrelated downstream suites. A closed
-  port is inert. Semantics are unchanged otherwise: process-global, LAST WRITER
-  WINS, and the registration is replaced natively *before* the old port is
-  closed. `mgpuSetLogCallback` stays exported for non-Dart embedders. Web/wasm
-  is unaffected (`MINIGPU_HAVE_DART_DL` is native-only; the Dart API is vendored
-  under `src/third_party/dart_dl`).
+- **The process-global context is serialized and reference-counted.**
+  `mgpuInitializeContext` / `mgpuInitializeContextAsync` attach,
+  `mgpuDestroyContext` detaches, and the device is torn down only when the
+  last consumer detaches; new `mgpuContextRefCount()` reports the count. A
+  caller that arrives while another is creating the device waits and shares
+  it. This fixes crashes, and one consumer's teardown killing another's
+  device, when several consumers (such as Dart isolates) share a process.
+  Single-consumer behaviour is unchanged. A consumer that exits without
+  detaching keeps the context alive for the rest of the process.
+  `MGPU_UNSAFE_NO_CTX_LOCK=1` restores the old unguarded behaviour; it exists
+  only to demonstrate the bug.
+- **The cached D3D11 device and immediate context are locked and released on
+  teardown.** Concurrent first use could release a device another caller
+  still held, and after a destroy and re-init the cached device still pointed
+  at the old one, so `createSharedOutputTexture` silently returned null.
+- **`setLogCallback` now delivers over a Dart native port.** This fixes a
+  whole-process abort (`Callback invoked after it has been deleted`) when a
+  log line arrived after the isolate that registered the callback had exited.
+  New exports `mgpuInitDartApi(void*)` and `mgpuSetLogPort(int64)`; lines
+  arrive as `[int32 level, Uint8List utf8]` (bytes, because driver strings
+  are not always valid UTF-8; `mgpuFreeLogMessage` does not apply). Still
+  process-wide, and the last registration wins. `mgpuSetLogCallback` remains
+  for non-Dart embedders. Native only.
 
 ## 1.5.9
 
-- **`mgpuDestroyComputeShader` no longer deletes the shader inline** — it queues
-  the delete on the WebGPU FIFO (new `ComputeShader::destroyQueued`), so it lands
-  after any bind or dispatch already queued against that shader.
-  Required by the ordered binds in minigpu 1.5.9: `setBufferQueued` captures the
-  shader pointer and mutates its binding tables when the task runs, so an inline
-  delete freed the object under a pending bind. This retires the caller-side
-  constraint the fire-bind docs used to carry ("do not destroy the shader until a
-  read has been awaited").
-  Buffers are unaffected and still delete immediately — a queued bind captures
-  only the raw `WGPUBuffer` handle by value, never the `Buffer` object. Both
-  sites are commented with that asymmetry.
-  Safe against re-entrancy: the destructor enqueues its own handle-release task,
-  and the worker pops a task under `queueMutex` and runs it with the lock
-  released, so enqueueing from inside a task cannot deadlock.
+- `mgpuDestroyComputeShader` queues the delete behind any bind or dispatch
+  already queued for that shader instead of deleting at once (needed by the
+  ordered binds in minigpu 1.5.9). You no longer need to await a read before
+  destroying a shader. Buffers are still deleted immediately.
 
 ## 1.5.8
 
-- **Fix: `MINIGPU_DAWN_DIR` was ignored when building through Flutter / dart
-  pub.** The build hook always passes `-DDAWN_DIR=<platform central path>`, and
-  because `dawn.cmake` only consults the env var when `DAWN_DIR` is undefined,
-  that define outranked it — the env var changed only where the hook LOOKED for a
-  prebuilt `webgpu_dawn` library, while cmake was still told
-  `%SYSTEMDRIVE%\dawn` and cloned/built Dawn there. The hook now resolves
-  `MINIGPU_DAWN_DIR` first for the define too.
-- **Fix: a Windows Dawn root broke a from-source Dawn build with "Invalid
-  character escape".** `DAWN_DIR` reached `FetchContent_Declare` with
-  backslashes (`C:\dawn`), and FetchContent writes `SOURCE_DIR` / `BINARY_DIR`
-  verbatim into the sub-build `CMakeLists.txt` it generates, where `\d` is an
-  invalid escape — configure failed inside a generated file, pointing at
-  `<dawn>/build_win_x86_64/tmp/CMakeLists.txt`. `dawn.cmake` now runs
-  `file(TO_CMAKE_PATH …)` on `DAWN_DIR`, and the hook emits forward slashes.
-  Only machines WITHOUT a prebuilt Dawn were affected: when `ENABLE_DAWN_FIND`
-  finds an existing build, the FetchContent branch never runs.
-- **Fix: `make build_weblib` (the Emscripten build) was broken by the
-  `DAWN_COMMIT` bump.** `--use-port=` hardcoded a version-stamped
-  `emdawnwebgpu-v<stamp>.remoteport.py` — a standalone port older Dawn shipped —
-  so em++ failed with "not a valid port path", and only ~370 targets in, after
-  Dawn itself had compiled. Current Dawn requires the port to come from its
-  ASSEMBLED package: the port file checks for generated headers copied in beside
-  it and otherwise errors "must sit in a built emdawnwebgpu_pkg". `--use-port`
-  now points at `${CMAKE_BINARY_DIR}/emdawnwebgpu_pkg/emdawnwebgpu.port.py`, and
-  `webgpu_web` takes a build dependency on Dawn's `emdawnwebgpu_pkg` target that
-  produces it — without that edge ninja may compile before the package exists.
-  The stamped layout is still accepted for older pins, the resolved path is
-  logged as `emdawnwebgpu port -> …`, and a Dawn tree with neither layout is a
-  configure-time `FATAL_ERROR` naming `DAWN_COMMIT` rather than a confusing
-  failure deep in the build.
-- **Fix: the Dawn event drain no longer costs a Windows timer quantum per GPU
-  wait.** `drain_dawn_events_with_timeout` waited with a 1 ms timeout on a future
-  nothing could notify early (the promise is set from a callback that runs later
-  in the same loop), and a 1 ms wait on Windows rounds up to the ~15.6 ms system
-  timer granularity — so every GPU wait cost a whole tick. It now probes with a
-  zero timeout and yield-spins for a bounded budget before degrading to coarse
-  sleeping. Measured p50 on an RTX 4090: shared-texture present 15.69 -> 2.57 ms
-  at 1280x720, 15.69 -> 10.07 ms at 3840x2160. Affects every caller that waits
-  through this drain (present, Dawn-side debug reads, video import).
-  `MGPU_DRAIN_SPIN_MS=<0..1000>` tunes the budget (default 8); `0` restores the
-  pre-fix behaviour, for A/B only. It is parsed strictly and warns on both a
-  malformed value and an explicit `0` — it previously used `std::atoi`, so
-  `on`/`true`/a typo silently selected the pathological 0.
-- New `mgpuDrainSpinBudgetMs()` — the budget the loaded binary implements, so a
-  caller can assert it is not running a stale artifact.
-- New ADDITIVE batched-staging-upload scope: `mgpuBeginUploads` /
-  `mgpuStageWrite` / `mgpuStageReserve` / `mgpuEndUploads` (+
-  `mgpuUploadsSupported`, `mgpuUploadStats`, `MGPU_UPLOAD_PROF=1`, and
-  `mgpuContextBeginUploads` / `mgpuContextEndUploads` for multi-GPU). N
-  scattered host writes become ONE `wgpuQueueWriteBuffer` into a persistent
-  staging buffer plus N `copyBufferToBuffer` recorded into the compute batch
-  already being built — one mutex acquire, zero extra submits, unchanged
-  ordering. A scope must not span a dispatch that READS what it stages. With no
-  scope open (or an unaligned range) `mgpuStageWrite` writes inline.
-- New ADDITIVE batched-readback scope: `mgpuBeginReadbacks` / `mgpuStageRead` /
+- **Fix: `MINIGPU_DAWN_DIR` was ignored when building through Flutter or
+  `dart pub`.** It only changed where a prebuilt library was looked for;
+  Dawn was still cloned and built in `%SYSTEMDRIVE%\dawn`.
+- **Fix: a Windows Dawn path broke a from-source Dawn build** with `Invalid
+  character escape` in `<dawn>/build_win_x86_64/tmp/CMakeLists.txt`. Only
+  machines without a prebuilt Dawn were affected.
+- **Fix: the Emscripten build (`make build_weblib`) failed after the Dawn
+  update** with "not a valid port path". It now uses the emdawnwebgpu port
+  from Dawn's built `emdawnwebgpu_pkg` (older Dawn layouts still work), and
+  fails at configure time, naming `DAWN_COMMIT`, when neither is found.
+- **Fix: every GPU wait on Windows cost a ~15.6 ms timer tick.** Waits now
+  spin briefly before sleeping; a shared-texture present at 1280x720 went
+  from 15.7 ms to 2.6 ms (p50). This affects every wait through the event
+  drain (present, debug reads, video import). `MGPU_DRAIN_SPIN_MS=<0..1000>`
+  sets the spin budget (default 8; `0` restores the old behaviour, for
+  comparison only); it warns on an invalid value and on an explicit `0`.
+- New `mgpuDrainSpinBudgetMs()`: the budget the loaded library implements, so
+  a caller can check it is not running a stale build.
+- New batched upload scope: `mgpuBeginUploads` / `mgpuStageWrite` /
+  `mgpuStageReserve` / `mgpuEndUploads` (+ `mgpuUploadsSupported`,
+  `mgpuUploadStats`, `MGPU_UPLOAD_PROF=1`, and `mgpuContextBeginUploads` /
+  `mgpuContextEndUploads` for secondary contexts). Many small host writes
+  become one queue write plus copies recorded into the current compute
+  batch. A scope must not span a dispatch that reads what it stages. Outside
+  a scope, or for an unaligned range, `mgpuStageWrite` writes immediately.
+- New batched readback scope: `mgpuBeginReadbacks` / `mgpuStageRead` /
   `mgpuReadbackReserve` / `mgpuEndReadbacks` (+ `mgpuReadbacksSupported`,
-  `mgpuReadbackStats`, `MGPU_READBACK_PROF=1`, and `mgpuContextBeginReadbacks` /
-  `mgpuContextEndReadbacks`). N per-buffer `mgpuReadSync*` calls — each taking
-  the device mutex, flushing the batch with its own submit and blocking for GPU
-  completion — become ONE submit, ONE fence and ONE map into a persistent
-  readback buffer. Measured on an RTX 4090: 8 reads totalling 2.72 MB,
-  1.098 -> 0.465 ms of API time. Three contract differences from the upload
-  twin: a staged read is not filled until `mgpuEndReadbacks` (keep `dst` alive,
-  do not inspect it earlier); every staged read observes its source as of End,
-  so a scope must not span a dispatch that OVERWRITES what it stages; and
-  `mgpuStageRead` is a RAW BYTE read (mirror of `mgpuWriteBufferAt`, not of
-  `mgpuReadSyncUint8`). Unaligned or scopeless reads fall back inline.
-- Both scopes resolve INLINE on the calling thread under the same device mutex
-  the inline read/write paths take. Emitting on minigpu's WebGPU thread would
-  race, because `mgpuReadSync*` / `mgpuWrite*` do not join that FIFO.
+  `mgpuReadbackStats`, `MGPU_READBACK_PROF=1`, and
+  `mgpuContextBeginReadbacks` / `mgpuContextEndReadbacks`). Many
+  `mgpuReadSync*` calls become one submit, one fence and one map. Unlike
+  uploads: a staged read is filled only at `mgpuEndReadbacks` (keep `dst`
+  alive and do not read it earlier); every staged read sees its source as of
+  End, so a scope must not span a dispatch that overwrites it; and
+  `mgpuStageRead` reads raw bytes (like `mgpuWriteBufferAt`, not
+  `mgpuReadSyncUint8`). Unaligned reads, and reads outside a scope, happen
+  immediately.
+- Both scopes run on the calling thread under the device mutex, like the
+  plain read and write calls.
 - New multi-adapter context handles: `mgpuCreateContextHandle(adapterFilter)`,
   `mgpuContextInitializeAsync`, `mgpuContextGetAdapterName`,
-  `mgpuContextCreateBuffer`, `mgpuContextCreateComputeShader`,
-  `mgpuDestroyContextHandle` — an independent device, queue and task FIFO per
-  handle, exposed in Dart as `createSecondaryPlatform`. Resources from two
-  contexts must never be mixed in one dispatch.
-- New `mgpuEnumAdapters(namesOut, totalOut, usedOut, cap)` (DXGI) plus the Dart
-  `listAdapters()` override returning `GpuAdapterInfo` — adapter name, total
-  dedicated VRAM, current usage.
-- New `mgpuSetBufferFire` plus Dart `setBufferFire` / `dispatchFire`:
-  `dispatchFire` drops the per-dispatch completer round trip (the enqueue was
-  already async) and `setBufferFire` makes the bind join that same FIFO, so
-  bind -> fire -> rebind -> fire is ordered. Bindings are snapshotted when the
-  dispatch RUNS, not when it is fired.
-- New Dart `Buffer.writeRawBytes`: 4-byte-aligned raw upload streamed through a
-  host scratch allocation of at most 32 MB, so a multi-GB write never pins its
-  own size in host RAM or driver staging. `ArgumentError` on a misaligned
-  offset or length.
-- New `mgpuDebugConsumerChecksumSharedHandle(handle, w, h)` — FNV-1a over the
-  shared output surface read through an independent ID3D11Device, i.e. the way a
-  compositor sees it. Unlike `...DebugReadFirstPixel` (which reads through
-  Dawn's own device) it can observe a half-written present, making it usable as
-  a tearing/staleness oracle. Verification only.
-- New `MGPU_PRESENT_NO_WAIT=1` — deliberately broken, test-only: drops the
-  present's completion wait so the oracle above can be positive-controlled.
-  Never set it in production.
+  `mgpuContextCreateBuffer`, `mgpuContextCreateComputeShader` and
+  `mgpuDestroyContextHandle`. Each handle has its own device, queue and task
+  queue (Dart: `createSecondaryPlatform`). Never mix resources from two
+  contexts in one dispatch.
+- New `mgpuEnumAdapters(namesOut, totalOut, usedOut, cap)` (DXGI) and Dart
+  `listAdapters()` returning `GpuAdapterInfo`: adapter name, total dedicated
+  VRAM and current usage.
+- New `mgpuSetBufferFire` and Dart `setBufferFire` / `dispatchFire`:
+  `dispatchFire` skips the per-dispatch completion round trip, and
+  `setBufferFire` queues the bind in the same order, so bind → fire → rebind
+  → fire is ordered. Bindings are read when the dispatch runs, not when it is
+  fired.
+- New Dart `Buffer.writeRawBytes`: 4-byte-aligned raw upload streamed through
+  at most 32 MB of host scratch, so a very large write never holds its full
+  size in host memory. `ArgumentError` on a misaligned offset or length.
+- New `mgpuDebugConsumerChecksumSharedHandle(handle, w, h)`: an FNV-1a
+  checksum of the shared output surface read through a separate D3D11 device,
+  as a compositor sees it, for detecting torn or stale presents in tests.
+  Verification only.
+- New `MGPU_PRESENT_NO_WAIT=1`: test-only and deliberately broken (skips the
+  present's completion wait) to check the checksum above. Never set it in
+  production.
 
 ## 1.5.7
 
-- Release cut of the adapter-selection / Tier B–Tier C work documented under
-  1.5.6; no additional API change.
+- Release of the adapter-selection and Tier B / Tier C work listed under
+  1.5.6; no further API change.
 
 ## 1.5.6
 
-- New pre-init hint `mgpuPreferDisplayAdapter(int enable)` (+ Dart
-  `preferDisplayAdapter`): bind Dawn to the adapter driving the PRIMARY
-  display so screen capture (Desktop Duplication / WGC), GPU processing and
-  any D3D11 encoder created on Dawn's adapter share one GPU — same-adapter
-  zero-copy — even on multi-output hybrid systems where the discrete GPU
-  also drives a monitor (there the automatic "dGPU has no outputs" topology
-  detection cannot see the capture/compute split, so capture used to fall to
-  the Tier C CPU bridge). Returns whether the hint landed before context
-  init; `MGPU_ADAPTER_NAME` still overrides. Also new:
-  `mgpuGetSelectedAdapterName` to query which adapter Dawn actually bound.
-- Fix hybrid-laptop backend auto-select probing the wrong adapter's
-  cross-adapter capability. Tier B's cross-adapter texture is allocated on the
-  *producer* (display / iGPU) device, so its viability is gated by the
-  producer's `CrossAdapterRowMajorTextureSupported` — but startup detection
-  tested the *compute* (dGPU) adapter instead. On machines where the dGPU
-  advertises the capability but the iGPU does not, minigpu committed to the
-  D3D12 / Tier-B backend and then degraded to the Tier C CPU bridge on every
-  frame ("Tier B: adapter does not support CrossAdapterRowMajorTextureSupported.
-  Falling back to Tier C."). Now the display (capture-producer) adapter's
-  capability is what selects Tier B vs Tier A*; when it lacks the capability we
-  take Tier A* (run Dawn on the iGPU) for zero-copy capture import and keep the
-  FFmpeg HW encoder on the iGPU. Also made the Tier A* adapter binding robust:
-  if the exact display-name match misses, auto-select now prefers the
-  integrated GPU rather than falling back to the discrete one.
+- New pre-init hint `mgpuPreferDisplayAdapter(int enable)` (Dart:
+  `preferDisplayAdapter`): use the GPU that drives the primary display, so
+  screen capture, GPU processing and a D3D11 encoder on that adapter share
+  frames without copies, even on hybrid systems where the discrete GPU also
+  drives a monitor. Returns whether the hint arrived before context init;
+  `MGPU_ADAPTER_NAME` still overrides. New `mgpuGetSelectedAdapterName`
+  reports the adapter Dawn chose.
+- Fix hybrid laptops falling back to the CPU bridge (Tier C) on every frame.
+  The cross-adapter (Tier B) check tested the compute GPU instead of the
+  display GPU that allocates the shared texture. When the display GPU lacks
+  `CrossAdapterRowMajorTextureSupported`, Dawn now runs on the integrated GPU
+  (Tier A*) for zero-copy capture, and the hardware encoder stays there too.
+  If the exact display-name match fails, auto-select prefers the integrated
+  GPU.
 
 ## 1.5.5
 
-- Raise per-device GPU submission priority (`IDXGIDevice::SetGPUThreadPriority(+7)`)
-  on the cached D3D11 device (both the Dawn-native-D3D11 fast path and the
-  created-on-Dawn-adapter path), so minigpu's compute/copy submissions are less
-  starved when another process saturates the GPU. Best-effort; failure is logged.
-- Tier B (D3D12 cross-adapter bridge) probing now caches a sticky negative
-  result per adapter: when the adapter lacks
-  `CrossAdapterRowMajorTextureSupported` (or any Tier B init step fails), the
-  probe used to re-run `D3D12CreateDevice` and re-log "Falling back to
-  Tier C" on every call — frame-rate log spam plus wasted per-frame device
-  creation. It now probes and warns once per adapter per process.
+- Raise GPU submission priority (`IDXGIDevice::SetGPUThreadPriority(+7)`) on
+  the cached D3D11 device, so minigpu's work is starved less when another
+  process saturates the GPU. Best effort; a failure is logged.
+- The Tier B (D3D12 cross-adapter) probe remembers a failure per adapter, so
+  it no longer recreates a D3D12 device and logs "Falling back to Tier C" on
+  every frame.
 
 ## 1.5.4
 
@@ -401,12 +357,11 @@
 
 ## 1.5.3
 
-- Implement `copyFromBufferAsync` / `bgraToRgbaSharedOutputAsync`. New native
-  exports `mgpuCopyBufferToSharedOutputTextureAsync` /
-  `mgpuVideoTextureBGRAToRGBASharedOutputAsync` run the copy (including the
-  `wgpuQueueOnSubmittedWorkDone` present sync) on the WebGPU worker thread and
-  invoke a Dart `NativeCallable` completion callback, so the calling isolate is
-  no longer blocked on the present-wait busy-poll.
+- New exports `mgpuCopyBufferToSharedOutputTextureAsync` /
+  `mgpuVideoTextureBGRAToRGBASharedOutputAsync` (Dart: `copyFromBufferAsync`
+  / `bgraToRgbaSharedOutputAsync`) run the copy and present sync on the
+  WebGPU worker thread and call back when done, so the calling isolate no
+  longer busy-waits on the present.
 
 ## 1.5.2
 
@@ -450,22 +405,25 @@
 
 ## 1.4.6
 
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
-- fix garbled adapter name in logs: WGPUStringView.data is not null-terminated, copy to std::string before passing to snprintf
+- Fix garbled adapter names in logs.
 
 ## 1.4.5
 
-- fix Dawn built inside pub-cache instead of system dir: pass DAWN_DIR from Dart hook as cmake -D define so cmake subprocess inherits the correct path regardless of env; fix FETCHCONTENT_BASE_DIR pointing to pub-cache (now uses cmake binary dir)
-- add Minigpu.setLogCallback / setLogLevel: routes native Dawn/GPU log lines through a Dart callback (NativeCallable.listener); mgpuSetLogCallback + mgpuSetLogLevel exported from C layer; all stderr calls in minigpu_external.cpp replaced with structured LOG_ERROR/INFO/WARN/DEBUG macros
+- Fix Dawn being built inside the pub cache instead of the shared Dawn
+  directory.
+- Add `Minigpu.setLogCallback` / `setLogLevel`: native Dawn/GPU log lines are
+  routed to a Dart callback (C exports `mgpuSetLogCallback` /
+  `mgpuSetLogLevel`).
 
 ## 1.4.4
 
-- fix FormatException on non-UTF-8 bytes in setLogCallback: use Utf8Decoder(allowMalformed: true) instead of toDartString()
+- Fix a `FormatException` in `setLogCallback` when a log line is not valid
+  UTF-8.
 
 ## 1.4.3
 
-- add dawn::native::Instance + EnumerateAdapters for explicit adapter type selection
-- improve adapter selection to prefer discrete GPU using dawn native EnumerateAdapters; fixes incorrect adapter picked on Optimus laptops
+- Prefer the discrete GPU when selecting an adapter (using Dawn's adapter
+  enumeration); fixes the wrong adapter being picked on Optimus laptops.
 
 ## 1.4.2
 
@@ -498,9 +456,9 @@
 
 ## 1.2.1
 
-- Fix: fresh builds need dawn find off
-- Change: 1.2.0 migrates minigpu to direct webgpu usage
 - Breaking: Changed setData and references to .write
+- Change: 1.2.0 migrates minigpu to direct webgpu usage
+- Fix: fresh builds need dawn find off
 - Fix: broken compute shader and buffer finalizers
 
 ## 1.2.0

@@ -24,14 +24,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 /// Writes `src[i] + bias` into `dst[i]`. Buffers at explicit slots — the shape
 /// tag-keyed binds cannot express, and the shape a texture-mixing shader needs.
-// All bindings are read_write: minigpu's generated bind-group layout declares
-// storage entries as read-write, and a `var<storage, read>` in the WGSL fails
-// the layout match — which surfaces only as "[Invalid ComputePipeline] is
-// invalid due to a previous error" on the next submit.
+/// The inputs are read-only: a plain bind takes the access the kernel declares.
 const _kAddBiasToDst = '''
-@group(0) @binding(0) var<storage, read_write> src: array<u32>;
+@group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;
-@group(0) @binding(2) var<storage, read_write> bias: array<u32>;
+@group(0) @binding(2) var<storage> bias: array<u32>;
 @compute @workgroup_size(1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   dst[gid.x] = src[gid.x] + bias[0];
@@ -127,6 +124,33 @@ void main() {
     }
 
     expect(await run(fire: true), await run(fire: false));
+  });
+
+  test('a plain bind takes the access the kernel declares', () async {
+    // An awaited dispatch throws when no pipeline can be built, which is what
+    // a read-only declaration met by a read-write binding used to cause.
+    final src = await u32Buf([10, 20]);
+    final dst = await u32Buf([0, 0]);
+    final bias = await u32Buf([1]);
+    final shader = gpu.createComputeShader()
+      ..loadKernelString(_kAddBiasToDst)
+      ..setBuffer('src', src)
+      ..setBuffer('dst', dst)
+      ..setBuffer('bias', bias);
+    await shader.dispatch(2, 1, 1);
+    expect(await readU32(dst, 2), [11, 21]);
+
+    // The next kernel declares the same slot read_write.
+    shader
+      ..loadKernelString(_kAddOne)
+      ..setBuffer('data', src);
+    await shader.dispatch(2, 1, 1);
+    expect(await readU32(src, 2), [11, 21]);
+
+    shader.destroy();
+    for (final b in [src, dst, bias]) {
+      b.destroy();
+    }
   });
 
   test('dispatchFire enforces the 65535 workgroup cap', () {

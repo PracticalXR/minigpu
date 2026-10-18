@@ -99,7 +99,8 @@ extern "C" mgpu::MGPU minigpu;
  * timer quantum, ~15.6 ms unless some process in the session has raised the
  * resolution. Every call therefore cost one whole tick.
  *
- * Measured (RTX 4090, gs420 decode present): GPU decode + shared-texture
+ * Measured (RTX 4090, a GPU video decode presented through a shared texture):
+ * GPU decode + shared-texture
  * present p50 = 15.69 ms at 1280x720 AND 15.69 ms at 3840x2160 — bit-for-bit
  * the same number at 9x the pixels, while the same decode WITHOUT the present
  * costs 3.14 / 12.61 ms. A cost that is invariant in the work is not the work;
@@ -229,6 +230,70 @@ static bool present_wait_disabled() {
     return cached != 0;
 }
 
+static bool on_webgpu_worker() {
+#ifdef __EMSCRIPTEN__
+    return true; // enqueueAsync runs inline on the one thread there is
+#else
+    return std::this_thread::get_id() == minigpu.getWebGPUThread().threadId();
+#endif
+}
+
+// Runs [fn] on the WebGPU worker so every Dawn use here is serialized behind
+// the queued dispatches (FIFO). Inline when already on the worker (the async
+// entry points): enqueueSync from the worker would deadlock. A throwing
+// device lookup (lost / quarantined context) is a failed call, never a crash.
+template <typename Fn>
+static int run_on_webgpu_worker(Fn&& fn) {
+    try {
+        if (!on_webgpu_worker()) {
+            return minigpu.getWebGPUThread().enqueueSync<int>(
+                std::function<int()>(std::forward<Fn>(fn)));
+        }
+        return fn();
+    } catch (...) {
+        return 0;
+    }
+}
+
+// Queues [task] on the WebGPU worker. False when it was not queued (the worker
+// has exited at process teardown, or out of memory): the caller reports the
+// failure itself, since no exception may leave an export.
+template <typename Task>
+static bool post_to_webgpu_worker(Task&& task) {
+    try {
+        minigpu.getWebGPUThread().enqueueAsync(std::forward<Task>(task));
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+// Blocks until everything submitted to [queue] so far has finished on the
+// GPU (timeout-guarded). The completion state is heap-owned by the callback,
+// so a wait that times out leaves a late callback nothing dangling to touch.
+static bool wait_submitted_work(WGPUQueue queue, const char* op) {
+    using Done = std::shared_ptr<std::promise<WGPUQueueWorkDoneStatus>>;
+    auto done = std::make_shared<std::promise<WGPUQueueWorkDoneStatus>>();
+    auto fut  = done->get_future();
+    WGPUQueueWorkDoneCallbackInfo cbInfo{};
+    cbInfo.mode      = WGPUCallbackMode_AllowProcessEvents;
+    cbInfo.callback  = [](WGPUQueueWorkDoneStatus status, WGPUStringView,
+                          void* ud1, void*) {
+        std::unique_ptr<Done> owner(static_cast<Done*>(ud1));
+        (*owner)->set_value(status);
+    };
+    cbInfo.userdata1 = new Done(done);
+    wgpuQueueOnSubmittedWorkDone(queue, cbInfo);
+    if (!drain_dawn_events_with_timeout(fut, op)) return false;
+    const WGPUQueueWorkDoneStatus status = fut.get();
+    if (status != WGPUQueueWorkDoneStatus_Success) {
+        LOG_ERROR("[minigpu_external] %s: queue work-done status %d.",
+                  op, (int)status);
+        return false;
+    }
+    return true;
+}
+
 /* =========================================================================
  * Internal structure
  * ====================================================================== */
@@ -247,6 +312,11 @@ struct MGPUVideoTexture {
 #ifndef __EMSCRIPTEN__
     WGPUSharedTextureMemory shared_mem             = nullptr;
 #endif
+#ifdef _WIN32
+    // A Tier B frame's ring slot: set free again once this frame is destroyed
+    // and Dawn's queue has finished everything submitted up to then.
+    std::shared_ptr<std::atomic<bool>> tier_b_free;
+#endif
 
     // Dimensions
     uint32_t width  = 0;
@@ -254,6 +324,12 @@ struct MGPUVideoTexture {
 
     MGPUExternalPixelFormat pixel_format = MGPU_EXTERNAL_PIXEL_FORMAT_UNKNOWN;
     MGPUExternalContentType content_type = MGPU_EXTERNAL_CONTENT_TYPE_CPU;
+
+    // How toRGBA reads the samples: an MGPUYuvMatrix, plus kYuvFullRange when
+    // they are full range. One atomic, so a conversion snapshots both halves
+    // of one mgpuVideoTextureSetYuvColor call.
+    static constexpr int kYuvFullRange = 0x100;
+    std::atomic<int> yuv_color{MGPU_YUV_MATRIX_BT709 | kYuvFullRange};
 };
 
 /* =========================================================================
@@ -352,27 +428,16 @@ int mgpuIsExternalContentTypeSupported(MGPUExternalContentType type) {
 }
 
 int mgpuIsExternalPixelFormatSupported(MGPUExternalPixelFormat fmt) {
-    // For every plane check that the corresponding WGPUTextureFormat is usable.
+    // Every plane maps to a core WebGPU format (R8, RG8, RGBA8, BGRA8,
+    // RGBA16F) that any device can sample and copy into, so the mapping is
+    // the whole answer; a probe texture could not fail anyway (creation
+    // returns an error object, never null).
     int n = num_planes_for_format(fmt);
     WGPUDevice device = get_device();
     if (!device) return 0;
 
     for (int i = 0; i < n; ++i) {
-        WGPUTextureFormat wfmt = map_format(fmt, (uint32_t)i);
-        if (wfmt == WGPUTextureFormat_Undefined) return 0;
-        // Validate by attempting to create a 1x1 texture and immediately
-        // destroying it (cheapest probe available without an explicit
-        // wgpuDeviceIsTextureFormatSupported() call in base WebGPU).
-        WGPUTextureDescriptor td{};
-        td.usage  = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst;
-        td.dimension = WGPUTextureDimension_2D;
-        td.size   = {1, 1, 1};
-        td.format = wfmt;
-        td.mipLevelCount   = 1;
-        td.sampleCount     = 1;
-        WGPUTexture probe = wgpuDeviceCreateTexture(device, &td);
-        if (!probe) return 0;
-        wgpuTextureRelease(probe);
+        if (map_format(fmt, (uint32_t)i) == WGPUTextureFormat_Undefined) return 0;
     }
     return 1;
 }
@@ -500,7 +565,10 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     // Query the descriptor so we know dimensions / format.
     WGPUSharedTextureMemoryProperties props{};
     props.nextInChain = nullptr;
-    wgpuSharedTextureMemoryGetProperties(mem, &props);
+    if (wgpuSharedTextureMemoryGetProperties(mem, &props) != WGPUStatus_Success) {
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     WGPUTextureDescriptor td{};
     td.usage = WGPUTextureUsage_TextureBinding;
@@ -520,7 +588,11 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true; // producer (CopyResource) already wrote
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(mem, texture, &beginDesc) != WGPUStatus_Success) {
+        wgpuTextureRelease(texture);
+        wgpuSharedTextureMemoryRelease(mem);
+        return nullptr;
+    }
 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
@@ -531,6 +603,16 @@ static MGPUVideoTexture* import_shared(WGPUSharedTextureMemory mem,
     tex->planes[0]    = texture;
     build_video_texture_views(tex, texture, buf->pixel_format, props.format);
     return tex;
+}
+
+// Closes an access opened by a SUCCESSFUL BeginAccess. The end state owns the
+// exported fences and must be freed even when nobody consumes them.
+static bool end_shared_access(WGPUSharedTextureMemory mem, WGPUTexture texture) {
+    WGPUSharedTextureMemoryEndAccessState endState{};
+    const WGPUStatus status =
+        wgpuSharedTextureMemoryEndAccess(mem, texture, &endState);
+    wgpuSharedTextureMemoryEndAccessStateFreeMembers(endState);
+    return status == WGPUStatus_Success;
 }
 #endif // !__EMSCRIPTEN__
 
@@ -589,6 +671,16 @@ enum class BridgeTier : uint8_t {
     Failed      = 4, // Persistent failure even on CPU bridge
 };
 
+// One cross-adapter texture of a producer's Tier B ring. An allocated slot
+// has [free]; the frame copied into it holds the same flag (tier_b_free).
+struct TierBSlot {
+    Microsoft::WRL::ComPtr<ID3D12Resource>  b12CrossTex;     // committed cross-adapter tex
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> b11on12Wrapped;  // D3D11on12 view of b12CrossTex
+    WGPUSharedTextureMemory                 dawnCrossMem = nullptr; // Dawn shared mem
+    std::shared_ptr<std::atomic<bool>>      free;
+};
+static constexpr int kTierBSlots = 3;
+
 struct ProducerAdapterInfo {
     LUID                                        luid{};
     Microsoft::WRL::ComPtr<IDXGIAdapter1>       adapter;
@@ -596,6 +688,10 @@ struct ProducerAdapterInfo {
     // Tier C: plain D3D11 device on producer adapter (for staging / CPU bridge).
     Microsoft::WRL::ComPtr<ID3D11Device>        device;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    // Staging copy reused while the source description matches; the mutex
+    // keeps one copy -> Map -> upload in flight per producer.
+    std::mutex                                  cpuBridgeMutex;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D>     cpuStaging;
 
     // ── Tier B: D3D12 cross-adapter bridge ───────────────────────────────
     // Only initialised when Dawn is running the D3D12 backend AND the
@@ -605,14 +701,15 @@ struct ProducerAdapterInfo {
     Microsoft::WRL::ComPtr<ID3D11Device>        b11on12Dev;   // D3D11on12 wrapping b12Dev
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> b11on12Ctx;
     Microsoft::WRL::ComPtr<ID3D12Fence>         b12Fence;     // cross-process signal fence
-    HANDLE                                      b12FenceHandle = nullptr; // NT handle (owned)
     std::atomic<uint64_t>                       b12FenceValue{0};
     WGPUSharedFence                             dawnFence   = nullptr; // Dawn-imported fence
 
-    // Cached cross-adapter texture (reallocated on resolution / format change).
-    Microsoft::WRL::ComPtr<ID3D12Resource>      b12CrossTex;     // committed cross-adapter tex
-    Microsoft::WRL::ComPtr<ID3D11Texture2D>     b11on12Wrapped;  // D3D11on12 view of b12CrossTex
-    WGPUSharedTextureMemory                     dawnCrossMem = nullptr; // Dawn shared mem
+    // Ring of cross-adapter textures, all b12TexW x b12TexH x b12TexFmt
+    // (reallocated on resolution / format change). A frame copies into a free
+    // slot, so a copy never lands in a texture that a live frame, or GPU work
+    // still reading one, uses.
+    std::mutex                                  tierBMutex; // the ring, the Dawn fence, copies
+    TierBSlot                                   b12Ring[kTierBSlots];
     uint32_t                                    b12TexW = 0;
     uint32_t                                    b12TexH = 0;
     DXGI_FORMAT                                 b12TexFmt = DXGI_FORMAT_UNKNOWN;
@@ -656,14 +753,31 @@ static LUID get_texture_adapter_luid(ID3D11Texture2D* tex) {
     return d.AdapterLuid;
 }
 
+// Dawn's GetD3D11Device/GetD3D12Device are unchecked casts: each returns a
+// non-null pointer of the wrong type on the other backend. Every call site
+// asks the adapter's backendType first.
+static WGPUBackendType dawn_backend_type(WGPUDevice device) {
+    if (!device) return WGPUBackendType_Undefined;
+    WGPUAdapterInfo info{};
+    const auto status = wgpuDeviceGetAdapterInfo(device, &info);
+    const WGPUBackendType backend = status == WGPUStatus_Success
+                                        ? info.backendType
+                                        : WGPUBackendType_Undefined;
+    wgpuAdapterInfoFreeMembers(info);
+    return backend;
+}
+
 static LUID get_dawn_adapter_luid() {
     LUID zero{0, 0};
     WGPUDevice device = get_device();
     if (!device) return zero;
-    // Try D3D12 first, then D3D11 backend.
-    if (auto d12 = dawn::native::d3d12::GetD3D12Device(device)) {
-        return d12->GetAdapterLuid();
+    const WGPUBackendType backend = dawn_backend_type(device);
+    if (backend == WGPUBackendType_D3D12) {
+        if (auto d12 = dawn::native::d3d12::GetD3D12Device(device))
+            return d12->GetAdapterLuid();
+        return zero;
     }
+    if (backend != WGPUBackendType_D3D11) return zero;
     if (auto d11 = dawn::native::d3d11::GetD3D11Device(device)) {
         Microsoft::WRL::ComPtr<IDXGIDevice> dxgiDev;
         if (SUCCEEDED(d11.As(&dxgiDev)) && dxgiDev) {
@@ -742,9 +856,49 @@ static ProducerAdapterInfo* get_or_create_producer_info(const LUID& luid) {
 
 // Returns true if Dawn is currently using the D3D12 backend.
 static bool dawn_is_d3d12() {
-    WGPUDevice dev = get_device();
-    if (!dev) return false;
-    return dawn::native::d3d12::GetD3D12Device(dev) != nullptr;
+    return dawn_backend_type(get_device()) == WGPUBackendType_D3D12;
+}
+
+// Dawn's backend-specific GetD3D11Device helper casts without a backend check.
+// Inspect the public adapter metadata before using it on an import fast path.
+static bool dawn_is_d3d11(WGPUDevice device) {
+    return dawn_backend_type(device) == WGPUBackendType_D3D11;
+}
+
+// Imports b12Fence into the CURRENT Dawn device. Apart from the D3D12 init
+// because a context destroy drops it (it belongs to the old device) while the
+// producer-side D3D12 state stays valid; the next bridge import re-imports.
+static bool import_tier_b_fence(ProducerAdapterInfo* info, WGPUDevice device) {
+    if (info->dawnFence) return true;
+    if (!device) return false;
+    HANDLE fenceHandle = nullptr;
+    HRESULT hr = info->b12Dev->CreateSharedHandle(info->b12Fence.Get(), nullptr,
+                                                  GENERIC_ALL, nullptr, &fenceHandle);
+    WGPUSharedFence fence = nullptr;
+    if (SUCCEEDED(hr) && fenceHandle) {
+        WGPUSharedFenceDXGISharedHandleDescriptor fenceDesc{};
+        fenceDesc.chain.sType = WGPUSType_SharedFenceDXGISharedHandleDescriptor;
+        fenceDesc.handle      = fenceHandle;
+        WGPUSharedFenceDescriptor sfDesc{};
+        sfDesc.nextInChain = &fenceDesc.chain;
+        fence = wgpuDeviceImportSharedFence(device, &sfDesc);
+        CloseHandle(fenceHandle); // Dawn duplicated it; close our copy.
+    }
+    // Dawn returns an error object, never null: a refused import exports no type.
+    WGPUSharedFenceExportInfo fenceInfo{};
+    if (fence) wgpuSharedFenceExportInfo(fence, &fenceInfo);
+    if (fenceInfo.type != WGPUSharedFenceType_DXGISharedHandle) {
+        if (fence) wgpuSharedFenceRelease(fence);
+        static std::atomic<int> s_failures{0};
+        const int n = s_failures.fetch_add(1);
+        if (n < 3 || (n % 256) == 0) {
+            LOG_WARN("[minigpu_external] Tier B: fence import into Dawn failed "
+                     "(hr=0x%08lX, count=%d).", (unsigned long)hr, n + 1);
+        }
+        return false;
+    }
+    info->dawnFence = fence;
+    return true;
 }
 
 // Initialise the D3D12 + D3D11on12 state on `info`.
@@ -819,29 +973,8 @@ static bool init_tier_b_impl(ProducerAdapterInfo* info) {
         return false;
     }
 
-    hr = info->b12Dev->CreateSharedHandle(info->b12Fence.Get(), nullptr,
-                                          GENERIC_ALL, nullptr, &info->b12FenceHandle);
-    if (FAILED(hr) || !info->b12FenceHandle) {
-        LOG_WARN("[minigpu_external] Tier B: CreateSharedHandle(fence) failed: 0x%08lX.", (unsigned long)hr);
-        info->b12Fence.Reset();
-        info->b11on12Ctx.Reset(); info->b11on12Dev.Reset();
-        info->b12Queue.Reset();   info->b12Dev.Reset();
-        return false;
-    }
-
     // ── 6. Import the fence into Dawn ──
-    WGPUDevice dawnDev = get_device();
-    WGPUSharedFenceDXGISharedHandleDescriptor fenceDesc{};
-    fenceDesc.chain.sType = WGPUSType_SharedFenceDXGISharedHandleDescriptor;
-    fenceDesc.handle      = info->b12FenceHandle;
-    WGPUSharedFenceDescriptor sfDesc{};
-    sfDesc.nextInChain = &fenceDesc.chain;
-    info->dawnFence = wgpuDeviceImportSharedFence(dawnDev, &sfDesc);
-    // NT handle ownership transfers to Dawn; close our copy.
-    CloseHandle(info->b12FenceHandle);
-    info->b12FenceHandle = nullptr;
-    if (!info->dawnFence) {
-        LOG_WARN("[minigpu_external] Tier B: wgpuDeviceImportSharedFence failed.");
+    if (!import_tier_b_fence(info, get_device())) {
         info->b12Fence.Reset();
         info->b11on12Ctx.Reset(); info->b11on12Dev.Reset();
         info->b12Queue.Reset();   info->b12Dev.Reset();
@@ -864,19 +997,13 @@ static bool init_tier_b(ProducerAdapterInfo* info) {
     return false;
 }
 
-// Ensure the cached cross-adapter D3D12 texture matches `w × h × fmt`.
-// Creates (or recreates) the texture, its D3D11on12 wrapper, and the Dawn
-// SharedTextureMemory. Returns false on any failure.
-static bool ensure_cross_adapter_texture(ProducerAdapterInfo* info,
-                                         uint32_t w, uint32_t h, DXGI_FORMAT fmt) {
-    if (info->b12CrossTex && info->b12TexW == w && info->b12TexH == h && info->b12TexFmt == fmt)
-        return true; // already valid
-
-    // Release old resources.
-    if (info->dawnCrossMem) { wgpuSharedTextureMemoryRelease(info->dawnCrossMem); info->dawnCrossMem = nullptr; }
-    info->b11on12Wrapped.Reset();
-    info->b12CrossTex.Reset();
-    info->b12TexW = 0; info->b12TexH = 0; info->b12TexFmt = DXGI_FORMAT_UNKNOWN;
+// Allocates [slot]: a `w × h × fmt` committed cross-adapter texture on the
+// producer, its D3D11on12 wrapper, and its import into [dawnDev]. The new
+// slot comes back claimed. On failure (logged) [slot] is left unallocated.
+static bool create_tier_b_slot(ProducerAdapterInfo* info, WGPUDevice dawnDev,
+                               uint32_t w, uint32_t h, DXGI_FORMAT fmt,
+                               TierBSlot& slot) {
+    auto claimed = std::make_shared<std::atomic<bool>>(false);
 
     // ── 1. Create committed cross-adapter texture on producer D3D12 device ──
     D3D12_HEAP_PROPERTIES hp{};
@@ -940,7 +1067,6 @@ static bool ensure_cross_adapter_texture(ProducerAdapterInfo* info,
         return false;
     }
 
-    WGPUDevice dawnDev = get_device();
     WGPUSharedTextureMemoryDXGISharedHandleDescriptor handleDesc{};
     handleDesc.chain.sType = WGPUSType_SharedTextureMemoryDXGISharedHandleDescriptor;
     handleDesc.handle      = resHandle;
@@ -949,26 +1075,195 @@ static bool ensure_cross_adapter_texture(ProducerAdapterInfo* info,
     memDesc.nextInChain = &handleDesc.chain;
     WGPUSharedTextureMemory dawnMem = wgpuDeviceImportSharedTextureMemory(dawnDev, &memDesc);
     CloseHandle(resHandle); // Dawn opened it; close our copy.
-    if (!dawnMem) {
+    // Dawn returns an error object, never null: a refused import reports an
+    // Undefined format.
+    WGPUSharedTextureMemoryProperties memProps{};
+    if (dawnMem) wgpuSharedTextureMemoryGetProperties(dawnMem, &memProps);
+    if (memProps.format == WGPUTextureFormat_Undefined) {
+        if (dawnMem) wgpuSharedTextureMemoryRelease(dawnMem);
         LOG_ERROR("[minigpu_external] Tier B: wgpuDeviceImportSharedTextureMemory failed for "
                   "cross-adapter D3D12 resource. Dawn may not be on D3D12 backend.");
         return false;
     }
 
-    info->b12CrossTex    = crossTex;
-    info->b11on12Wrapped = wrapped11tex;
-    info->dawnCrossMem   = dawnMem;
-    info->b12TexW        = w;
-    info->b12TexH        = h;
-    info->b12TexFmt      = fmt;
-    LOG_INFO("[minigpu_external] Tier B: allocated cross-adapter texture %ux%u fmt=%d.", w, h, (int)fmt);
+    slot.b12CrossTex    = crossTex;
+    slot.b11on12Wrapped = wrapped11tex;
+    slot.dawnCrossMem   = dawnMem;
+    slot.free           = std::move(claimed);
+    LOG_INFO("[minigpu_external] Tier B: allocated cross-adapter ring slot %d (%ux%u fmt=%d).",
+             (int)(&slot - info->b12Ring), w, h, (int)fmt);
     return true;
 }
 
+// Drops every ring slot. A live frame keeps its own reference to its slot's
+// memory, and the flag it later sets is no longer read. Under tierBMutex.
+static void release_tier_b_ring(ProducerAdapterInfo* info) {
+    for (TierBSlot& slot : info->b12Ring) {
+        if (slot.dawnCrossMem) wgpuSharedTextureMemoryRelease(slot.dawnCrossMem);
+        slot = TierBSlot{};
+    }
+    info->b12TexW = 0; info->b12TexH = 0; info->b12TexFmt = DXGI_FORMAT_UNKNOWN;
+}
+
+// Claims a ring slot for a `w × h × fmt` frame: a free one, else a new one
+// while the ring has room. -1 when every slot still holds a live frame or its
+// unfinished GPU reads; the caller then takes Tier C rather than wait. Under
+// tierBMutex.
+static int claim_tier_b_slot(ProducerAdapterInfo* info, WGPUDevice dawnDev,
+                             uint32_t w, uint32_t h, DXGI_FORMAT fmt) {
+    if (info->b12TexW != w || info->b12TexH != h || info->b12TexFmt != fmt) {
+        release_tier_b_ring(info);
+        info->b12TexW = w; info->b12TexH = h; info->b12TexFmt = fmt;
+    }
+    for (int i = 0; i < kTierBSlots; ++i) {
+        const auto& free = info->b12Ring[i].free;
+        if (free && free->exchange(false, std::memory_order_acquire)) return i;
+    }
+    for (int i = 0; i < kTierBSlots; ++i) {
+        if (info->b12Ring[i].free) continue;
+        return create_tier_b_slot(info, dawnDev, w, h, fmt, info->b12Ring[i]) ? i : -1;
+    }
+    return -1;
+}
+
+// From a Tier B frame's destroy, after its EndAccess: frees its ring slot
+// once Dawn's queue has finished everything submitted so far. That covers
+// every read of the frame, all queued on the worker ahead of the destroy.
+// (Dawn's EndAccess fence cannot gate the producer's next copy instead: it
+// is not created SHARED_CROSS_ADAPTER, so the producer adapter cannot open
+// it.) A cancelled wait (device lost, instance gone) keeps the slot taken;
+// the teardown that follows rebuilds the ring.
+static void release_tier_b_slot_when_idle(std::shared_ptr<std::atomic<bool>> free) {
+    WGPUDevice   device   = nullptr;
+    WGPUQueue    queue    = nullptr;
+    WGPUInstance instance = nullptr;
+    uint64_t     generation = 0;
+    // No ready context: its teardown dropped the ring this slot belonged to.
+    if (!minigpu.retainReadyContextSnapshot(&device, &queue, &instance, &generation))
+        return;
+    using Flag = std::shared_ptr<std::atomic<bool>>;
+    try {
+        WGPUQueueWorkDoneCallbackInfo info{};
+        info.mode      = WGPUCallbackMode_AllowSpontaneous;
+        info.callback  = [](WGPUQueueWorkDoneStatus status, WGPUStringView,
+                            void* ud1, void*) {
+            std::unique_ptr<Flag> flag(static_cast<Flag*>(ud1));
+            if (status == WGPUQueueWorkDoneStatus_Success)
+                (*flag)->store(true, std::memory_order_release);
+        };
+        info.userdata1 = new Flag(std::move(free));
+        wgpuQueueOnSubmittedWorkDone(queue, info);
+    } catch (...) {
+        // Out of memory: the slot stays taken; frames use the others or Tier C.
+    }
+    wgpuQueueRelease(queue);
+    wgpuInstanceRelease(instance);
+    wgpuDeviceRelease(device);
+}
+
+// Steps 2-7 of the bridge below, under tierBMutex with [dawnDev] current:
+// copies [src] into a claimed ring slot and opens that slot in Dawn behind
+// the copy's fence. Null (Tier C takes the frame) when no slot is free or a
+// step fails; a slot Dawn did not open goes back to the ring.
+static MGPUVideoTexture* import_tier_b_frame(ProducerAdapterInfo* info,
+                                             const MGPUExternalVideoBuffer* buf,
+                                             ID3D11Texture2D* src,
+                                             const D3D11_TEXTURE2D_DESC& sd,
+                                             WGPUDevice dawnDev) {
+    // ── 2. Claim a ring slot ──
+    // A context destroy dropped the Dawn-side fence; re-import it here.
+    if (!import_tier_b_fence(info, dawnDev)) return nullptr;
+    const int k = claim_tier_b_slot(info, dawnDev, sd.Width, sd.Height, sd.Format);
+    if (k < 0) {
+        if (info->b12Ring[kTierBSlots - 1].free) { // all allocated, none free
+            static std::atomic<int> s_busy{0};
+            const int n = s_busy.fetch_add(1);
+            if (n < 3 || (n % 256) == 0) {
+                LOG_WARN("[minigpu_external] Tier B: all %d ring textures still hold live "
+                         "or in-flight frames; this frame takes Tier C (count=%d).",
+                         kTierBSlots, n + 1);
+            }
+        }
+        return nullptr;
+    }
+    TierBSlot& slot = info->b12Ring[k];
+    auto unclaim = [&slot] { slot.free->store(true, std::memory_order_release); };
+
+    // ── 3. GPU copy: D3D11on12 CopyResource into the slot's wrapped texture ──
+    Microsoft::WRL::ComPtr<ID3D11On12Device> on12;
+    if (FAILED(info->b11on12Dev.As(&on12))) {
+        unclaim();
+        return nullptr;
+    }
+    ID3D11Resource* wrapped = slot.b11on12Wrapped.Get();
+    on12->AcquireWrappedResources(&wrapped, 1);
+    info->b11on12Ctx->CopyResource(wrapped, src);
+    on12->ReleaseWrappedResources(&wrapped, 1);
+    info->b11on12Ctx->Flush();
+
+    // ── 4. Signal D3D12 fence on producer queue ──
+    uint64_t signalVal = info->b12FenceValue.fetch_add(1) + 1;
+    HRESULT hr = info->b12Queue->Signal(info->b12Fence.Get(), signalVal);
+    if (FAILED(hr)) {
+        LOG_ERROR("[minigpu_external] Tier B: queue Signal failed: 0x%08lX", (unsigned long)hr);
+        unclaim();
+        return nullptr;
+    }
+
+    // ── 5. Create a Dawn texture from the slot's shared memory ──
+    WGPUSharedTextureMemoryProperties props{};
+    if (wgpuSharedTextureMemoryGetProperties(slot.dawnCrossMem, &props) != WGPUStatus_Success ||
+        props.format == WGPUTextureFormat_Undefined) {
+        LOG_ERROR("[minigpu_external] Tier B: shared memory properties unavailable.");
+        unclaim();
+        return nullptr; // caller falls through to Tier C
+    }
+    WGPUTextureDescriptor td{};
+    td.usage         = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
+    td.dimension     = WGPUTextureDimension_2D;
+    td.size          = props.size;
+    td.format        = props.format;
+    td.mipLevelCount = 1;
+    td.sampleCount   = 1;
+    WGPUTexture wTex = wgpuSharedTextureMemoryCreateTexture(slot.dawnCrossMem, &td);
+
+    // ── 6. BeginAccess with fence wait ──
+    // Dawn hands back an error texture rather than null; BeginAccess refuses it.
+    WGPUSharedTextureMemoryBeginAccessDescriptor baDesc{};
+    baDesc.initialized   = true;
+    baDesc.fenceCount    = 1;
+    baDesc.fences        = &info->dawnFence;
+    baDesc.signaledValues = &signalVal;
+    if (!wTex || wgpuSharedTextureMemoryBeginAccess(slot.dawnCrossMem, wTex, &baDesc) !=
+                     WGPUStatus_Success) {
+        LOG_ERROR("[minigpu_external] Tier B: texture creation or BeginAccess failed.");
+        if (wTex) wgpuTextureRelease(wTex);
+        unclaim();
+        return nullptr; // caller falls through to Tier C
+    }
+
+    // ── 7. Build the returned texture object ──
+    // AddRef the shared memory so mgpuDestroyVideoTexture's Release doesn't
+    // free the ring's copy.
+    wgpuSharedTextureMemoryAddRef(slot.dawnCrossMem);
+
+    auto* tex = new MGPUVideoTexture();
+    tex->width        = buf->width;
+    tex->height       = buf->height;
+    tex->pixel_format = buf->pixel_format;
+    tex->content_type = buf->content_type;
+    tex->shared_mem   = slot.dawnCrossMem; // caller (via mgpuDestroyVideoTexture) will EndAccess + Release
+    tex->tier_b_free  = slot.free;         // ... and then hand the slot back
+    tex->planes[0]    = wTex;
+    build_video_texture_views(tex, wTex, buf->pixel_format, props.format);
+    return tex;
+}
+
 // ── Tier B per-frame import ──────────────────────────────────────────────
-// Opens `srcHandle` on the D3D11on12 device, copies to the cross-adapter
-// D3D12 texture, signals the D3D12 fence, then returns an MGPUVideoTexture
-// backed by the cached Dawn SharedTextureMemory with a fence-wait BeginAccess.
+// Opens `srcHandle` on the D3D11on12 device, copies to a free cross-adapter
+// D3D12 texture of the ring, signals the D3D12 fence, then returns an
+// MGPUVideoTexture backed by that slot's Dawn SharedTextureMemory with a
+// fence-wait BeginAccess.
 static MGPUVideoTexture* import_d3d11_d3d12_bridge(const MGPUExternalVideoBuffer* buf,
                                                    HANDLE srcHandle,
                                                    ProducerAdapterInfo** outInfo) {
@@ -1027,68 +1322,38 @@ static MGPUVideoTexture* import_d3d11_d3d12_bridge(const MGPUExternalVideoBuffer
     }
     *outInfo = info;
 
-    // ── 2. Ensure cross-adapter texture is allocated ──
     D3D11_TEXTURE2D_DESC sd{};
     srcOnD3D11on12->GetDesc(&sd);
-    if (!ensure_cross_adapter_texture(info, sd.Width, sd.Height, sd.Format))
-        return nullptr;
-
-    // ── 3. GPU copy: D3D11on12 CopyResource into the wrapped cross-adapter texture ──
-    Microsoft::WRL::ComPtr<ID3D11On12Device> on12;
-    if (FAILED(info->b11on12Dev.As(&on12))) return nullptr;
-    ID3D11Resource* wrapped = info->b11on12Wrapped.Get();
-    on12->AcquireWrappedResources(&wrapped, 1);
-    info->b11on12Ctx->CopyResource(info->b11on12Wrapped.Get(), srcOnD3D11on12.Get());
-    on12->ReleaseWrappedResources(&wrapped, 1);
-    info->b11on12Ctx->Flush();
-
-    // ── 4. Signal D3D12 fence on producer queue ──
-    uint64_t signalVal = info->b12FenceValue.fetch_add(1) + 1;
-    HRESULT hr = info->b12Queue->Signal(info->b12Fence.Get(), signalVal);
-    if (FAILED(hr)) {
-        LOG_ERROR("[minigpu_external] Tier B: queue Signal failed: 0x%08lX", (unsigned long)hr);
-        return nullptr;
+    // Retained before the ring lock, never under it: a context teardown takes
+    // that lock to drop the ring, so nothing under it may wait on the context.
+    uint64_t generation = 0;
+    WGPUDevice dawnDev = minigpu.retainReadyDeviceGeneration(&generation);
+    if (!dawnDev) return nullptr;
+    MGPUVideoTexture* tex = nullptr;
+    {
+        std::lock_guard<std::mutex> ring(info->tierBMutex);
+        // A teardown since the retain has already dropped this device's ring
+        // and fence; filling them again would leave the next device stale ones.
+        if (minigpu.matchesReadyDevice(dawnDev, generation))
+            tex = import_tier_b_frame(info, buf, srcOnD3D11on12.Get(), sd, dawnDev);
     }
-
-    // ── 5. Create a Dawn texture from the cached shared memory ──
-    WGPUSharedTextureMemoryProperties props{};
-    wgpuSharedTextureMemoryGetProperties(info->dawnCrossMem, &props);
-    WGPUTextureDescriptor td{};
-    td.usage         = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopySrc | WGPUTextureUsage_CopyDst;
-    td.dimension     = WGPUTextureDimension_2D;
-    td.size          = props.size;
-    td.format        = props.format;
-    td.mipLevelCount = 1;
-    td.sampleCount   = 1;
-    WGPUTexture wTex = wgpuSharedTextureMemoryCreateTexture(info->dawnCrossMem, &td);
-    if (!wTex) {
-        LOG_ERROR("[minigpu_external] Tier B: wgpuSharedTextureMemoryCreateTexture failed.");
-        return nullptr;
-    }
-
-    // ── 6. BeginAccess with fence wait ──
-    WGPUSharedTextureMemoryBeginAccessDescriptor baDesc{};
-    baDesc.initialized   = true;
-    baDesc.fenceCount    = 1;
-    baDesc.fences        = &info->dawnFence;
-    baDesc.signaledValues = &signalVal;
-    wgpuSharedTextureMemoryBeginAccess(info->dawnCrossMem, wTex, &baDesc);
-
-    // ── 7. Build the returned texture object ──
-    // AddRef the shared memory so mgpuDestroyVideoTexture's Release doesn't
-    // free our cached copy.
-    wgpuSharedTextureMemoryAddRef(info->dawnCrossMem);
-
-    auto* tex = new MGPUVideoTexture();
-    tex->width        = buf->width;
-    tex->height       = buf->height;
-    tex->pixel_format = buf->pixel_format;
-    tex->content_type = buf->content_type;
-    tex->shared_mem   = info->dawnCrossMem; // caller (via mgpuDestroyVideoTexture) will EndAccess + Release
-    tex->planes[0]    = wTex;
-    build_video_texture_views(tex, wTex, buf->pixel_format, props.format);
+    wgpuDeviceRelease(dawnDev);
     return tex;
 }
+
+// Tier A's private copies, reused instead of allocated per frame. A slot is
+// free once the ring holds its only reference: Dawn has released the video
+// texture and every command buffer or binding that used it, and any read it
+// recorded precedes the next copy on the same immediate context. All slots
+// busy: the frame gets an unpooled texture. The fence replaces a busy-spin.
+struct PrivateCopyRing {
+    Microsoft::WRL::ComPtr<ID3D11Device>    device; // owns slots and fence
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> slots[4];
+    Microsoft::WRL::ComPtr<ID3D11Fence>     fence;
+    uint64_t                                fenceValue = 0;
+};
+static std::mutex      g_private_copy_mutex;
+static PrivateCopyRing g_private_copy; // g_private_copy_mutex
 
 // ────────────────────────────────────────────────────────────────────────
 // Tier A: same-adapter zero-copy import.
@@ -1124,6 +1389,39 @@ static MGPUVideoTexture* import_d3d11_same_adapter(const MGPUExternalVideoBuffer
 
     D3D11_TEXTURE2D_DESC sd{};
     srcOnDawnDev->GetDesc(&sd);
+    // Only a producer-certified, completed immutable snapshot may be shared
+    // directly. In particular, a WGC-acquired surface can be recycled when
+    // its frame is released and MUST retain the private-copy path below.
+    // The D3D11 texture descriptor requires Dawn's own D3D11 device; D3D12
+    // and every unrecognised/untagged input keep their existing path.
+    const bool immutableReady =
+        buf->content_type == MGPU_EXTERNAL_CONTENT_TYPE_D3D11_SHARED_HANDLE &&
+        buf->num_planes == 1 &&
+        buf->pixel_format == MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32 &&
+        buf->planes[0].drm_format_modifier == MGPU_D3D11_IMMUTABLE_READY_TAG &&
+        buf->planes[0].subresource_index == 0 &&
+        sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        sd.Width == buf->width && sd.Height == buf->height &&
+        sd.ArraySize == 1 && sd.MipLevels == 1 && sd.SampleDesc.Count == 1 &&
+        (sd.BindFlags & D3D11_BIND_SHADER_RESOURCE) != 0 &&
+        dawn_is_d3d11(device) &&
+        dawn::native::d3d11::GetD3D11Device(device).Get() == d11;
+    if (immutableReady) {
+        dawn::native::d3d11::SharedTextureMemoryD3D11Texture2DDescriptor direct;
+        direct.texture = srcOnDawnDev;
+        WGPUSharedTextureMemoryDescriptor desc{};
+        desc.nextInChain = const_cast<WGPUChainedStruct*>(
+            reinterpret_cast<const WGPUChainedStruct*>(
+                static_cast<const wgpu::ChainedStruct*>(&direct)));
+        auto mem = wgpuDeviceImportSharedTextureMemory(device, &desc);
+        // SharedTextureMemory and its Texture retain the D3D11 resource.
+        // The producer's handle and COM reference may be released as soon
+        // as this import returns; queued GPU reads retain their own refs.
+        if (auto* imported = import_shared(mem, buf)) {
+            LOG_DEBUG("[minigpu_external] immutable D3D11 snapshot imported directly");
+            return imported;
+        }
+    }
     {
         static int s_probed = 0;
         if (s_probed++ < 2) {
@@ -1144,30 +1442,67 @@ static MGPUVideoTexture* import_d3d11_same_adapter(const MGPUExternalVideoBuffer
                       | D3D11_BIND_RENDER_TARGET;
     dd.CPUAccessFlags = 0;
     dd.MiscFlags      = 0;
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext4> ctx4;
+    if (FAILED(ctx.As(&ctx4)) || !ctx4) return nullptr;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> dst;
-    hr = d11->CreateTexture2D(&dd, nullptr, &dst);
-    if (FAILED(hr) || !dst) {
-        LOG_ERROR("[minigpu_external] import_d3d11: CreateTexture2D(private dst) failed: 0x%08lX", (unsigned long)hr);
-        return nullptr;
-    }
-    ctx->CopyResource(dst.Get(), srcOnDawnDev.Get());
-
-    // CPU wait for the copy to complete so the consumer (Dawn compute pass)
-    // is guaranteed to see fully-flushed pixel data.
+    Microsoft::WRL::ComPtr<ID3D11Fence> copyFence;
+    uint64_t copyValue = 0;
     {
-        D3D11_QUERY_DESC qd{};
-        qd.Query = D3D11_QUERY_EVENT;
-        Microsoft::WRL::ComPtr<ID3D11Query> q;
-        if (SUCCEEDED(d11->CreateQuery(&qd, &q)) && q) {
-            ctx->End(q.Get());
-            ctx->Flush();
-            ULONGLONG t0 = GetTickCount64();
-            while (ctx->GetData(q.Get(), nullptr, 0, 0) == S_FALSE) {
-                if (GetTickCount64() - t0 > 50) break;
-                YieldProcessor();
+        std::lock_guard<std::mutex> lk(g_private_copy_mutex);
+        PrivateCopyRing& ring = g_private_copy;
+        if (ring.device.Get() != d11) ring = PrivateCopyRing{};
+        if (!ring.fence) {
+            Microsoft::WRL::ComPtr<ID3D11Device5> d11_5;
+            hr = d11->QueryInterface(IID_PPV_ARGS(&d11_5));
+            if (SUCCEEDED(hr))
+                hr = d11_5->CreateFence(0, D3D11_FENCE_FLAG_NONE, IID_PPV_ARGS(&ring.fence));
+            if (FAILED(hr) || !ring.fence) {
+                LOG_ERROR("[minigpu_external] import_d3d11: CreateFence(private copy) failed: 0x%08lX", (unsigned long)hr);
+                return nullptr;
             }
-        } else {
-            ctx->Flush();
+            ring.device = d11;
+        }
+        Microsoft::WRL::ComPtr<ID3D11Texture2D>* spare = nullptr;
+        for (auto& slot : ring.slots) {
+            if (slot) {
+                slot->AddRef();
+                if (slot->Release() != 1) continue; // Dawn still holds it
+                D3D11_TEXTURE2D_DESC cd{};
+                slot->GetDesc(&cd);
+                if (std::memcmp(&cd, &dd, sizeof dd) == 0) {
+                    if (!dst) dst = slot;
+                    continue;
+                }
+                slot.Reset(); // free, but shaped for an earlier source
+            }
+            if (!spare) spare = &slot;
+        }
+        if (!dst) {
+            hr = d11->CreateTexture2D(&dd, nullptr, &dst);
+            if (FAILED(hr) || !dst) {
+                LOG_ERROR("[minigpu_external] import_d3d11: CreateTexture2D(private dst) failed: 0x%08lX", (unsigned long)hr);
+                return nullptr;
+            }
+            if (spare) *spare = dst;
+            LOG_DEBUG("[minigpu_external] import_d3d11: private copy allocated (%ux%u, %s)",
+                dd.Width, dd.Height, spare ? "pooled" : "unpooled");
+        }
+        ctx->CopyResource(dst.Get(), srcOnDawnDev.Get());
+        // Signalled under the lock so fence values complete in order.
+        copyValue = ++ring.fenceValue;
+        hr = ctx4->Signal(ring.fence.Get(), copyValue);
+        ctx->Flush();
+        copyFence = ring.fence;
+    }
+
+    // Bounded CPU wait for the copy: the producer may recycle its source as
+    // soon as this returns, and the consumer must see the whole frame.
+    if (SUCCEEDED(hr)) {
+        HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (done) {
+            if (SUCCEEDED(copyFence->SetEventOnCompletion(copyValue, done)))
+                WaitForSingleObject(done, 50);
+            CloseHandle(done);
         }
     }
 
@@ -1201,6 +1536,21 @@ static MGPUVideoTexture* import_d3d11_same_adapter(const MGPUExternalVideoBuffer
 // producer's adapter. Always works on hybrid laptops at the cost of one
 // PCIe transfer per frame.
 // ────────────────────────────────────────────────────────────────────────
+// Dawn format for a single-plane producer texture; Undefined = unsupported.
+static WGPUTextureFormat cpu_bridge_format(DXGI_FORMAT format) {
+    switch (format) {
+    case DXGI_FORMAT_R8G8B8A8_UNORM:      return WGPUTextureFormat_RGBA8Unorm;
+    case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: return WGPUTextureFormat_RGBA8UnormSrgb;
+    case DXGI_FORMAT_B8G8R8A8_UNORM:
+    case DXGI_FORMAT_B8G8R8X8_UNORM:      return WGPUTextureFormat_BGRA8Unorm;
+    case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB: return WGPUTextureFormat_BGRA8UnormSrgb;
+    case DXGI_FORMAT_R16G16B16A16_FLOAT:  return WGPUTextureFormat_RGBA16Float;
+    case DXGI_FORMAT_R10G10B10A2_UNORM:   return WGPUTextureFormat_RGB10A2Unorm;
+    case DXGI_FORMAT_R8_UNORM:            return WGPUTextureFormat_R8Unorm;
+    default:                              return WGPUTextureFormat_Undefined;
+    }
+}
+
 static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* buf,
                                                  HANDLE srcHandle,
                                                  ProducerAdapterInfo** outInfo) {
@@ -1212,12 +1562,6 @@ static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* 
     // We don't yet know the producer adapter — try opening the handle on a
     // freshly-enumerated set of adapters until one succeeds. We cache the
     // winning adapter for subsequent frames.
-    Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
-        LOG_ERROR("[minigpu_external] cpu_bridge: CreateDXGIFactory1 failed");
-        return nullptr;
-    }
-
     Microsoft::WRL::ComPtr<ID3D11Texture2D> srcOnProducer;
     ProducerAdapterInfo* info = nullptr;
 
@@ -1239,8 +1583,13 @@ static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* 
         }
     }
 
-    // Slow path: enumerate adapters.
+    // Slow path: enumerate adapters (the factory is only needed here).
     if (!srcOnProducer) {
+        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || !factory) {
+            LOG_ERROR("[minigpu_external] cpu_bridge: CreateDXGIFactory1 failed");
+            return nullptr;
+        }
         Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
         for (UINT i = 0; SUCCEEDED(factory->EnumAdapters1(i, &adapter)); ++i, adapter.Reset()) {
             DXGI_ADAPTER_DESC1 desc{};
@@ -1269,87 +1618,118 @@ static MGPUVideoTexture* import_d3d11_cpu_bridge(const MGPUExternalVideoBuffer* 
     D3D11_TEXTURE2D_DESC sd{};
     srcOnProducer->GetDesc(&sd);
 
-    // Create a CPU-readable staging texture on the producer device.
+    // NV12 travels as two planes (R8 Y + RG8 UV); any other format needs a
+    // Dawn equivalent. The declared format must agree on the plane count,
+    // since consumers bind views[] by it.
+    const bool isNv12 = sd.Format == DXGI_FORMAT_NV12;
+    const WGPUTextureFormat wfmt = cpu_bridge_format(sd.Format);
+    if (num_planes_for_format(buf->pixel_format) != (isNv12 ? 2 : 1) ||
+        (!isNv12 && wfmt == WGPUTextureFormat_Undefined)) {
+        static std::atomic<int> s_rejects{0};
+        const int n = s_rejects.fetch_add(1);
+        if (n < 3 || (n % 256) == 0) {
+            LOG_ERROR("[minigpu_external] cpu_bridge: unsupported source (DXGI format %u, "
+                      "declared pixel format %d, count=%d).",
+                      (unsigned)sd.Format, (int)buf->pixel_format, n + 1);
+        }
+        return nullptr;
+    }
+
+    // One copy in flight per producer: its frames share the staging texture,
+    // recreated only when the source description changes.
+    std::lock_guard<std::mutex> bridgeLock(info->cpuBridgeMutex);
     D3D11_TEXTURE2D_DESC stagingDesc = sd;
     stagingDesc.Usage          = D3D11_USAGE_STAGING;
     stagingDesc.BindFlags      = 0;
     stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
     stagingDesc.MiscFlags      = 0;
-    Microsoft::WRL::ComPtr<ID3D11Texture2D> staging;
-    HRESULT hr = info->device->CreateTexture2D(&stagingDesc, nullptr, &staging);
-    if (FAILED(hr) || !staging) {
-        LOG_ERROR("[minigpu_external] cpu_bridge: CreateTexture2D(staging) failed: 0x%08lX",
-            (unsigned long)hr);
-        return nullptr;
-    }
-    info->context->CopyResource(staging.Get(), srcOnProducer.Get());
-
-    // Wait for the producer-adapter copy.
-    {
-        D3D11_QUERY_DESC qd{}; qd.Query = D3D11_QUERY_EVENT;
-        Microsoft::WRL::ComPtr<ID3D11Query> q;
-        if (SUCCEEDED(info->device->CreateQuery(&qd, &q)) && q) {
-            info->context->End(q.Get());
-            info->context->Flush();
-            ULONGLONG t0 = GetTickCount64();
-            while (info->context->GetData(q.Get(), nullptr, 0, 0) == S_FALSE) {
-                if (GetTickCount64() - t0 > 100) break;
-                YieldProcessor();
-            }
-        } else {
-            info->context->Flush();
+    if (info->cpuStaging) {
+        D3D11_TEXTURE2D_DESC cached{};
+        info->cpuStaging->GetDesc(&cached);
+        if (cached.Width != sd.Width || cached.Height != sd.Height ||
+            cached.MipLevels != sd.MipLevels || cached.ArraySize != sd.ArraySize ||
+            cached.Format != sd.Format || cached.SampleDesc.Count != sd.SampleDesc.Count ||
+            cached.SampleDesc.Quality != sd.SampleDesc.Quality) {
+            info->cpuStaging.Reset();
         }
     }
+    if (!info->cpuStaging) {
+        HRESULT hr = info->device->CreateTexture2D(&stagingDesc, nullptr, &info->cpuStaging);
+        if (FAILED(hr) || !info->cpuStaging) {
+            info->cpuStaging.Reset();
+            LOG_ERROR("[minigpu_external] cpu_bridge: CreateTexture2D(staging) failed: 0x%08lX",
+                (unsigned long)hr);
+            return nullptr;
+        }
+    }
+    ID3D11Texture2D* staging = info->cpuStaging.Get();
+    info->context->CopyResource(staging, srcOnProducer.Get());
 
-    // Map and read the staging texture.
+    // Map(READ) without DO_NOT_WAIT blocks until the copy above has finished.
     D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = info->context->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &mapped);
+    HRESULT hr = info->context->Map(staging, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr) || !mapped.pData) {
         LOG_ERROR("[minigpu_external] cpu_bridge: Map(staging) failed: 0x%08lX",
             (unsigned long)hr);
         return nullptr;
     }
 
-    // Allocate a Dawn texture and upload via wgpuQueueWriteTexture.
-    WGPUTextureFormat wfmt = (sd.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
-                           ? WGPUTextureFormat_RGBA8Unorm
-                           : WGPUTextureFormat_BGRA8Unorm;
-    WGPUTextureDescriptor td{};
-    td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst
-             | WGPUTextureUsage_CopySrc;
-    td.dimension = WGPUTextureDimension_2D;
-    td.size = {sd.Width, sd.Height, 1};
-    td.format = wfmt;
-    td.mipLevelCount = 1;
-    td.sampleCount = 1;
-    WGPUTexture wTex = wgpuDeviceCreateTexture(device, &td);
-    if (!wTex) {
-        info->context->Unmap(staging.Get(), 0);
-        LOG_ERROR("[minigpu_external] cpu_bridge: wgpuDeviceCreateTexture failed");
-        return nullptr;
-    }
+    // A new Dawn texture per frame: the caller owns each returned frame until
+    // mgpuDestroyVideoTexture, so two live frames must not share storage.
+    auto upload = [&](WGPUTextureFormat format, uint32_t w, uint32_t h,
+                      const uint8_t* data, WGPUTexture* outTex,
+                      WGPUTextureView* outView) {
+        WGPUTextureDescriptor td{};
+        td.usage = WGPUTextureUsage_TextureBinding | WGPUTextureUsage_CopyDst
+                 | WGPUTextureUsage_CopySrc;
+        td.dimension = WGPUTextureDimension_2D;
+        td.size = {w, h, 1};
+        td.format = format;
+        td.mipLevelCount = 1;
+        td.sampleCount = 1;
+        *outTex = wgpuDeviceCreateTexture(device, &td);
 
-    WGPUTexelCopyTextureInfo dstInfo{};
-    dstInfo.texture  = wTex;
-    dstInfo.mipLevel = 0;
-    dstInfo.aspect   = WGPUTextureAspect_All;
-    WGPUTexelCopyBufferLayout layout{};
-    layout.offset       = 0;
-    layout.bytesPerRow  = mapped.RowPitch;
-    layout.rowsPerImage = sd.Height;
-    WGPUExtent3D extent = {sd.Width, sd.Height, 1};
-    size_t dataSize = (size_t)mapped.RowPitch * sd.Height;
-    wgpuQueueWriteTexture(queue, &dstInfo, mapped.pData, dataSize, &layout, &extent);
+        WGPUTexelCopyTextureInfo dstInfo{};
+        dstInfo.texture  = *outTex;
+        dstInfo.mipLevel = 0;
+        dstInfo.aspect   = WGPUTextureAspect_All;
+        WGPUTexelCopyBufferLayout layout{};
+        layout.offset       = 0;
+        layout.bytesPerRow  = mapped.RowPitch;
+        layout.rowsPerImage = h;
+        WGPUExtent3D extent = {w, h, 1};
+        wgpuQueueWriteTexture(queue, &dstInfo, data, (size_t)mapped.RowPitch * h,
+                              &layout, &extent);
 
-    info->context->Unmap(staging.Get(), 0);
+        WGPUTextureViewDescriptor vd{};
+        vd.format          = format;
+        vd.dimension       = WGPUTextureViewDimension_2D;
+        vd.baseMipLevel    = 0; vd.mipLevelCount   = 1;
+        vd.baseArrayLayer  = 0; vd.arrayLayerCount = 1;
+        vd.aspect          = WGPUTextureAspect_All;
+        *outView = wgpuTextureCreateView(*outTex, &vd);
+    };
 
     auto* tex = new MGPUVideoTexture();
     tex->width        = buf->width;
     tex->height       = buf->height;
     tex->pixel_format = buf->pixel_format;
     tex->content_type = buf->content_type;
-    tex->planes[0]    = wTex;
-    build_video_texture_views(tex, wTex, buf->pixel_format, wfmt);
+    const uint8_t* base = static_cast<const uint8_t*>(mapped.pData);
+    if (isNv12) {
+        // D3D11 maps NV12 as one block: the UV rows follow the Y rows at
+        // RowPitch * Height, with the same pitch.
+        tex->num_planes = 2;
+        upload(WGPUTextureFormat_R8Unorm, sd.Width, sd.Height, base,
+               &tex->planes[0], &tex->views[0]);
+        upload(WGPUTextureFormat_RG8Unorm, sd.Width / 2, sd.Height / 2,
+               base + (size_t)mapped.RowPitch * sd.Height,
+               &tex->planes[1], &tex->views[1]);
+    } else {
+        tex->num_planes = 1;
+        upload(wfmt, sd.Width, sd.Height, base, &tex->planes[0], &tex->views[0]);
+    }
+    info->context->Unmap(staging, 0);
     return tex;
 }
 
@@ -1540,6 +1920,16 @@ static MGPUVideoTexture* import_ahardwarebuffer(const MGPUExternalVideoBuffer* b
 
 MGPUVideoTexture* mgpuImportVideoFrame(const MGPUExternalVideoBuffer* buf) {
     if (!buf) return nullptr;
+    // Producer fences are not imported: sampling before their signal would
+    // read a half-written frame, so a frame carrying one is refused. As for
+    // imported frames, sync_fd 0 and -1 both mean none; it is never closed.
+    const MGPUExternalFence& fence = buf->fence;
+    if ((fence.sync_fd != 0 && fence.sync_fd != -1) || fence.d3d11_fence ||
+        fence.metal_shared_event || fence.metal_fence_value) {
+        LOG_ERROR("[minigpu_external] mgpuImportVideoFrame: producer fences are not "
+                  "supported; wait on the producer side and pass an empty fence.");
+        return nullptr;
+    }
 
     switch (buf->content_type) {
     case MGPU_EXTERNAL_CONTENT_TYPE_CPU:
@@ -1581,15 +1971,15 @@ void mgpuSetVideoTexture(MGPUComputeShader* shader_c, int binding_slot,
     shader->setTextureView(binding_slot, tex->views[plane_index]);
 }
 
-void mgpuDestroyVideoTexture(MGPUVideoTexture* tex) {
-    if (!tex) return;
-
+static void destroy_video_texture_on_worker(MGPUVideoTexture* tex) {
 #ifndef __EMSCRIPTEN__
     if (tex->shared_mem) {
         // End access releases keyed-mutex / fence.
-        WGPUSharedTextureMemoryEndAccessState endState{};
-        wgpuSharedTextureMemoryEndAccess(tex->shared_mem, tex->planes[0], &endState);
+        end_shared_access(tex->shared_mem, tex->planes[0]);
     }
+#endif
+#ifdef _WIN32
+    if (tex->tier_b_free) release_tier_b_slot_when_idle(std::move(tex->tier_b_free));
 #endif
 
     for (int i = 0; i < tex->num_planes; ++i) {
@@ -1603,30 +1993,45 @@ void mgpuDestroyVideoTexture(MGPUVideoTexture* tex) {
     delete tex;
 }
 
+void mgpuDestroyVideoTexture(MGPUVideoTexture* tex) {
+    if (!tex) return;
+    // On the worker, behind every queued blit that still reads the texture.
+    // Synchronous: the next import may reopen the same shared memory (a Tier
+    // B ring slot handed back), and its BeginAccess needs this access ended.
+    run_on_webgpu_worker([tex] {
+        destroy_video_texture_on_worker(tex);
+        return 1;
+    });
+}
+
 /* =========================================================================
  * YUV -> RGBA conversion helper
  * ====================================================================== */
 
-// Minimal WGSL compute shader for NV12 -> RGBA8 conversion (BT.709 full-range)
+// Minimal WGSL compute shader for NV12 -> RGBA8 conversion; the matrix and
+// range come from the uniform (RgbaUniforms).
 static const char* kNV12ToRGBAShader = R"(
 @group(0) @binding(0) var y_tex  : texture_2d<f32>;
 @group(0) @binding(1) var uv_tex : texture_2d<f32>;
 @group(0) @binding(2) var<storage, read_write> out_buf : array<u32>;
 
-struct Uniforms { width: u32, height: u32 }
+struct Uniforms {
+    width: u32, height: u32,
+    y_offset: f32, y_scale: f32, c_offset: f32, c_scale: f32,
+    r_cr: f32, g_cb: f32, g_cr: f32, b_cb: f32,
+    pad0: u32, pad1: u32,
+}
 @group(0) @binding(3) var<uniform> uni : Uniforms;
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= uni.width || gid.y >= uni.height) { return; }
-    let uv = vec2<f32>(f32(gid.x) / f32(uni.width),
-                       f32(gid.y) / f32(uni.height));
-    let y  = textureLoad(y_tex,  vec2<u32>(gid.x, gid.y), 0).r;
-    let cb = textureLoad(uv_tex, vec2<u32>(gid.x / 2u, gid.y / 2u), 0).r - 0.5;
-    let cr = textureLoad(uv_tex, vec2<u32>(gid.x / 2u, gid.y / 2u), 0).g - 0.5;
-    let r  = clamp(y + 1.5748 * cr,            0.0, 1.0);
-    let g  = clamp(y - 0.1873 * cb - 0.4681 * cr, 0.0, 1.0);
-    let b  = clamp(y + 1.8556 * cb,            0.0, 1.0);
+    let y  = (textureLoad(y_tex,  vec2<u32>(gid.x, gid.y), 0).r - uni.y_offset) * uni.y_scale;
+    let cb = (textureLoad(uv_tex, vec2<u32>(gid.x / 2u, gid.y / 2u), 0).r - uni.c_offset) * uni.c_scale;
+    let cr = (textureLoad(uv_tex, vec2<u32>(gid.x / 2u, gid.y / 2u), 0).g - uni.c_offset) * uni.c_scale;
+    let r  = clamp(y + uni.r_cr * cr,                 0.0, 1.0);
+    let g  = clamp(y - uni.g_cb * cb - uni.g_cr * cr, 0.0, 1.0);
+    let b  = clamp(y + uni.b_cb * cb,                 0.0, 1.0);
     let ri = u32(r * 255.0);
     let gi = u32(g * 255.0);
     let bi = u32(b * 255.0);
@@ -1645,92 +2050,421 @@ struct Uniforms { width: u32, height: u32 }
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= uni.width || gid.y >= uni.height) { return; }
     let px = textureLoad(in_tex, vec2<i32>(gid.xy), 0);
-    let ri = u32(clamp(px.r, 0.0, 1.0) * 255.0);
-    let gi = u32(clamp(px.g, 0.0, 1.0) * 255.0);
-    let bi = u32(clamp(px.b, 0.0, 1.0) * 255.0);
-    let ai = u32(clamp(px.a, 0.0, 1.0) * 255.0);
+    let ri = u32(clamp(px.r, 0.0, 1.0) * 255.0 + 0.5);
+    let gi = u32(clamp(px.g, 0.0, 1.0) * 255.0 + 0.5);
+    let bi = u32(clamp(px.b, 0.0, 1.0) * 255.0 + 0.5);
+    let ai = u32(clamp(px.a, 0.0, 1.0) * 255.0 + 0.5);
     out_buf[gid.y * uni.width + gid.x] = ri | (gi << 8u) | (bi << 16u) | (ai << 24u);
 }
 )";
 
-MGPUBuffer* mgpuVideoTextureToRGBA(MGPUVideoTexture* tex) {
-    if (!tex || tex->num_planes == 0) return nullptr;
+// GRAY8: one R8 plane splatted to grey, opaque; the luma range applies.
+static const char* kGray8ToRGBAShader = R"(
+@group(0) @binding(0) var in_tex : texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> out_buf : array<u32>;
 
-    WGPUDevice device = get_device();
-    WGPUQueue  queue  = get_queue();
-    if (!device || !queue) return nullptr;
-    {
-        static int s_logged = 0;
-        if (s_logged++ < 3) {
-            LOG_DEBUG("[minigpu_external] toRGBA: device=%p tex.plane0=%p tex.view0=%p",
-                (void*)device, (void*)tex->planes[0], (void*)tex->views[0]);
-        }
+struct Uniforms { width: u32, height: u32, y_offset: f32, y_scale: f32 }
+@group(0) @binding(2) var<uniform> uni : Uniforms;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uni.width || gid.y >= uni.height) { return; }
+    let s = (textureLoad(in_tex, vec2<i32>(gid.xy), 0).r - uni.y_offset) * uni.y_scale;
+    let v = u32(clamp(s, 0.0, 1.0) * 255.0 + 0.5);
+    out_buf[gid.y * uni.width + gid.x] = v | (v << 8u) | (v << 16u) | (255u << 24u);
+}
+)";
+
+// YUV420P_AS_RGB_PLANES: Y, U, V as three R8 planes; same matrix as NV12.
+static const char* kI420ToRGBAShader = R"(
+@group(0) @binding(0) var y_tex : texture_2d<f32>;
+@group(0) @binding(1) var u_tex : texture_2d<f32>;
+@group(0) @binding(2) var v_tex : texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> out_buf : array<u32>;
+
+struct Uniforms {
+    width: u32, height: u32,
+    y_offset: f32, y_scale: f32, c_offset: f32, c_scale: f32,
+    r_cr: f32, g_cb: f32, g_cr: f32, b_cb: f32,
+    pad0: u32, pad1: u32,
+}
+@group(0) @binding(4) var<uniform> uni : Uniforms;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= uni.width || gid.y >= uni.height) { return; }
+    let c  = min(gid.xy / 2u, textureDimensions(u_tex) - vec2<u32>(1u, 1u));
+    let y  = (textureLoad(y_tex, gid.xy, 0).r - uni.y_offset) * uni.y_scale;
+    let cb = (textureLoad(u_tex, c, 0).r - uni.c_offset) * uni.c_scale;
+    let cr = (textureLoad(v_tex, c, 0).r - uni.c_offset) * uni.c_scale;
+    let r  = clamp(y + uni.r_cr * cr,                 0.0, 1.0);
+    let g  = clamp(y - uni.g_cb * cb - uni.g_cr * cr, 0.0, 1.0);
+    let b  = clamp(y + uni.b_cb * cb,                 0.0, 1.0);
+    let ri = u32(r * 255.0);
+    let gi = u32(g * 255.0);
+    let bi = u32(b * 255.0);
+    out_buf[gid.y * uni.width + gid.x] = ri | (gi << 8u) | (bi << 16u) | (255u << 24u);
+}
+)";
+
+// toRGBA input layouts; each has one cached pipeline (auto layout), so a
+// call only builds a bind group. Textures bind first, in plane order, then
+// the output buffer, then the RgbaUniforms uniform (size, colour terms).
+enum RgbaConverter { kRgbaPacked, kRgbaGray, kRgbaNv12, kRgbaI420, kRgbaConverterCount };
+
+static std::mutex          g_rgba_mutex;              // guards the two below
+static WGPUDevice          g_rgba_device = nullptr;   // identity; the pipelines hold it
+static WGPUComputePipeline g_rgba_pipelines[kRgbaConverterCount] = {};
+
+static void release_rgba_pipelines_locked() {
+    for (WGPUComputePipeline& p : g_rgba_pipelines) {
+        if (p) wgpuComputePipelineRelease(p);
+        p = nullptr;
     }
+    g_rgba_device = nullptr;
+}
 
-    uint32_t W = tex->width;
-    uint32_t H = tex->height;
-    size_t pixelCount = (size_t)W * H;
-    size_t outBytes   = pixelCount * 4; // RGBA8
+static void release_rgba_pipelines() {
+    std::lock_guard<std::mutex> lk(g_rgba_mutex);
+    release_rgba_pipelines_locked();
+}
 
-    // Output buffer
-    auto* outBuf = new mgpu::Buffer(minigpu);
-    outBuf->createBuffer(outBytes, mgpu::kUInt8);
+// Returns a new reference to the converter for [kind] on [device].
+static WGPUComputePipeline rgba_pipeline(WGPUDevice device, RgbaConverter kind) {
+    static const char* const kSources[kRgbaConverterCount] = {
+        kRGBAPassthroughShader, kGray8ToRGBAShader, kNV12ToRGBAShader, kI420ToRGBAShader,
+    };
+    std::lock_guard<std::mutex> lk(g_rgba_mutex);
+    if (g_rgba_device != device) {
+        release_rgba_pipelines_locked();
+        g_rgba_device = device;
+    }
+    if (!g_rgba_pipelines[kind]) {
+        WGPUShaderSourceWGSL wgsl{};
+        wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+        wgsl.code.data   = kSources[kind];
+        wgsl.code.length = std::strlen(kSources[kind]);
+        WGPUShaderModuleDescriptor smDesc{};
+        smDesc.nextInChain = &wgsl.chain;
+        WGPUShaderModule module = wgpuDeviceCreateShaderModule(device, &smDesc);
 
-    // Uniform buffer: width, height
-    uint32_t uniforms[2] = {W, H};
+        WGPUComputePipelineDescriptor cpDesc{};
+        cpDesc.compute.module            = module;
+        cpDesc.compute.entryPoint.data   = "main";
+        cpDesc.compute.entryPoint.length = 4;
+        g_rgba_pipelines[kind] = wgpuDeviceCreateComputePipeline(device, &cpDesc);
+        wgpuShaderModuleRelease(module);
+    }
+    wgpuComputePipelineAddRef(g_rgba_pipelines[kind]);
+    return g_rgba_pipelines[kind];
+}
+
+// The per-call toRGBA uniform: the `Uniforms` struct of the YUV shaders (the
+// grey and packed converters read a prefix of it). A sample maps to luma
+// (y - y_offset) * y_scale and chroma (c - c_offset) * c_scale, then to RGB.
+struct RgbaUniforms {
+    uint32_t width, height;
+    float    y_offset, y_scale;
+    float    c_offset, c_scale;
+    float    r_cr, g_cb, g_cr, b_cb;
+    uint32_t pad[2];
+};
+static_assert(sizeof(RgbaUniforms) == 48, "matches the WGSL Uniforms struct");
+
+// Colour terms for one MGPUVideoTexture::yuv_color value. BT.709 full range
+// keeps the constants and the 0.5 chroma bias of the original fixed-matrix
+// shaders, so its output is unchanged.
+static void rgba_color_terms(int color, RgbaUniforms& u) {
+    // 2(1-Kr), 2Kb(1-Kb)/Kg, 2Kr(1-Kr)/Kg, 2(1-Kb) from each standard's Kr/Kb.
+    static const float kMatrices[3][4] = {
+        {1.5748f, 0.1873f,   0.4681f,   1.8556f},  // BT.709
+        {1.402f,  0.344136f, 0.714136f, 1.772f},   // BT.601
+        {1.4746f, 0.164553f, 0.571353f, 1.8814f},  // BT.2020 (non-constant luminance)
+    };
+    const float* m = kMatrices[color & 0xff];
+    u.r_cr = m[0]; u.g_cb = m[1]; u.g_cr = m[2]; u.b_cb = m[3];
+    if (color & MGPUVideoTexture::kYuvFullRange) {
+        u.y_offset = 0.0f;           u.y_scale = 1.0f;
+        u.c_offset = 0.5f;           u.c_scale = 1.0f;
+    } else {
+        // Video range: luma 16-235, chroma 16-240 around 128.
+        u.y_offset = 16.0f / 255.0f;  u.y_scale = 255.0f / 219.0f;
+        u.c_offset = 128.0f / 255.0f; u.c_scale = 255.0f / 224.0f;
+    }
+}
+
+// One toRGBA conversion, checked on the caller's thread: its input layout
+// and the colour setting at the call. It is recorded on the worker.
+struct RgbaJob {
+    RgbaConverter kind   = kRgbaPacked;
+    int           inputs = 0;
+    RgbaUniforms  uniforms{};
+};
+
+static uint64_t rgba_output_bytes(const RgbaJob& job) {
+    return (uint64_t)job.uniforms.width * job.uniforms.height * 4; // RGBA8
+}
+
+// False when [tex] cannot be converted; nothing is recorded then.
+static bool rgba_job_for(MGPUVideoTexture* tex, RgbaJob& job) {
+    if (!tex || tex->num_planes == 0) return false;
+
+    // The declared format picks the input layout; any other format is
+    // refused rather than read through the wrong one.
+    switch (tex->pixel_format) {
+    case MGPU_EXTERNAL_PIXEL_FORMAT_RGBA32:
+    case MGPU_EXTERNAL_PIXEL_FORMAT_BGRA32:
+    case MGPU_EXTERNAL_PIXEL_FORMAT_RGBA64_HALF:
+        job.kind = kRgbaPacked; job.inputs = 1; break;
+    case MGPU_EXTERNAL_PIXEL_FORMAT_GRAY8:
+        job.kind = kRgbaGray; job.inputs = 1; break;
+    case MGPU_EXTERNAL_PIXEL_FORMAT_NV12:
+    case MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES:
+        job.kind = kRgbaNv12; job.inputs = 2; break;
+    case MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_RGB_PLANES:
+        job.kind = kRgbaI420; job.inputs = 3; break;
+    default:
+        LOG_ERROR("[minigpu_external] toRGBA: unsupported pixel format %d.",
+                  (int)tex->pixel_format);
+        return false;
+    }
+    if (tex->num_planes < job.inputs) return false;
+    for (int i = 0; i < job.inputs; ++i) {
+        if (!tex->views[i]) return false;
+    }
+    if (tex->width == 0 || tex->height == 0) return false;
+    job.uniforms.width  = tex->width;
+    job.uniforms.height = tex->height;
+    rgba_color_terms(tex->yuv_color.load(std::memory_order_relaxed), job.uniforms);
+    return true;
+}
+
+// Records [job] for [tex] into [out] and submits it. On the worker; the
+// sync and async conversions share it.
+static void submit_rgba_job(MGPUVideoTexture* tex, const RgbaJob& job,
+                            WGPUBuffer out, WGPUDevice device, WGPUQueue queue) {
+    const uint32_t W = job.uniforms.width;
+    const uint32_t H = job.uniforms.height;
     WGPUBufferDescriptor ubd{};
-    ubd.size  = sizeof(uniforms);
+    ubd.size  = sizeof(RgbaUniforms);
     ubd.usage = WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst;
     WGPUBuffer ubuf = wgpuDeviceCreateBuffer(device, &ubd);
-    wgpuQueueWriteBuffer(queue, ubuf, 0, uniforms, sizeof(uniforms));
 
-    bool isNV12 = (tex->pixel_format == MGPU_EXTERNAL_PIXEL_FORMAT_NV12 ||
-                   tex->pixel_format == MGPU_EXTERNAL_PIXEL_FORMAT_YUV420P_AS_NV12_PLANES);
-
-    // We reuse mgpu::ComputeShader for the dispatch
-    mgpu::ComputeShader cs(minigpu);
-    cs.loadKernelString(isNV12 ? kNV12ToRGBAShader : kRGBAPassthroughShader);
-
-    // Bind textures as storage via setTextureView helper
-    if (isNV12) {
-        cs.setTextureView(0, tex->views[0]); // Y
-        cs.setTextureView(1, tex->views[1]); // UV
-        cs.setStorageBuffer(2, outBuf->bufferData.buffer, outBytes, 0);
-        cs.setUniformBuffer(3, ubuf, sizeof(uniforms));
-    } else {
-        cs.setTextureView(0, tex->views[0]); // packed
-        cs.setStorageBuffer(1, outBuf->bufferData.buffer, outBytes, 0);
-        cs.setUniformBuffer(2, ubuf, sizeof(uniforms));
+    WGPUBindGroupEntry entries[5]{};
+    uint32_t n = 0;
+    for (int i = 0; i < job.inputs; ++i, ++n) {
+        entries[n].binding     = n;
+        entries[n].textureView = tex->views[i];
     }
+    entries[n].binding = n;
+    entries[n].buffer  = out;
+    entries[n].size    = rgba_output_bytes(job);
+    ++n;
+    entries[n].binding = n;
+    entries[n].buffer  = ubuf;
+    entries[n].size    = sizeof(RgbaUniforms);
+    ++n;
 
-    uint32_t gx = (W + 7) / 8;
-    uint32_t gy = (H + 7) / 8;
+    WGPUComputePipeline pipeline = rgba_pipeline(device, job.kind);
+    WGPUBindGroupLayout bgl = wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
+    WGPUBindGroupDescriptor bgDesc{};
+    bgDesc.layout     = bgl;
+    bgDesc.entryCount = n;
+    bgDesc.entries    = entries;
+    WGPUBindGroup bindGroup = wgpuDeviceCreateBindGroup(device, &bgDesc);
+    wgpuBindGroupLayoutRelease(bgl);
 
-    // Use dispatchAsync with a wait so the GPU submit is ordered before any
-    // subsequent readback. dispatch() is fire-and-forget (async); the caller
-    // may call readDirect immediately after we return, which would race against
-    // the dispatch submission and copy zeros instead of computed data.
-    //
-    // Hang tolerance: bail out after 5 s if dispatchAsync's callback never
-    // fires (driver TDR, lost device, etc.) so we don't lock the calling
-    // thread forever.  The output buffer is still released by the caller
-    // path's normal cleanup; we just propagate the failure as nullptr.
-    std::promise<void> dispatchDone;
-    auto dispatchFuture = dispatchDone.get_future();
-    cs.dispatchAsync((int)gx, (int)gy, 1, [&dispatchDone]() {
-        dispatchDone.set_value();
+    {
+        mgpu::lock_guard<mgpu::mutex> lock(minigpu.getGpuMutex());
+        // Dispatches batched before this call reach the queue first.
+        minigpu.flushBatchLocked();
+        wgpuQueueWriteBuffer(queue, ubuf, 0, &job.uniforms, sizeof(RgbaUniforms));
+        WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(device, nullptr);
+        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, nullptr);
+        wgpuComputePassEncoderSetPipeline(pass, pipeline);
+        wgpuComputePassEncoderSetBindGroup(pass, 0, bindGroup, 0, nullptr);
+        wgpuComputePassEncoderDispatchWorkgroups(pass, (W + 7) / 8, (H + 7) / 8, 1);
+        wgpuComputePassEncoderEnd(pass);
+        wgpuComputePassEncoderRelease(pass);
+        WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
+        wgpuCommandEncoderRelease(enc);
+        wgpuQueueSubmit(queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+    }
+    wgpuBindGroupRelease(bindGroup);
+    wgpuComputePipelineRelease(pipeline);
+    wgpuBufferRelease(ubuf);
+}
+
+MGPUBuffer* mgpuVideoTextureToRGBA(MGPUVideoTexture* tex) {
+    RgbaJob job;
+    if (!rgba_job_for(tex, job)) return nullptr;
+
+    // On the worker, behind queued uploads and dispatches; the GPU wait sits
+    // there too, so callbacks never fire on the caller's thread. Documented
+    // as synchronous: the caller may destroy the frame as soon as it returns.
+    mgpu::Buffer* result = nullptr;
+    run_on_webgpu_worker([&]() -> int {
+        WGPUDevice device = get_device();
+        WGPUQueue  queue  = get_queue();
+        if (!device || !queue) return 0;
+
+        std::unique_ptr<mgpu::Buffer> outBuf(new mgpu::Buffer(minigpu));
+        outBuf->createBuffer((size_t)rgba_output_bytes(job), mgpu::kUInt8);
+        if (!outBuf->bufferData.buffer) return 0;
+
+        submit_rgba_job(tex, job, outBuf->bufferData.buffer, device, queue);
+        if (!wait_submitted_work(queue, "toRGBA")) return 0;
+        result = outBuf.release();
+        return 1;
     });
-    if (!drain_dawn_events_with_timeout(
-            dispatchFuture, "NV12->RGBA8 dispatch")) {
-        wgpuBufferRelease(ubuf);
-        // outBuf was created on this code path; release it so we don't leak
-        // when reporting failure.
-        delete outBuf;
+    return reinterpret_cast<MGPUBuffer*>(result);
+}
+
+// Completion of one async toRGBA. Dawn's work-done callback (any thread)
+// records the status. While the wait is parked the worker keeps the instance
+// pumped (nothing else is guaranteed to) and reports from there, where the
+// device-generation check takes no lock inside a Dawn callback. Referenced
+// by the callback and by the parked node.
+struct RgbaAsyncWait {
+    std::function<void(bool)>    done;
+    WGPUDevice                   device = nullptr; // identity only, never used
+    uint64_t                     generation = 0;
+    std::atomic<int>             status{0};
+    std::atomic<bool>            fired{false};
+    std::atomic<bool>            parked{false};
+    mgpu::task_queue::ParkedWait node;
+
+    void finish(bool ok) noexcept {
+        try { done(ok); } catch (...) {}
+    }
+    static void workDone(WGPUQueueWorkDoneStatus status, WGPUStringView,
+                         void* ud1, void*) {
+        std::unique_ptr<std::shared_ptr<RgbaAsyncWait>> self(
+            static_cast<std::shared_ptr<RgbaAsyncWait>*>(ud1));
+        RgbaAsyncWait& w = **self;
+        w.status.store((int)status, std::memory_order_relaxed);
+        // Unparked (the web): nothing will resume it, so report here.
+        if (!w.parked.load(std::memory_order_relaxed))
+            w.finish(status == WGPUQueueWorkDoneStatus_Success);
+        w.fired.store(true, std::memory_order_release);
+    }
+    static void resume(mgpu::task_queue::ParkedWait& node) noexcept {
+        std::unique_ptr<std::shared_ptr<RgbaAsyncWait>> self(
+            static_cast<std::shared_ptr<RgbaAsyncWait>*>(node.owner));
+        RgbaAsyncWait& w = **self;
+        // A lost device reports its queue done as well; it converted nothing.
+        w.finish(w.status.load(std::memory_order_relaxed) ==
+                         (int)WGPUQueueWorkDoneStatus_Success &&
+                 minigpu.matchesReadyDevice(w.device, w.generation));
+    }
+};
+
+// The worker half of video_texture_to_rgba_async: records and submits, then
+// has [done] run once the GPU is through. Calls [done] itself on failure.
+static void submit_rgba_async(MGPUVideoTexture* tex, const RgbaJob& job,
+                              WGPUBuffer out, std::function<void(bool)>& done) {
+    std::shared_ptr<RgbaAsyncWait> wait;
+    std::unique_ptr<std::shared_ptr<RgbaAsyncWait>> callbackRef, parkedRef;
+    try {
+        wait = std::make_shared<RgbaAsyncWait>();
+        callbackRef.reset(new std::shared_ptr<RgbaAsyncWait>(wait));
+        parkedRef.reset(new std::shared_ptr<RgbaAsyncWait>(wait));
+    } catch (...) {
+        done(false);
+        return;
+    }
+    WGPUDevice   device   = nullptr;
+    WGPUQueue    queue    = nullptr;
+    WGPUInstance instance = nullptr;
+    uint64_t     generation = 0;
+    if (!minigpu.retainReadyContextSnapshot(&device, &queue, &instance, &generation)) {
+        done(false);
+        return;
+    }
+    bool submitted = false;
+    try {
+        submit_rgba_job(tex, job, out, device, queue);
+        submitted = true;
+    } catch (...) {
+    }
+    if (submitted) {
+        wait->done       = std::move(done);
+        wait->device     = device;
+        wait->generation = generation;
+        wait->node.ready  = &wait->fired;
+        wait->node.resume = &RgbaAsyncWait::resume;
+        wait->node.owner  = parkedRef.get();
+        // Decided before the callback exists, so it knows who reports.
+        if (minigpu.getWebGPUThread().park(wait->node, instance)) {
+            parkedRef.release();
+            wait->parked.store(true, std::memory_order_relaxed);
+        }
+        WGPUQueueWorkDoneCallbackInfo info{};
+        info.mode      = WGPUCallbackMode_AllowSpontaneous;
+        info.callback  = &RgbaAsyncWait::workDone;
+        info.userdata1 = callbackRef.release();
+        wgpuQueueOnSubmittedWorkDone(queue, info);
+    }
+    wgpuQueueRelease(queue);
+    wgpuInstanceRelease(instance);
+    wgpuDeviceRelease(device);
+    if (!submitted) done(false);
+}
+
+// The work behind mgpuVideoTextureToRGBAAsyncToPort, with a native completion.
+// Returns the output buffer at once, or null when [tex] cannot be converted
+// (then [done] never runs). Otherwise [done] runs exactly once, on any thread:
+// true after the GPU finished the conversion, false when it cannot.
+static mgpu::Buffer* video_texture_to_rgba_async(MGPUVideoTexture* tex,
+                                                 std::function<void(bool)> done) {
+    RgbaJob job;
+    if (!rgba_job_for(tex, job)) return nullptr;
+    std::unique_ptr<mgpu::Buffer> outBuf;
+    try {
+        outBuf.reset(new mgpu::Buffer(minigpu));
+        outBuf->createBuffer((size_t)rgba_output_bytes(job), mgpu::kUInt8);
+    } catch (...) {
         return nullptr;
     }
+    WGPUBuffer out = outBuf->bufferData.buffer;
+    if (!out) return nullptr;
+    // The task's own reference, in case the caller drops the buffer early.
+    wgpuBufferAddRef(out);
+    const bool queued = post_to_webgpu_worker([tex, job, out, done]() mutable {
+        submit_rgba_async(tex, job, out, done);
+        wgpuBufferRelease(out);
+    });
+    if (!queued) {
+        wgpuBufferRelease(out);
+        done(false);
+    }
+    return outBuf.release();
+}
 
-    wgpuBufferRelease(ubuf);
-    return reinterpret_cast<MGPUBuffer*>(outBuf);
+MGPUBuffer* mgpuVideoTextureToRGBAAsyncToPort(MGPUVideoTexture* tex,
+                                              int64_t port, int64_t token) {
+    try {
+        return reinterpret_cast<MGPUBuffer*>(video_texture_to_rgba_async(
+            tex, [port, token](bool ok) { mgpu::completionPost(port, token, ok); }));
+    } catch (...) {
+        return nullptr; // thrown before any work was handed off
+    }
+}
+
+int mgpuVideoTextureSetYuvColor(MGPUVideoTexture* tex, int matrix, int full_range) {
+    if (!tex) return -1;
+    switch (matrix) {
+    case MGPU_YUV_MATRIX_BT709:
+    case MGPU_YUV_MATRIX_BT601:
+    case MGPU_YUV_MATRIX_BT2020:
+        break;
+    default:
+        return -1;
+    }
+    tex->yuv_color.store(matrix | (full_range ? MGPUVideoTexture::kYuvFullRange : 0),
+                         std::memory_order_relaxed);
+    return 0;
 }
 
 } // extern "C"
@@ -1749,7 +2483,21 @@ struct MGPUSharedOutputTexture {
     // match. By keeping the D3D11 texture and handing the encoder the same
     // device that created it, we never need OpenSharedResource1 at all.
     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11_texture;
-    HANDLE                                 nt_handle  = nullptr; // owned
+
+    // D3D12 BACKEND ONLY: the resource Dawn actually renders into. The
+    // ID3D11Texture2D above is then a VIEW of this same allocation opened on
+    // the sibling D3D11 device, which is what Flutter samples.
+    Microsoft::WRL::ComPtr<ID3D12Resource>  d3d12_texture;
+
+    HANDLE                                 nt_handle  = nullptr;
+
+    // 🔴 THE TWO BACKENDS PRODUCE DIFFERENT KINDS OF HANDLE, and only one of
+    // them may be closed. The D3D11 path uses IDXGIResource::GetSharedHandle(),
+    // a LEGACY share handle that MSDN says is owned by the texture - closing it
+    // is a double free. The D3D12 path uses ID3D12Device::CreateSharedHandle(),
+    // a real NT handle that leaks unless we close it. Same field, opposite
+    // rules, so the destructor is told which kind it is holding.
+    bool                                   nt_handle_owned = false;
     WGPUSharedTextureMemory                shared_mem = nullptr;
     WGPUTexture                            texture    = nullptr;
     WGPUTextureView                        view       = nullptr;
@@ -2041,7 +2789,8 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter_locked() {
     // own ID3D11Device — then there's only one device in the whole pipeline
     // (Dawn compute, SharedOutputTexture, FFmpeg D3D11VA encoder) and no
     // cross-API or cross-device sharing of any kind is required.
-    {
+    const WGPUBackendType backend = dawn_backend_type(device);
+    if (backend == WGPUBackendType_D3D11) {
         Microsoft::WRL::ComPtr<ID3D11Device> dawnD11 =
             dawn::native::d3d11::GetD3D11Device(device);
         if (dawnD11) {
@@ -2058,6 +2807,11 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter_locked() {
         }
     }
 
+    if (backend != WGPUBackendType_D3D12) {
+        LOG_ERROR("[minigpu_external] get_or_create_d3d11_device: Dawn backend %d "
+                  "is neither D3D11 nor D3D12", static_cast<int>(backend));
+        return nullptr;
+    }
     Microsoft::WRL::ComPtr<ID3D12Device> d3d12Device =
         dawn::native::d3d12::GetD3D12Device(device);
     if (!d3d12Device) {
@@ -2133,7 +2887,33 @@ static ID3D11Device* get_or_create_d3d11_device_on_dawn_adapter() {
 static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
                                                              uint32_t h) {
     WGPUDevice device = get_device();
-    if (!device || w == 0 || h == 0) return nullptr;
+    // 🔴 THE LAST SILENT RETURN IN THIS FUNCTION. Every other failure path logs,
+    // so a NULL with no log at all meant "we cannot tell you anything" - which
+    // cost a debugging round on its own, because the Dart side then GUESSED at
+    // a cause it had never observed. Both possible faults are named here.
+    if (!device) {
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: get_device() "
+                  "returned NULL - minigpu has no WGPUDevice on this thread.");
+        return nullptr;
+    }
+    if (w == 0 || h == 0) {
+        LOG_ERROR("[minigpu_external] create_shared_output_texture: degenerate size "
+                  "%ux%u.", w, h);
+        return nullptr;
+    }
+    // Entry marker: proves the call HAPPENED. A missing "SharedOutputTexture ..."
+    // line is otherwise indistinguishable from the function never being called,
+    // which is exactly the ambiguity that stalled this investigation.
+    //
+    // 🔴 WARN, NOT INFO, AND ONLY ONCE. Hosts run minigpu at warn+ because INFO
+    // narrates several buffer ops per encoded frame - so an INFO breadcrumb here
+    // is invisible in exactly the situation it exists to diagnose. Once is
+    // enough to distinguish "never called" from "called and failed".
+    static std::atomic<bool> saidEntered{false};
+    if (!saidEntered.exchange(true)) {
+        LOG_WARN("[minigpu_external] create_shared_output_texture(%ux%u) entered "
+                 "(first call; logged once).", w, h);
+    }
 
     ID3D11Device* d3d11Device = get_or_create_d3d11_device_on_dawn_adapter();
     if (!d3d11Device) {
@@ -2147,11 +2927,15 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
     // SharedTextureMemoryD3D11Texture2DDescriptor) and to the FFmpeg encoder.
     // No NT handle, no keyed mutex, no cross-API sync — all GPU work runs on
     // one device with normal in-device serialization.
-    Microsoft::WRL::ComPtr<ID3D11Device> dawnD11 =
-        dawn::native::d3d11::GetD3D11Device(device);
+    const WGPUBackendType backend = dawn_backend_type(device);
+    Microsoft::WRL::ComPtr<ID3D11Device> dawnD11;
+    if (backend == WGPUBackendType_D3D11)
+        dawnD11 = dawn::native::d3d11::GetD3D11Device(device);
     const bool dawnOnD3D11 = dawnD11 && dawnD11.Get() == d3d11Device;
 
     Microsoft::WRL::ComPtr<ID3D11Texture2D> d3d11Tex;
+    Microsoft::WRL::ComPtr<ID3D12Resource>  d3d12Texture;
+    bool ownsNtHandle = false;
     HANDLE ntHandle = nullptr;
     WGPUSharedTextureMemory mem = nullptr;
 
@@ -2216,8 +3000,128 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
             }
         }
     } else {
-        LOG_ERROR("[minigpu_external] create_shared_output_texture: Dawn is not on D3D11 backend; cross-API path not implemented in this build. Set MGPU_BACKEND=d3d11.");
-        return nullptr;
+        // ── Dawn is on the D3D12 backend ────────────────────────────────
+        //
+        // Allocate the presentation texture on DAWN'S OWN D3D12 DEVICE, export
+        // it as an NT handle, and open that handle on the sibling D3D11 device.
+        // Both devices sit on the same adapter (guaranteed by
+        // get_or_create_d3d11_device_on_dawn_adapter), so the two APIs are
+        // views of ONE allocation - a cross-API view, NOT a cross-adapter copy.
+        // Nothing is transferred.
+        //
+        // This used to be a flat "not implemented" bail, which left the D3D12
+        // backend unable to present at all: every decoded frame fell back to a
+        // full readback (measured 84-99 ms/frame). It is also why Tier B's
+        // cross-adapter ingest was unusable in practice - Tier B requires the
+        // D3D12 backend, so selecting it silently cost the whole present path.
+        Microsoft::WRL::ComPtr<ID3D12Device> dawn12;
+        if (backend == WGPUBackendType_D3D12)
+            dawn12 = dawn::native::d3d12::GetD3D12Device(device);
+        if (!dawn12) {
+            LOG_ERROR("[minigpu_external] create_shared_output_texture: Dawn is on "
+                      "neither the D3D11 nor the D3D12 backend; no cross-API "
+                      "present path exists.");
+            return nullptr;
+        }
+
+        D3D12_HEAP_PROPERTIES heapProps{};
+        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC rd{};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width            = w;
+        rd.Height           = h;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        // 🔴 ALLOW_SIMULTANEOUS_ACCESS is REQUIRED, not defensive: Flutter's
+        // compositor samples this texture on its own D3D11 device while Dawn
+        // may still hold it, and without the flag the runtime forbids two
+        // devices touching one resource concurrently. ALLOW_RENDER_TARGET
+        // mirrors the D3D11 branch, which sets D3D11_BIND_RENDER_TARGET.
+        rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                   D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+
+        Microsoft::WRL::ComPtr<ID3D12Resource> d3d12Tex;
+        HRESULT hr12 = dawn12->CreateCommittedResource(
+            &heapProps, D3D12_HEAP_FLAG_SHARED, &rd,
+            D3D12_RESOURCE_STATE_COMMON, /*pOptimizedClearValue=*/nullptr,
+            IID_PPV_ARGS(&d3d12Tex));
+        if (FAILED(hr12) || !d3d12Tex) {
+            LOG_ERROR("[minigpu_external] CreateCommittedResource(SharedOutput, "
+                      "D3D12) failed: 0x%08lX", (unsigned long)hr12);
+            return nullptr;
+        }
+
+        // Export as an NT handle. It serves BOTH consumers: Dawn imports the
+        // handle below, then the D3D11 device opens the same handle. We own it.
+        HANDLE shareH = nullptr;
+        hr12 = dawn12->CreateSharedHandle(d3d12Tex.Get(), /*pAttributes=*/nullptr,
+                                          GENERIC_ALL, /*Name=*/nullptr, &shareH);
+        if (FAILED(hr12) || !shareH) {
+            LOG_ERROR("[minigpu_external] CreateSharedHandle(SharedOutput) failed: 0x%08lX",
+                      (unsigned long)hr12);
+            return nullptr;
+        }
+
+        // Import into Dawn THROUGH THE HANDLE rather than through the resource.
+        //
+        // 🔴 NOT `SharedTextureMemoryD3D12ResourceDescriptor` - that struct does
+        // not exist in every Dawn this repo builds against. It is present in the
+        // 2026-05 tree under external/dawn but ABSENT from the 2025-08 tree at
+        // C:\dawn that actually gets linked, so using it compiles against one
+        // checkout and fails against the other. The DXGI-shared-handle
+        // descriptor has existed far longer and is what Tier B already relies
+        // on, so this path works on both. Cost is one extra open at allocation,
+        // never per frame.
+        //
+        // `useKeyedMutex=false` matches Tier B: synchronisation is by fence via
+        // SharedTextureMemory Begin/EndAccess. A keyed mutex would additionally
+        // require Flutter's compositor to acquire it, which it does not do.
+        WGPUSharedTextureMemoryDXGISharedHandleDescriptor handleDesc{};
+        handleDesc.chain.sType = WGPUSType_SharedTextureMemoryDXGISharedHandleDescriptor;
+        handleDesc.handle        = shareH;
+        handleDesc.useKeyedMutex = false;
+        WGPUSharedTextureMemoryDescriptor smDesc12{};
+        smDesc12.nextInChain = &handleDesc.chain;
+        mem = wgpuDeviceImportSharedTextureMemory(device, &smDesc12);
+        if (!mem) {
+            LOG_ERROR("[minigpu_external] importSharedTextureMemory(DXGISharedHandle, "
+                      "D3D12 output) failed.");
+            CloseHandle(shareH);
+            return nullptr;
+        }
+
+        // Open it on the sibling D3D11 device for the ID3D11Texture2D Flutter
+        // needs. 🔴 THIS IS THE CALL a comment on MGPUSharedOutputTexture claims
+        // returns E_INVALIDARG on many NVIDIA drivers "even when LUIDs match".
+        // That was recorded during CROSS-ADAPTER work; here both devices are on
+        // the same adapter by construction. If it does fail the HRESULT is
+        // reported rather than swallowed, and the caller falls back to the CPU
+        // present path instead of showing nothing.
+        Microsoft::WRL::ComPtr<ID3D11Device1> d3d11_1;
+        hr12 = d3d11Device->QueryInterface(IID_PPV_ARGS(&d3d11_1));
+        if (SUCCEEDED(hr12) && d3d11_1) {
+            hr12 = d3d11_1->OpenSharedResource1(shareH, IID_PPV_ARGS(&d3d11Tex));
+        }
+        if (FAILED(hr12) || !d3d11Tex) {
+            LOG_ERROR("[minigpu_external] OpenSharedResource1(D3D12 shared output) "
+                      "failed: 0x%08lX. Dawn is on D3D12 and this driver will not "
+                      "open its resources on a D3D11 device - run with "
+                      "MGPU_BACKEND=d3d11.", (unsigned long)hr12);
+            CloseHandle(shareH);
+            wgpuSharedTextureMemoryRelease(mem);
+            return nullptr;
+        }
+
+        ntHandle     = shareH;
+        ownsNtHandle = true;
+        d3d12Texture = d3d12Tex;
+        LOG_INFO("[minigpu_external] SharedOutputTexture (D3D12 cross-API) "
+                 "d12=%p d11=%p mem=%p",
+                 (void*)d3d12Tex.Get(), (void*)d3d11Tex.Get(), (void*)mem);
     }
     WGPUTextureDescriptor td{};
     // The shared d3d11 texture only needs CopyDst/CopySrc/TextureBinding —
@@ -2231,13 +3135,22 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
     td.mipLevelCount = 1;
     td.sampleCount   = 1;
 
-    WGPUTexture wgpuTex = wgpuSharedTextureMemoryCreateTexture(mem, &td);
-    if (!wgpuTex) {
-        LOG_ERROR("[minigpu_external] wgpuSharedTextureMemoryCreateTexture failed.");
+    // Dawn returns error objects, never null: an import it refused reports
+    // Undefined properties. Refuse here so the caller falls back instead of
+    // presenting through a texture every blit would reject.
+    WGPUSharedTextureMemoryProperties memProps{};
+    if (wgpuSharedTextureMemoryGetProperties(mem, &memProps) != WGPUStatus_Success ||
+        memProps.format == WGPUTextureFormat_Undefined ||
+        (memProps.usage & td.usage) != td.usage) {
+        LOG_ERROR("[minigpu_external] SharedOutputTexture import was refused by Dawn "
+                  "(format %d, usage 0x%llx).", static_cast<int>(memProps.format),
+                  static_cast<unsigned long long>(memProps.usage));
         wgpuSharedTextureMemoryRelease(mem);
-        CloseHandle(ntHandle);
+        // The D3D11 branch's legacy handle belongs to the texture.
+        if (ownsNtHandle) CloseHandle(ntHandle);
         return nullptr;
     }
+    WGPUTexture wgpuTex = wgpuSharedTextureMemoryCreateTexture(mem, &td);
 
     WGPUTextureViewDescriptor vd{};
     vd.format          = WGPUTextureFormat_BGRA8Unorm;
@@ -2273,7 +3186,9 @@ static MGPUSharedOutputTexture* create_shared_output_texture(uint32_t w,
 
     auto* out = new MGPUSharedOutputTexture();
     out->d3d11_texture       = d3d11Tex;
+    out->d3d12_texture       = d3d12Texture;   // null on the D3D11 backend
     out->nt_handle           = ntHandle;
+    out->nt_handle_owned     = ownsNtHandle;
     out->shared_mem          = mem;
     out->texture             = wgpuTex;
     out->view                = view;
@@ -2360,6 +3275,11 @@ EXPORT void* mgpuCreateD3D11DeviceOnDawnAdapter() {
 EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
                                                   MGPUSharedOutputTexture* dst) {
 #ifdef _WIN32
+    if (!on_webgpu_worker()) {
+        return run_on_webgpu_worker([src, dst] {
+            return mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        });
+    }
     if (!src || !dst) return 0;
     if (src->num_planes == 0 || !src->views[0]) return 0;
     if (!dst->shared_mem || !dst->texture || !dst->view) return 0;
@@ -2374,11 +3294,16 @@ EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
     }
 
     // Acquire GPU access on the shared destination.  D3D12 resource state
-    // becomes UNORDERED_ACCESS for the duration of the dispatch.
+    // becomes UNORDERED_ACCESS for the duration of the dispatch.  A refused
+    // access opens nothing, so there is nothing to end.
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true; // assume previous content (or zero) is valid
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture,
+                                           &beginDesc) != WGPUStatus_Success) {
+        LOG_ERROR("[minigpu_external] BGRA->RGBA blit: BeginAccess failed.");
+        return 0;
+    }
 
     // Build per-dispatch bind group (textures may differ each frame).
     WGPUBindGroupEntry bgEntries[2]{};
@@ -2432,27 +3357,32 @@ EXPORT int mgpuVideoTextureBGRAToRGBASharedOutput(MGPUVideoTexture* src,
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
-    minigpu.flushBatch(); // submit pending batched compute before this blit
+    // The flush and this submit must not interleave with another thread's
+    // batch recording; EndAccess closes the window the submit used.
+    mgpu::unique_lock<mgpu::mutex> gpuLock(minigpu.getGpuMutex());
+    minigpu.flushBatchLocked(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
 
     // EndAccess returns the resource to COMMON state so the D3D11 client
-    // (the FFmpeg encoder / Flutter compositor) may read it.  In the single-
-    // device path Dawn IS the D3D11 device that the encoder also uses (the
-    // device is ID3D11Multithread-protected), so GPU command ordering is
-    // guaranteed by the device's immediate context: any subsequent encode
-    // call serializes after the dispatch+copy we just submitted.  No CPU
-    // wait is needed.
-    WGPUSharedTextureMemoryEndAccessState endState{};
-    wgpuSharedTextureMemoryEndAccess(dst->shared_mem, dst->texture, &endState);
+    // (the FFmpeg encoder / Flutter compositor) may read it.
+    const bool ended = end_shared_access(dst->shared_mem, dst->texture);
+    gpuLock.unlock();
+    if (!ended) {
+        LOG_ERROR("[minigpu_external] BGRA->RGBA blit: EndAccess failed.");
+        return 0;
+    }
 
-    // Drain any pending Dawn callbacks (device-lost, validation errors from
-    // prior submissions, etc.) without blocking.  This keeps Dawn's event
-    // queue from growing unbounded while letting the caller return
-    // immediately and the GPU run the work asynchronously.
-    pump_dawn_events_nonblocking();
-    return 1;
+    // Only the encoder shares Dawn's device; a compositor samples on its own
+    // device, which nothing orders after our queue. So 1 means the dispatch +
+    // copy have FINISHED on the GPU (waited here, on the worker). The test-only
+    // MGPU_PRESENT_NO_WAIT skips it, as for the buffer copy below.
+    if (present_wait_disabled()) {
+        pump_dawn_events_nonblocking();
+        return 1;
+    }
+    return wait_submitted_work(queue, "BGRA->RGBA blit: present copy") ? 1 : 0;
 #else
     (void)src; (void)dst;
     return 0;
@@ -2467,6 +3397,13 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
         MGPUBuffer*                buf,
         MGPUSharedOutputTexture*   dst) {
 #ifdef _WIN32
+    if (!on_webgpu_worker()) {
+        // On the worker the buffer is read behind its queued writers and
+        // ahead of any queued destroy.
+        return run_on_webgpu_worker([buf, dst] {
+            return mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        });
+    }
     if (!buf || !dst) return 0;
     if (!dst->shared_mem || !dst->texture || !dst->view) return 0;
 
@@ -2489,7 +3426,11 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true;
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture,
+                                           &beginDesc) != WGPUStatus_Success) {
+        LOG_ERROR("[minigpu_external] copyBufToShTex: BeginAccess failed.");
+        return 0;
+    }
 
     WGPUBindGroupEntry bgEntries[2]{};
     bgEntries[0].binding = 0;
@@ -2537,14 +3478,21 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
-    minigpu.flushBatch(); // submit pending batched compute before this blit
+    // The flush and this submit must not interleave with another thread's
+    // batch recording; EndAccess closes the window the submit used.
+    mgpu::unique_lock<mgpu::mutex> gpuLock(minigpu.getGpuMutex());
+    minigpu.flushBatchLocked(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
 
     // EndAccess returns the resource to COMMON so the D3D11 client can read it.
-    WGPUSharedTextureMemoryEndAccessState endState{};
-    wgpuSharedTextureMemoryEndAccess(dst->shared_mem, dst->texture, &endState);
+    const bool ended = end_shared_access(dst->shared_mem, dst->texture);
+    gpuLock.unlock();
+    if (!ended) {
+        LOG_ERROR("[minigpu_external] copyBufToShTex: EndAccess failed.");
+        return 0;
+    }
 
     // CROSS-DEVICE PRESENT SYNC (ghost fix): the shared texture is legacy
     // D3D11_RESOURCE_MISC_SHARED (no keyed mutex), and the consumer (Flutter)
@@ -2562,25 +3510,13 @@ EXPORT int mgpuCopyBufferToSharedOutputTexture(
     //
     // MGPU_PRESENT_NO_WAIT=1 SKIPS this wait. It is a DELIBERATELY BROKEN mode
     // and exists only as the positive control for the present-correctness gate
-    // (tool/gs420_present_gate.dart in livetensor_crosscoder): an oracle that
+    // (an external present gate): an oracle that
     // has never been shown to fail is not an oracle. Under it the consumer read
     // must start reporting stale/torn surfaces; if it does not, the gate is
     // measuring nothing. Never set it in production.
-    if (!present_wait_disabled()) {
-        std::promise<void> presentDone;
-        auto presentFut = presentDone.get_future();
-        WGPUQueueWorkDoneCallbackInfo cbInfo{};
-        cbInfo.mode      = WGPUCallbackMode_AllowProcessEvents;
-        cbInfo.callback  = [](WGPUQueueWorkDoneStatus, WGPUStringView,
-                              void* ud1, void*) {
-            static_cast<std::promise<void>*>(ud1)->set_value();
-        };
-        cbInfo.userdata1 = &presentDone;
-        wgpuQueueOnSubmittedWorkDone(queue, cbInfo);
-        drain_dawn_events_with_timeout(presentFut,
-                                       "copyBufToShTex: present copy");
-    }
-    return 1;
+    // A timed-out or failed wait is a failed present: 1 promises final pixels.
+    if (present_wait_disabled()) return 1;
+    return wait_submitted_work(queue, "copyBufToShTex: present copy") ? 1 : 0;
 #else
     (void)buf; (void)dst;
     return 0;
@@ -2601,10 +3537,14 @@ EXPORT void mgpuCopyBufferToSharedOutputTextureAsync(
         MGPUSharedOutputTexture*   dst,
         void                     (*callback)(int)) {
 #ifdef _WIN32
-    minigpu.getWebGPUThread().enqueueAsync([buf, dst, callback]() {
-        int r = mgpuCopyBufferToSharedOutputTexture(buf, dst);
+    const bool queued = post_to_webgpu_worker([buf, dst, callback]() {
+        // Through the helper: a throw must not escape the worker's task loop.
+        int r = run_on_webgpu_worker([buf, dst] {
+            return mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        });
         if (callback) callback(r);
     });
+    if (!queued && callback) callback(0);
 #else
     (void)buf; (void)dst;
     if (callback) callback(0);
@@ -2618,10 +3558,13 @@ EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsync(
         MGPUSharedOutputTexture*   dst,
         void                     (*callback)(int)) {
 #ifdef _WIN32
-    minigpu.getWebGPUThread().enqueueAsync([src, dst, callback]() {
-        int r = mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+    const bool queued = post_to_webgpu_worker([src, dst, callback]() {
+        int r = run_on_webgpu_worker([src, dst] {
+            return mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        });
         if (callback) callback(r);
     });
+    if (!queued && callback) callback(0);
 #else
     (void)src; (void)dst;
     if (callback) callback(0);
@@ -2637,10 +3580,13 @@ EXPORT void mgpuCopyBufferToSharedOutputTextureAsyncToPort(
         int64_t                    port,
         int64_t                    token) {
 #ifdef _WIN32
-    minigpu.getWebGPUThread().enqueueAsync([buf, dst, port, token]() {
-        const int r = mgpuCopyBufferToSharedOutputTexture(buf, dst);
+    const bool queued = post_to_webgpu_worker([buf, dst, port, token]() {
+        const int r = run_on_webgpu_worker([buf, dst] {
+            return mgpuCopyBufferToSharedOutputTexture(buf, dst);
+        });
         mgpu::completionPost(port, token, r != 0);
     });
+    if (!queued) mgpu::completionPost(port, token, false);
 #else
     (void)buf; (void)dst;
     mgpu::completionPost(port, token, false);
@@ -2653,10 +3599,13 @@ EXPORT void mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
         int64_t                    port,
         int64_t                    token) {
 #ifdef _WIN32
-    minigpu.getWebGPUThread().enqueueAsync([src, dst, port, token]() {
-        const int r = mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+    const bool queued = post_to_webgpu_worker([src, dst, port, token]() {
+        const int r = run_on_webgpu_worker([src, dst] {
+            return mgpuVideoTextureBGRAToRGBASharedOutput(src, dst);
+        });
         mgpu::completionPost(port, token, r != 0);
     });
+    if (!queued) mgpu::completionPost(port, token, false);
 #else
     (void)src; (void)dst;
     mgpu::completionPost(port, token, false);
@@ -2671,6 +3620,11 @@ EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(
         MGPUBuffer*                buf,
         MGPUSharedOutputTexture*   dst) {
 #ifdef _WIN32
+    if (!on_webgpu_worker()) {
+        return run_on_webgpu_worker([buf, dst] {
+            return mgpuCopyBufferF32ToSharedOutputTexture(buf, dst);
+        });
+    }
     if (!buf || !dst) return 0;
     if (!dst->shared_mem || !dst->texture || !dst->view) return 0;
 
@@ -2691,7 +3645,11 @@ EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true;
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(dst->shared_mem, dst->texture,
+                                           &beginDesc) != WGPUStatus_Success) {
+        LOG_ERROR("[minigpu_external] copyBufF32ToShTex: BeginAccess failed.");
+        return 0;
+    }
 
     WGPUBindGroupEntry bgEntries[2]{};
     bgEntries[0].binding = 0;
@@ -2735,19 +3693,52 @@ EXPORT int mgpuCopyBufferF32ToSharedOutputTexture(
 
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
-    minigpu.flushBatch(); // submit pending batched compute before this blit
+    // The flush and this submit must not interleave with another thread's
+    // batch recording; EndAccess closes the window the submit used.
+    mgpu::unique_lock<mgpu::mutex> gpuLock(minigpu.getGpuMutex());
+    minigpu.flushBatchLocked(); // submit pending batched compute before this blit
     wgpuQueueSubmit(queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuBindGroupRelease(bg);
 
-    WGPUSharedTextureMemoryEndAccessState endState{};
-    wgpuSharedTextureMemoryEndAccess(dst->shared_mem, dst->texture, &endState);
+    const bool ended = end_shared_access(dst->shared_mem, dst->texture);
+    gpuLock.unlock();
+    if (!ended) {
+        LOG_ERROR("[minigpu_external] copyBufF32ToShTex: EndAccess failed.");
+        return 0;
+    }
 
-    pump_dawn_events_nonblocking();
-    return 1;
+    // Same present contract as the u32 copy: 1 means the copy has finished.
+    if (present_wait_disabled()) {
+        pump_dawn_events_nonblocking();
+        return 1;
+    }
+    return wait_submitted_work(queue, "copyBufF32ToShTex: present copy") ? 1 : 0;
 #else
     (void)buf; (void)dst;
     return 0;
+#endif
+}
+
+/// Port-delivered async variant of mgpuCopyBufferF32ToSharedOutputTexture:
+/// the copy and its completion wait run on the WebGPU worker, so the caller's
+/// thread never blocks; the result is posted once the copy has finished.
+EXPORT void mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort(
+        MGPUBuffer*                buf,
+        MGPUSharedOutputTexture*   dst,
+        int64_t                    port,
+        int64_t                    token) {
+#ifdef _WIN32
+    const bool queued = post_to_webgpu_worker([buf, dst, port, token]() {
+        const int r = run_on_webgpu_worker([buf, dst] {
+            return mgpuCopyBufferF32ToSharedOutputTexture(buf, dst);
+        });
+        mgpu::completionPost(port, token, r != 0);
+    });
+    if (!queued) mgpu::completionPost(port, token, false);
+#else
+    (void)buf; (void)dst;
+    mgpu::completionPost(port, token, false);
 #endif
 }
 
@@ -2821,6 +3812,12 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixel(
 EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
         MGPUSharedOutputTexture* tex) {
 #ifdef _WIN32
+    if (!on_webgpu_worker()) {
+        // Behind the queued presents, like every other Dawn use of [tex].
+        return (uint32_t)run_on_webgpu_worker([tex] {
+            return (int)mgpuSharedOutputTextureDebugReadFirstPixelDawn(tex);
+        });
+    }
     if (!tex || !tex->shared_mem || !tex->texture) return 0xDEAD1001u;
     WGPUDevice device = get_device();
     WGPUQueue  queue  = get_queue();
@@ -2838,7 +3835,11 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
     WGPUSharedTextureMemoryBeginAccessDescriptor beginDesc{};
     beginDesc.initialized = true;
     beginDesc.fenceCount  = 0;
-    wgpuSharedTextureMemoryBeginAccess(tex->shared_mem, tex->texture, &beginDesc);
+    if (wgpuSharedTextureMemoryBeginAccess(tex->shared_mem, tex->texture,
+                                           &beginDesc) != WGPUStatus_Success) {
+        wgpuBufferRelease(staging);
+        return 0xDEAD1007u;
+    }
 
     WGPUTexelCopyTextureInfo srcInfo{};
     srcInfo.texture  = tex->texture;
@@ -2858,41 +3859,33 @@ EXPORT uint32_t mgpuSharedOutputTextureDebugReadFirstPixelDawn(
     wgpuCommandEncoderCopyTextureToBuffer(enc, &srcInfo, &dstInfo, &ext);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuCommandEncoderRelease(enc);
-    minigpu.flushBatch(); // submit pending batched compute before this blit
-    wgpuQueueSubmit(queue, 1, &cmd);
-    wgpuCommandBufferRelease(cmd);
-
-    WGPUSharedTextureMemoryEndAccessState endState{};
-    wgpuSharedTextureMemoryEndAccess(tex->shared_mem, tex->texture, &endState);
+    {
+        mgpu::lock_guard<mgpu::mutex> gpuLock(minigpu.getGpuMutex());
+        minigpu.flushBatchLocked(); // submit pending batched compute before this blit
+        wgpuQueueSubmit(queue, 1, &cmd);
+        wgpuCommandBufferRelease(cmd);
+        end_shared_access(tex->shared_mem, tex->texture);
+    }
 
     // Wait for queue (timeout-protected: a hung driver returns an error
     // instead of freezing the caller forever).
-    std::promise<void> done;
-    auto fut = done.get_future();
-    WGPUQueueWorkDoneCallbackInfo cbInfo{};
-    cbInfo.mode      = WGPUCallbackMode_AllowProcessEvents;
-    cbInfo.callback  = [](WGPUQueueWorkDoneStatus, WGPUStringView,
-                          void* userdata1, void*) {
-        static_cast<std::promise<void>*>(userdata1)->set_value();
-    };
-    cbInfo.userdata1 = &done;
-    wgpuQueueOnSubmittedWorkDone(queue, cbInfo);
-    if (!drain_dawn_events_with_timeout(
-            fut, "DebugReadFirstPixelDawn: queue submit")) {
+    if (!wait_submitted_work(queue, "DebugReadFirstPixelDawn: queue submit")) {
         wgpuBufferRelease(staging);
         return 0xDEAD1005u;
     }
 
-    // Map.
-    std::promise<WGPUMapAsyncStatus> mapDone;
-    auto mapFut = mapDone.get_future();
+    // Map. The callback owns the completion state (a timed-out wait returns).
+    using MapDone = std::shared_ptr<std::promise<WGPUMapAsyncStatus>>;
+    auto mapDone = std::make_shared<std::promise<WGPUMapAsyncStatus>>();
+    auto mapFut = mapDone->get_future();
     WGPUBufferMapCallbackInfo mci{};
     mci.mode = WGPUCallbackMode_AllowProcessEvents;
     mci.callback = [](WGPUMapAsyncStatus s, WGPUStringView,
                       void* ud1, void*) {
-        static_cast<std::promise<WGPUMapAsyncStatus>*>(ud1)->set_value(s);
+        std::unique_ptr<MapDone> owner(static_cast<MapDone*>(ud1));
+        (*owner)->set_value(s);
     };
-    mci.userdata1 = &mapDone;
+    mci.userdata1 = new MapDone(mapDone);
     wgpuBufferMapAsync(staging, WGPUMapMode_Read, 0, kBytesPerRow, mci);
     if (!drain_dawn_events_with_timeout(
             mapFut, "DebugReadFirstPixelDawn: buffer map")) {
@@ -2998,11 +3991,16 @@ static std::unordered_map<void*, ConsumerSurface> g_consumer_surfaces; // g_cons
 // C++ function declared in buffer.h.
 extern "C++" {
 namespace mgpu {
+void renderOnContextDestroyed(const void* context); // minigpu_render.cpp
 void externalOnContextDestroyed(const void* context) {
-#ifdef _WIN32
+    // Every context's render pipelines close with it.
+    renderOnContextDestroyed(context);
     // Only the process-global context builds these caches; a secondary
     // Minigpu.forAdapter context must not clear them.
     if (context != static_cast<const void*>(&::minigpu)) return;
+    // The toRGBA converters keep the destroyed device alive.
+    release_rgba_pipelines();
+#ifdef _WIN32
     {
         std::lock_guard<std::mutex> lk(g_consumer_mutex);
         g_consumer_surfaces.clear();
@@ -3014,8 +4012,23 @@ void externalOnContextDestroyed(const void* context) {
         g_d3d11_context.Reset();
         g_d3d11_device.Reset();
     }
-#else
-    (void)context;
+    {
+        // Tier A's private copies keep the old D3D11 device alive.
+        std::lock_guard<std::mutex> lk(g_private_copy_mutex);
+        g_private_copy = PrivateCopyRing{};
+    }
+    {
+        // Tier B's Dawn objects belong to the device just destroyed (and keep
+        // it alive); the producer-side D3D12 state does not. The next bridge
+        // import refills the ring and re-imports the fence.
+        std::lock_guard<std::mutex> lk(g_producerInfoMutex);
+        for (auto& kv : g_producerInfoByLuid) {
+            ProducerAdapterInfo& info = *kv.second;
+            std::lock_guard<std::mutex> ring(info.tierBMutex);
+            if (info.dawnFence) { wgpuSharedFenceRelease(info.dawnFence); info.dawnFence = nullptr; }
+            release_tier_b_ring(&info);
+        }
+    }
 #endif
 }
 } // namespace mgpu
@@ -3095,9 +4108,8 @@ EXPORT uint32_t mgpuDebugConsumerChecksumSharedHandle(void*    sharedHandle,
 #endif
 }
 
-EXPORT void mgpuDestroySharedOutputTexture(MGPUSharedOutputTexture* tex) {
 #ifdef _WIN32
-    if (!tex) return;
+static void destroy_shared_output_texture_on_worker(MGPUSharedOutputTexture* tex) {
     if (tex->copy_pipeline) wgpuComputePipelineRelease(tex->copy_pipeline);
     if (tex->copy_pl)       wgpuPipelineLayoutRelease(tex->copy_pl);
     if (tex->copy_bgl)      wgpuBindGroupLayoutRelease(tex->copy_bgl);
@@ -3115,10 +4127,31 @@ EXPORT void mgpuDestroySharedOutputTexture(MGPUSharedOutputTexture* tex) {
     if (tex->view)        wgpuTextureViewRelease(tex->view);
     if (tex->texture)     wgpuTextureRelease(tex->texture);
     if (tex->shared_mem)  wgpuSharedTextureMemoryRelease(tex->shared_mem);
-    // Note: nt_handle here is a legacy DXGI share handle obtained via
-    // IDXGIResource::GetSharedHandle().  Per MSDN, legacy share handles are
-    // OWNED BY THE TEXTURE and must NOT be CloseHandle()'d.
+    // 🔴 CLOSE THE HANDLE ONLY IF WE MADE IT. On the D3D11 backend nt_handle is
+    // a LEGACY DXGI share handle from IDXGIResource::GetSharedHandle(), which
+    // MSDN says is owned by the texture - closing it is a double free, and this
+    // function deliberately did not. The D3D12 backend instead exports a real
+    // NT handle via ID3D12Device::CreateSharedHandle(), which leaks unless it
+    // IS closed. nt_handle_owned records which one this is.
+    if (tex->nt_handle_owned && tex->nt_handle) {
+        CloseHandle(tex->nt_handle);
+    }
     delete tex;
+}
+#endif
+
+EXPORT void mgpuDestroySharedOutputTexture(MGPUSharedOutputTexture* tex) {
+#ifdef _WIN32
+    if (!tex) return;
+    // FIFO behind every queued blit into [tex]: those tasks hold only the raw
+    // pointer, so freeing it inline here was a use-after-free.
+    if (!post_to_webgpu_worker([tex]() {
+            destroy_shared_output_texture_on_worker(tex);
+        })) {
+        // A refused queue does not prove the queued blits have run: keep the
+        // texture rather than free it under them.
+        LOG_ERROR("shared output texture retained: GPU enqueue failed");
+    }
 #else
     (void)tex;
 #endif

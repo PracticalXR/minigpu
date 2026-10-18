@@ -3,15 +3,23 @@
 /// Implements the `minigpu_view` method channel on the browser by:
 ///   1. Registering an `<canvas>` element per controller via
 ///      `ui_web.platformViewRegistry`.
-///   2. On each `present` call, blitting the producer's `GPUTexture`
+///   2. On each `present` call, drawing the producer's GPU buffer
 ///      into the canvas's `GPUCanvasContext` on the **same** WebGPU
-///      device — one command, zero PCIe traffic.
+///      device — one render pass, zero PCIe traffic.
 ///
 /// Producers (e.g. `minigpu_web`) MUST set the JS global
 /// `window.gpuDevice` to the WebGPU device they're using before any
 /// `present` call. The web plugin reads that same global so source
 /// and sink share a queue.
 library minigpu_view_web;
+
+// 🔴 `.isA<JSObject>()`, NOT `is JSObject`.
+//
+// dart2wasm erases every interop type to one opaque JS value, so an `is` test
+// against a JS interop type cannot mean anything there and the compiler refuses
+// it (`invalid_runtime_check_with_js_interop_types`). dart2js could answer it
+// because interop types are real JS objects there — which is why this compiled
+// for years and only surfaced when a wasm build first pulled this library in.
 
 import 'dart:async';
 import 'dart:js_interop';
@@ -42,10 +50,26 @@ JSObject? _webGpuGetJsObject(int handle) {
   if (handle == 0) return null;
   try {
     final result = _emscriptenWebGpu?.getJsObject(handle.toJS);
-    return result is JSObject ? result : null;
+    return (result != null && result.isA<JSObject>())
+        ? result as JSObject
+        : null;
   } catch (_) {
     return null;
   }
+}
+
+/// The wasm instance `minigpu_web` publishes (its bindings read only this
+/// name), or null on a page without one.
+@JS('MinigpuModule')
+external JSObject? get _minigpuModule;
+
+/// Submits the compute work minigpu still holds in its open batch, so a blit
+/// submitted next on the shared queue runs after the dispatches that wrote its
+/// source buffer. Nothing batched (or no minigpu) submits nothing.
+void _flushMinigpuBatch() {
+  final module = _minigpuModule;
+  if (module == null || !module.has('_mgpuFlushBatch')) return;
+  module.callMethod<JSAny?>('_mgpuFlushBatch'.toJS);
 }
 
 @JS('globalThis')
@@ -102,10 +126,17 @@ class MinigpuViewWebPlugin {
       case 'dispose':
         _sinks.remove(instanceId)?.dispose();
         return null;
+      case 'retire':
+        // One canvas per instance, and no presented source is referenced
+        // after its present: nothing to drop.
+        return null;
       default:
         throw MissingPluginException('minigpu_view_web: ${call.method}');
     }
   }
+
+  /// One-shot marker for the silent-blank failure mode below.
+  static bool _saidBufferLookupMiss = false;
 
   Map<String, Object?> _present(int instanceId, Map<String, Object?> args) {
     final kind = args['kind'] as String;
@@ -116,20 +147,30 @@ class MinigpuViewWebPlugin {
     sink ??= _registerSink(instanceId, width, height);
 
     if (kind == 'webGpuTexture') {
-      // 'texture' key: a JSObject GPUTexture passed directly (same-device path).
       // 'bufferHandle' key: an Emscripten integer handle — we resolve the
-      //   JS GPUBuffer locally via WebGPU.getJsObject() to stay codec-safe.
-      final texture = args['texture'];
+      //   JS GPUBuffer locally via WebGPU.getJsObject() to stay codec-safe
+      //   (a JS object cannot cross the method channel's codec).
       final bufferHandle = args['bufferHandle'];
-      if (texture is JSObject) {
-        sink.copyFromGpuTexture(texture, width, height);
-      } else if (bufferHandle is int && bufferHandle != 0) {
+      if (bufferHandle is int && bufferHandle != 0) {
         final jsBuffer = _webGpuGetJsObject(bufferHandle);
         if (jsBuffer != null) {
           final format = args['format'] as String? ?? 'rgba32float';
           sink.copyFromGpuBuffer(jsBuffer, width, height, format);
+        } else if (!_saidBufferLookupMiss) {
+          // One frame of "not ready yet" is normal; EVERY frame missing means
+          // the handle table (`globalThis.WebGPU`) is absent or belongs to a
+          // different module instance — the present "succeeds" but nothing is
+          // ever blitted, which renders as a permanently blank surface with
+          // zero errors. Say it once.
+          _saidBufferLookupMiss = true;
+          // ignore: avoid_print
+          print(
+            '[minigpu_view] WebGPU.getJsObject($bufferHandle) returned '
+            'null — GPU-buffer presents are being skipped; if this frame is '
+            'not the first, the handle table and the compute module do not '
+            'match',
+          );
         }
-        // jsBuffer == null → WASM not ready yet; skip frame silently.
       }
       // else: handle is 0/null → first frame, skip blit silently.
     } else if (kind == 'webVideoFrame') {
@@ -140,8 +181,8 @@ class MinigpuViewWebPlugin {
       JSObject? frame;
       if (handle is int) {
         frame = _takeVideoFrame(handle);
-      } else if (args['frame'] is JSObject) {
-        frame = args['frame'] as JSObject;
+      } else if (args['frame'] case final JSAny f when f.isA<JSObject>()) {
+        frame = f as JSObject;
       }
       // Registry miss (handle already consumed / frame not ready) → skip
       // silently, like the WebGPU-not-ready path above.
@@ -167,7 +208,12 @@ class MinigpuViewWebPlugin {
       ..width = width
       ..height = height
       ..style.width = '100%'
-      ..style.height = '100%';
+      ..style.height = '100%'
+          // This surface only displays producer frames.  Flutter owns all input
+          // above it (scene capture, mode tabs, and controls), so the DOM canvas
+          // must never become the browser's pointer target.
+          ..style
+          .setProperty('pointer-events', 'none');
 
     final sink = _CanvasSink(textureId: id, canvas: canvas);
 
@@ -194,10 +240,12 @@ class _CanvasSink {
   String? _canvasFormat;
   bool _disposed = false;
 
-  // Cached blit pipeline for rgba32float → canvas format conversion.
-  JSObject? _blitPipeline;
-  JSObject? _blitDevice;
-  String? _blitCanvasFormat;
+  // Two bounded direct pipelines per device/canvas format. The producer
+  // owns pixel storage; the sink owns only one reusable size uniform.
+  final _bufferPipelines = <String, JSObject>{};
+  JSObject? _bufferDevice;
+  String? _bufferCanvasFormat;
+  JSObject? _bufferParamBuf;
 
   _CanvasSink({required this.textureId, required this.canvas});
 
@@ -206,12 +254,14 @@ class _CanvasSink {
   JSObject? _resolveDevice() {
     final globalThis = web.window as JSObject;
     final dev = globalThis['gpuDevice'];
-    if (dev is JSObject) return dev;
+    if (dev != null && dev.isA<JSObject>()) return dev as JSObject;
     return null;
   }
 
   void _ensureContext(JSObject device) {
-    if (_ctx != null && identical(_device, device)) return;
+    // JS identity: dart2wasm wraps each JS value read into Dart afresh, so
+    // identical() never holds and the canvas would be reconfigured per frame.
+    if (_ctx != null && _device.strictEquals(device).toDart) return;
     final ctx = canvas.getContext('webgpu');
     if (ctx == null) {
       throw PlatformException(
@@ -239,284 +289,42 @@ class _CanvasSink {
     _canvasFormat = format;
   }
 
-  /// Blit a producer GPUTexture into the canvas via
-  /// `commandEncoder.copyTextureToTexture` on the same device.
-  void copyFromGpuTexture(JSObject src, int width, int height) {
-    if (_disposed) return;
-    final device = _resolveDevice();
-    if (device == null) {
-      throw PlatformException(
-        code: 'no_device',
-        message: 'window.gpuDevice not set; producer must publish it',
-      );
-    }
-    _ensureContext(device);
-
-    if (canvas.width != width) canvas.width = width;
-    if (canvas.height != height) canvas.height = height;
-
-    final dst = _ctx!.callMethod<JSObject>('getCurrentTexture'.toJS);
-    final encoder = device.callMethod<JSObject>('createCommandEncoder'.toJS);
-
-    encoder.callMethod<JSAny?>(
-      'copyTextureToTexture'.toJS,
-      {'texture': src}.jsify(),
-      {'texture': dst}.jsify(),
-      {'width': width, 'height': height, 'depthOrArrayLayers': 1}.jsify(),
-    );
-
-    final cmd = encoder.callMethod<JSObject>('finish'.toJS);
-    final queue = device['queue'] as JSObject;
-    queue.callMethod<JSAny?>('submit'.toJS, [cmd].jsify());
-  }
-
-  // WGSL: fullscreen triangle that samples an rgba32float texture and
-  // writes to the canvas render-attachment (any format, e.g. bgra8unorm).
-  // Y-flip applied: WebGPU NDC Y+=up, texture V=0=top.
-  // textureLoad is used instead of textureSample because rgba32float textures
-  // have sample-type UnfilterableFloat — they cannot be used with a filtering
-  // sampler or textureSample.  textureLoad reads the exact texel at the
-  // fragment's screen-space pixel position, which is identical to the canvas
-  // pixel, so no UV math or sampler is needed.
-  static const _kBlitShader = '''
-@group(0) @binding(0) var srcTex: texture_2d<f32>;
-
-@vertex
-fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
-  var pos = array<vec2f, 3>(
-    vec2f(-1.0, -1.0),
-    vec2f( 3.0, -1.0),
-    vec2f(-1.0,  3.0),
-  );
-  return vec4f(pos[vi], 0.0, 1.0);
-}
-
-@fragment
-fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  return textureLoad(srcTex, vec2i(i32(pos.x), i32(pos.y)), 0);
-}
-''';
-
-  /// Create (or recreate) the blit render pipeline when device or canvas
-  /// format changes. Cached across frames.
-  void _ensureBlitPipeline(JSObject device, String canvasFormat) {
-    if (_blitPipeline != null &&
-        identical(_blitDevice, device) &&
-        _blitCanvasFormat == canvasFormat)
-      return;
-
-    final shader = device.callMethod<JSObject>(
-      'createShaderModule'.toJS,
-      {'code': _kBlitShader}.jsify(),
-    );
-    _blitPipeline = device.callMethod<JSObject>(
-      'createRenderPipeline'.toJS,
-      {
-        'layout': 'auto',
-        'vertex': {'module': shader, 'entryPoint': 'vs'},
-        'fragment': {
-          'module': shader,
-          'entryPoint': 'fs',
-          'targets': [
-            <String, Object?>{'format': canvasFormat},
-          ],
-        },
-        'primitive': {'topology': 'triangle-list'},
-      }.jsify(),
-    );
-    _blitDevice = device;
-    _blitCanvasFormat = canvasFormat;
-  }
-
-  /// Blit a producer GPUBuffer into the canvas via a two-step GPU path:
-  ///   1. `copyBufferToTexture` → intermediate texture (COPY_DST | TEXTURE_BINDING)
-  ///   2. Render pass with WGSL passthrough shader → canvas render-attachment
-  ///      (handles any format mismatch, e.g. rgba32float → bgra8unorm).
-  /// Both steps are encoded in a single command buffer.
-  ///
-  /// format == 'rgba8': the buffer holds tightly-packed RGBA8 pixels (one u32
-  /// per pixel, R in the low byte) and takes the DIRECT storage-buffer path —
-  /// a single render pass with unpack4x8unorm, no intermediate texture and no
-  /// 256-byte bytesPerRow constraint (tightly-packed rows of arbitrary width).
+  /// Read tightly packed producer pixels directly from a storage buffer.
+  /// Float output has no implicit row padding: aligning a copy layout without
+  /// repacking the source breaks narrow surfaces. This single render pass
+  /// also avoids a temporary texture and CPU pixel readback.
   void copyFromGpuBuffer(JSObject src, int width, int height, String format) {
     if (_disposed) return;
+    if (format != 'rgba8' && format != 'rgba32float') {
+      throw PlatformException(
+        code: 'unsupported_buffer_format',
+        message: 'Unsupported GPU buffer pixel format: $format',
+      );
+    }
+    final bytesPerPixel = format == 'rgba8' ? 4 : 16;
+    final sourceBytes = src.getProperty<JSNumber>('size'.toJS).toDartInt;
+    if (width <= 0 ||
+        height <= 0 ||
+        width * height * bytesPerPixel > sourceBytes) {
+      throw PlatformException(
+        code: 'invalid_buffer_extent',
+        message: 'GPU buffer does not contain the declared pixel extent',
+      );
+    }
     final device = _resolveDevice();
     if (device == null) return;
     _ensureContext(device);
-
-    if (format == 'rgba8') {
-      _blitRgba8Direct(device, src, width, height);
-      return;
-    }
-
     if (canvas.width != width) canvas.width = width;
     if (canvas.height != height) canvas.height = height;
-
     final canvasFormat = _canvasFormat ?? 'bgra8unorm';
-    _ensureBlitPipeline(device, canvasFormat);
-
-    final bpp = format == 'rgba32float' ? 16 : 4;
-    final bytesPerRow = _alignBytesPerRow(width * bpp);
-
-    // Intermediate texture: receives the buffer data, then sampled by the
-    // render pass. Needs COPY_DST (0x02) + TEXTURE_BINDING (0x04).
-    final intermediateTex = device.callMethod<JSObject>(
-      'createTexture'.toJS,
-      {
-        'size': {'width': width, 'height': height},
-        'format': format,
-        'usage': 0x02 | 0x04, // COPY_DST | TEXTURE_BINDING
-      }.jsify(),
-    );
-
-    try {
-      final encoder = device.callMethod<JSObject>('createCommandEncoder'.toJS);
-
-      // Step 1: buffer → intermediate rgba32float texture.
-      encoder.callMethod<JSAny?>(
-        'copyBufferToTexture'.toJS,
-        {'buffer': src, 'bytesPerRow': bytesPerRow}.jsify(),
-        {'texture': intermediateTex}.jsify(),
-        {'width': width, 'height': height, 'depthOrArrayLayers': 1}.jsify(),
-      );
-
-      // Step 2: render pass — intermediate texture → canvas (format conversion).
-      final pipeline = _blitPipeline!;
-      final srcView = intermediateTex.callMethod<JSObject>('createView'.toJS);
-      final bindGroup = device.callMethod<JSObject>(
-        'createBindGroup'.toJS,
-        {
-          'layout': pipeline.callMethod<JSObject>(
-            'getBindGroupLayout'.toJS,
-            0.toJS,
-          ),
-          'entries': [
-            <String, Object?>{'binding': 0, 'resource': srcView},
-          ],
-        }.jsify(),
-      );
-
-      final dstView = _ctx!
-          .callMethod<JSObject>('getCurrentTexture'.toJS)
-          .callMethod<JSObject>('createView'.toJS);
-      final renderPass = encoder.callMethod<JSObject>(
-        'beginRenderPass'.toJS,
-        {
-          'colorAttachments': [
-            <String, Object?>{
-              'view': dstView,
-              'loadOp': 'clear',
-              'storeOp': 'store',
-              'clearValue': {'r': 0.0, 'g': 0.0, 'b': 0.0, 'a': 1.0},
-            },
-          ],
-        }.jsify(),
-      );
-      renderPass.callMethod<JSAny?>('setPipeline'.toJS, pipeline);
-      renderPass.callMethod<JSAny?>('setBindGroup'.toJS, 0.toJS, bindGroup);
-      renderPass.callMethod<JSAny?>('draw'.toJS, 3.toJS);
-      renderPass.callMethod<JSAny?>('end'.toJS);
-
-      final queue = device['queue'] as JSObject;
-      queue.callMethod<JSAny?>(
-        'submit'.toJS,
-        [encoder.callMethod<JSObject>('finish'.toJS)].jsify(),
-      );
-    } finally {
-      intermediateTex.callMethod<JSAny?>('destroy'.toJS);
-    }
-  }
-
-  /// Returns [byteCount] rounded up to the nearest multiple of 256
-  /// (WebGPU's required [bytesPerRow] alignment).
-  static int _alignBytesPerRow(int byteCount) => (byteCount + 255) & ~255;
-
-  // ── rgba8 DIRECT path: storage-buffer read + unpack4x8unorm ──
-  // The zero-readback display route for packed-RGBA8 producers (a codec
-  // framebuffer, say): the producer buffer is bound straight into
-  // the fragment shader; unpack4x8unorm maps the little-endian u32 (R in the
-  // low byte) to vec4f exactly as the bytes lie in memory.
-  JSObject? _rgba8Pipeline;
-  JSObject? _rgba8Device;
-  String? _rgba8CanvasFormat;
-  JSObject? _rgba8ParamBuf;
-
-  static const _kRgba8BlitShader = '''
-@group(0) @binding(0) var<storage, read> src : array<u32>;
-struct Params { w: u32, h: u32 };
-@group(0) @binding(1) var<uniform> p : Params;
-
-@vertex
-fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
-  var pos = array<vec2f, 3>(
-    vec2f(-1.0, -1.0),
-    vec2f( 3.0, -1.0),
-    vec2f(-1.0,  3.0),
-  );
-  return vec4f(pos[vi], 0.0, 1.0);
-}
-
-@fragment
-fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let x = u32(pos.x);
-  let y = u32(pos.y);
-  if (x >= p.w || y >= p.h) {
-    return vec4f(0.0, 0.0, 0.0, 1.0);
-  }
-  return unpack4x8unorm(src[y * p.w + x]);
-}
-''';
-
-  void _ensureRgba8Pipeline(JSObject device, String canvasFormat) {
-    if (_rgba8Pipeline != null &&
-        identical(_rgba8Device, device) &&
-        _rgba8CanvasFormat == canvasFormat) {
-      return;
-    }
-    final shader = device.callMethod<JSObject>(
-      'createShaderModule'.toJS,
-      {'code': _kRgba8BlitShader}.jsify(),
-    );
-    _rgba8Pipeline = device.callMethod<JSObject>(
-      'createRenderPipeline'.toJS,
-      {
-        'layout': 'auto',
-        'vertex': {'module': shader, 'entryPoint': 'vs'},
-        'fragment': {
-          'module': shader,
-          'entryPoint': 'fs',
-          'targets': [
-            <String, Object?>{'format': canvasFormat},
-          ],
-        },
-        'primitive': {'topology': 'triangle-list'},
-      }.jsify(),
-    );
-    // 16 bytes (uniform min alignment); holds w, h.
-    _rgba8ParamBuf ??= device.callMethod<JSObject>(
-      'createBuffer'.toJS,
-      {'size': 16, 'usage': 0x40 | 0x08}.jsify(), // UNIFORM | COPY_DST
-    );
-    _rgba8Device = device;
-    _rgba8CanvasFormat = canvasFormat;
-  }
-
-  void _blitRgba8Direct(JSObject device, JSObject src, int width, int height) {
-    if (canvas.width != width) canvas.width = width;
-    if (canvas.height != height) canvas.height = height;
-
-    final canvasFormat = _canvasFormat ?? 'bgra8unorm';
-    _ensureRgba8Pipeline(device, canvasFormat);
-
+    final pipeline = _ensureBufferPipeline(device, canvasFormat, format);
     final queue = device['queue'] as JSObject;
     final params = Uint32List.fromList([width, height, 0, 0]);
     queue.callMethodVarArgs<JSAny?>('writeBuffer'.toJS, [
-      _rgba8ParamBuf!,
+      _bufferParamBuf!,
       0.toJS,
       params.buffer.toJS,
     ]);
-
-    final pipeline = _rgba8Pipeline!;
     final bindGroup = device.callMethod<JSObject>(
       'createBindGroup'.toJS,
       {
@@ -531,12 +339,11 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
           },
           <String, Object?>{
             'binding': 1,
-            'resource': {'buffer': _rgba8ParamBuf},
+            'resource': {'buffer': _bufferParamBuf},
           },
         ],
       }.jsify(),
     );
-
     final encoder = device.callMethod<JSObject>('createCommandEncoder'.toJS);
     final dstView = _ctx!
         .callMethod<JSObject>('getCurrentTexture'.toJS)
@@ -558,10 +365,86 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     renderPass.callMethod<JSAny?>('setBindGroup'.toJS, 0.toJS, bindGroup);
     renderPass.callMethod<JSAny?>('draw'.toJS, 3.toJS);
     renderPass.callMethod<JSAny?>('end'.toJS);
+    // The producer's dispatches into src may still wait in minigpu's batch;
+    // submitted after this pass, they would leave the canvas a frame behind.
+    _flushMinigpuBatch();
     queue.callMethod<JSAny?>(
       'submit'.toJS,
       [encoder.callMethod<JSObject>('finish'.toJS)].jsify(),
     );
+  }
+
+  // Only the two host-declared pixel formats enter this shader template.
+  static String _bufferBlitShader(String format) {
+    final texelType = format == 'rgba8' ? 'u32' : 'vec4f';
+    final pixel = format == 'rgba8'
+        ? 'unpack4x8unorm(src[y * p.w + x])'
+        : 'src[y * p.w + x]';
+    return '''
+@group(0) @binding(0) var<storage, read> src: array<$texelType>;
+struct Params { w: u32, h: u32 };
+@group(0) @binding(1) var<uniform> p: Params;
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f {
+  var pos = array<vec2f, 3>(
+    vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0),
+  );
+  return vec4f(pos[vi], 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let x = u32(pos.x);
+  let y = u32(pos.y);
+  if (x >= p.w || y >= p.h) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+  return $pixel;
+}
+''';
+  }
+
+  JSObject _ensureBufferPipeline(
+    JSObject device,
+    String canvasFormat,
+    String format,
+  ) {
+    // strictEquals, not identical(): see _ensureContext. A miss here rebuilt
+    // the pipelines and the uniform buffer on every present.
+    if (!_bufferDevice.strictEquals(device).toDart) {
+      _bufferParamBuf?.callMethod<JSAny?>('destroy'.toJS);
+      _bufferParamBuf = null;
+      _bufferPipelines.clear();
+      _bufferDevice = device;
+      _bufferCanvasFormat = canvasFormat;
+    } else if (_bufferCanvasFormat != canvasFormat) {
+      _bufferPipelines.clear();
+      _bufferCanvasFormat = canvasFormat;
+    }
+    _bufferParamBuf ??= device.callMethod<JSObject>(
+      'createBuffer'.toJS,
+      {'size': 16, 'usage': 0x40 | 0x08}.jsify(),
+    ); // UNIFORM | COPY_DST
+    return _bufferPipelines.putIfAbsent(format, () {
+      final shader = device.callMethod<JSObject>(
+        'createShaderModule'.toJS,
+        {'code': _bufferBlitShader(format)}.jsify(),
+      );
+      return device.callMethod<JSObject>(
+        'createRenderPipeline'.toJS,
+        {
+          'layout': 'auto',
+          'vertex': {'module': shader, 'entryPoint': 'vs'},
+          'fragment': {
+            'module': shader,
+            'entryPoint': 'fs',
+            'targets': [
+              <String, Object?>{'format': canvasFormat},
+            ],
+          },
+          'primitive': {'topology': 'triangle-list'},
+        }.jsify(),
+      );
+    });
   }
 
   /// Fast path for WebCodecs: draw a VideoFrame directly into the
@@ -581,7 +464,10 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 
   void dispose() {
     _disposed = true;
-    _blitPipeline = null;
+    _bufferParamBuf?.callMethod<JSAny?>('destroy'.toJS);
+    _bufferParamBuf = null;
+    _bufferPipelines.clear();
+    _bufferDevice = null;
     canvas.remove();
   }
 }

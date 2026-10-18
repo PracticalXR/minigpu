@@ -2,6 +2,8 @@
 
 #include <flutter/texture_registrar.h>
 
+#include <d3d11_1.h>
+
 #include <cstdio>
 
 namespace minigpu_view {
@@ -9,25 +11,18 @@ namespace minigpu_view {
 // static
 bool D3D11TextureHandler::ProbeSharedHandleBindable(void* shared_handle,
                                                     std::string* why) {
-  // One probe device + a last-handle cache: the handle is stable per
-  // producer texture, so steady-state presents cost one pointer compare.
+  // One probe device and NO verdict cache. The probe only runs for a handle
+  // that has no texture yet, and a cached verdict outlived what it was about:
+  // a handle value is reused once closed, and one transient failure (say
+  // E_OUTOFMEMORY) refused a stable producer handle until the next resize.
   static std::mutex probe_mutex;
   static Microsoft::WRL::ComPtr<ID3D11Device> probe_device;
   static bool device_attempted = false;
-  static void* last_handle = nullptr;
-  static bool last_ok = false;
-  static std::string last_why;
 
   if (!shared_handle) return true;  // nothing to probe
 
   std::lock_guard<std::mutex> lock(probe_mutex);
-  if (shared_handle == last_handle) {
-    if (!last_ok && why) *why = last_why;
-    return last_ok;
-  }
-
-  if (!device_attempted) {
-    device_attempted = true;
+  auto create_device = [] {
     // Adapter nullptr = the default adapter = the one driving the primary
     // display = the adapter ANGLE's device is created on. This device only
     // opens handles (no rendering), so no feature levels / flags needed.
@@ -36,15 +31,51 @@ bool D3D11TextureHandler::ProbeSharedHandleBindable(void* shared_handle,
                                    probe_device.GetAddressOf(), nullptr,
                                    nullptr);
     if (FAILED(hr)) probe_device.Reset();
+  };
+  if (!device_attempted) {
+    device_attempted = true;
+    create_device();
   }
   if (!probe_device) return true;  // can't probe -> don't block the present
 
-  Microsoft::WRL::ComPtr<ID3D11Texture2D> opened;
-  HRESULT hr = probe_device->OpenSharedResource(
-      static_cast<HANDLE>(shared_handle), IID_PPV_ARGS(&opened));
-  last_handle = shared_handle;
-  last_ok = SUCCEEDED(hr);
-  if (!last_ok) {
+  // Legacy handles (IDXGIResource::GetSharedHandle) open with
+  // OpenSharedResource. NT handles (CreateSharedHandle, e.g. the D3D12
+  // backend's shared output) get E_INVALIDARG there, the same code an
+  // adapter mismatch gives, so they need OpenSharedResource1 before any
+  // verdict.
+  const char* api = "OpenSharedResource";
+  auto open = [&]() -> HRESULT {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> opened;
+    api = "OpenSharedResource";
+    HRESULT result = probe_device->OpenSharedResource(
+        static_cast<HANDLE>(shared_handle), IID_PPV_ARGS(&opened));
+    Microsoft::WRL::ComPtr<ID3D11Device1> device1;
+    if (result == E_INVALIDARG && SUCCEEDED(probe_device.As(&device1))) {
+      api = "OpenSharedResource and OpenSharedResource1";
+      result = device1->OpenSharedResource1(static_cast<HANDLE>(shared_handle),
+                                            IID_PPV_ARGS(&opened));
+    }
+    // D3D11 may defer destroying the opened texture to the next flush, and
+    // this device submits nothing else, so it would keep every probed
+    // producer allocation alive.
+    opened.Reset();
+    Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
+    probe_device->GetImmediateContext(&context);
+    if (context) context->Flush();
+    return result;
+  };
+  HRESULT hr = open();
+  // A removed device (TDR, driver update) refuses every handle until it is
+  // replaced, so without this no NEW preview would bind again until restart.
+  if (FAILED(hr) &&
+      (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+       probe_device->GetDeviceRemovedReason() != S_OK)) {
+    probe_device.Reset();
+    create_device();
+    if (!probe_device) return true;  // can't probe -> don't block the present
+    hr = open();
+  }
+  if (FAILED(hr)) {
     // CLASSIFY THE HRESULT. This used to report every failure as "the producer
     // created it on a different GPU", which is only one of the ways
     // OpenSharedResource fails and sends anyone reading the message hunting
@@ -71,19 +102,20 @@ bool D3D11TextureHandler::ProbeSharedHandleBindable(void* shared_handle,
         cause = "reason unclassified -- not a known adapter-mismatch code";
         break;
     }
-    char buf[320];
+    char buf[512];
     std::snprintf(buf, sizeof(buf),
-                  "OpenSharedResource on the default (primary display) "
+                  "%s on the default (primary display) "
                   "adapter failed with 0x%08lX: %s",
-                  static_cast<unsigned long>(hr), cause);
-    last_why = buf;
-    if (why) *why = last_why;
+                  api, static_cast<unsigned long>(hr), cause);
+    if (why) *why = buf;
   }
-  return last_ok;
+  return SUCCEEDED(hr);
 }
 
-D3D11TextureHandler::D3D11TextureHandler(flutter::TextureRegistrar* registrar)
-    : registrar_(registrar) {}
+D3D11TextureHandler::D3D11TextureHandler(
+    flutter::TextureRegistrar* registrar,
+    std::shared_ptr<UnregisterTracker> unregistrations)
+    : registrar_(registrar), unregistrations_(std::move(unregistrations)) {}
 
 D3D11TextureHandler::~D3D11TextureHandler() {
   if (texture_id_ < 0 || !registrar_) return;
@@ -102,11 +134,15 @@ D3D11TextureHandler::~D3D11TextureHandler() {
   // classically the Dart VM aborting on an innocent FFI callback.
   auto variant = variant_;
   auto state = state_;
-  registrar_->UnregisterTexture(texture_id_, [variant, state]() mutable {
-    // Sole purpose: extend both lifetimes to here.
-    variant.reset();
-    state.reset();
-  });
+  auto unregistrations = unregistrations_;
+  const uint64_t ticket = unregistrations ? unregistrations->Begin() : 0;
+  registrar_->UnregisterTexture(
+      texture_id_, [variant, state, unregistrations, ticket]() mutable {
+        // Extend both lifetimes to here, then report the engine let go.
+        variant.reset();
+        state.reset();
+        if (unregistrations) unregistrations->End(ticket);
+      });
   texture_id_ = -1;
 }
 
@@ -211,11 +247,12 @@ D3D11TextureHandler::SurfaceState::CopyDescriptor() {
   descriptor.visible_width = static_cast<size_t>(width);
   descriptor.visible_height = static_cast<size_t>(height);
   descriptor.format = kFlutterDesktopPixelFormatBGRA8888;
-  // NOTE: Flutter Desktop's GpuSurface API only documents BGRA8888 for
-  // D3D11. minigpu's SharedOutputTexture is created as RGBA8. If the
-  // raster shows red/blue swapped, run a one-pass swizzle on the
-  // producer side (or recreate SharedOutputTexture with a BGRA view).
-  // No release callback: the producer owns the texture lifetime.
+  // The built-in SharedOutputTexture is BGRA8, matching this descriptor.
+  // Packed RGBA buffer input is converted by logical WGSL color components;
+  // it does not require another channel swap here. Other producers must supply
+  // the compatible surface format; this descriptor does not convert formats.
+  // State retains the COM reference. No callback acknowledges per-frame GPU
+  // sampling; producer writes and final consumer retirement remain separate.
   descriptor.release_callback = nullptr;
   descriptor.release_context = nullptr;
   return &descriptor;

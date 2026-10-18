@@ -320,6 +320,117 @@ void main() {
   });
 
   // ---------------------------------------------------------------------------
+  // YUV colour and toRGBAAsync – NV12
+  // ---------------------------------------------------------------------------
+  group('YUV colour and toRGBAAsync – NV12', () {
+    const W = 8, H = 8;
+    late Pointer<Uint8> ptr;
+
+    tearDown(() => malloc.free(ptr));
+
+    VideoTexture importNv12(
+      int y,
+      int u,
+      int v, {
+      YuvMatrix matrix = YuvMatrix.bt709,
+      bool fullRange = true,
+    }) {
+      ptr = _allocNv12(W, H, y, u, v);
+      return gpu.importVideoFrame(
+        ExternalVideoBuffer(
+          contentType: ExternalContentType.cpu,
+          pixelFormat: ExternalPixelFormat.nv12,
+          width: W,
+          height: H,
+          planes: [
+            ExternalPlane(
+              dataPtr: ptr.address,
+              width: W,
+              height: H,
+              strideBytes: W,
+            ),
+            ExternalPlane(
+              dataPtr: ptr.address + W * H,
+              width: W ~/ 2,
+              height: H ~/ 2,
+              strideBytes: W,
+            ),
+          ],
+          yuvMatrix: matrix,
+          yuvFullRange: fullRange,
+        ),
+      )!;
+    }
+
+    Future<List<int>> firstPixel(Buffer buf) async {
+      final rgba = await _readRgba(buf, W, H);
+      buf.destroy();
+      return rgba.sublist(0, 4);
+    }
+
+    // Pure red in BT.601 video range. Read as BT.709 full range (the default)
+    // its green is ~36; read as what it is, ~0.
+    test('BT.601 limited range is honoured; the default stays BT.709 full',
+        () async {
+      final asDefault = importNv12(81, 90, 240);
+      final d = await firstPixel(asDefault.toRGBA());
+      asDefault.destroy();
+      expect(d[1], closeTo(36, 6), reason: 'default green $d');
+
+      malloc.free(ptr);
+      final as601 = importNv12(
+        81,
+        90,
+        240,
+        matrix: YuvMatrix.bt601,
+        fullRange: false,
+      );
+      final p = await firstPixel(as601.toRGBA());
+      as601.destroy();
+      expect(p[0], greaterThan(245), reason: 'red $p');
+      expect(p[1], lessThan(8), reason: 'green $p');
+      expect(p[2], lessThan(8), reason: 'blue $p');
+    });
+
+    test('limited range stretches Y=16..235 to black..white', () async {
+      final black = importNv12(16, 128, 128, fullRange: false);
+      final b = await firstPixel(black.toRGBA());
+      black.destroy();
+      expect(b.sublist(0, 3), everyElement(lessThan(3)), reason: '$b');
+
+      malloc.free(ptr);
+      final white = importNv12(235, 128, 128, fullRange: false);
+      final w = await firstPixel(white.toRGBA());
+      white.destroy();
+      expect(w.sublist(0, 3), everyElement(greaterThan(252)), reason: '$w');
+    });
+
+    test('toRGBAAsync matches toRGBA', () async {
+      final tex = importNv12(81, 90, 240, matrix: YuvMatrix.bt601);
+      final viaSync = tex.toRGBA();
+      final viaAsync = await tex.toRGBAAsync();
+      final a = await _readRgba(viaSync, W, H);
+      final b = await _readRgba(viaAsync, W, H);
+      viaSync.destroy();
+      viaAsync.destroy();
+      tex.destroy();
+      expect(b, equals(a));
+    });
+
+    test('destroying the texture during toRGBAAsync keeps the result',
+        () async {
+      final before = gpu.liveBufferCount;
+      final tex = importNv12(235, 128, 128);
+      final pending = tex.toRGBAAsync();
+      tex.destroy();
+      final buf = await pending;
+      final px = await firstPixel(buf);
+      expect(px.sublist(0, 3), everyElement(greaterThan(220)), reason: '$px');
+      expect(gpu.liveBufferCount, equals(before));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // setOnShader + setBufferAtSlot – custom compute shader
   // ---------------------------------------------------------------------------
   group('Custom compute shader via setOnShader', () {

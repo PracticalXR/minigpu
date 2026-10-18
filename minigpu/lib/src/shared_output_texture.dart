@@ -1,6 +1,7 @@
 import 'package:minigpu_platform_interface/minigpu_platform_interface.dart';
 
 import 'buffer.dart';
+import 'resource_retirement.dart';
 
 /// A cross-API shared GPU output texture (RGBA8).
 ///
@@ -12,76 +13,106 @@ import 'buffer.dart';
 /// when no longer needed; the underlying NT handle is closed at that point,
 /// so any external D3D11 view must be released first.
 final class SharedOutputTexture {
-  SharedOutputTexture(PlatformSharedOutputTexture platformTex, Object owner)
-    : _platformTex = platformTex {
-    _finalizer.attach(this, platformTex, detach: this);
+  /// [Minigpu.createSharedOutputTexture] passes the [retirement] its context
+  /// retires at destroy and device recovery, so no texture of an old device
+  /// outlives it.
+  SharedOutputTexture(
+    PlatformSharedOutputTexture platformTex,
+    Object owner, [
+    GpuResourceRetirement? retirement,
+  ]) : _platformTex = platformTex,
+       _retirement = retirement ?? GpuResourceRetirement(platformTex.destroy) {
+    _finalizer.attach(this, _retirement, detach: this);
   }
 
-  static final _finalizer = Finalizer<PlatformSharedOutputTexture>(
-    (t) => t.destroy(),
+  static final _finalizer = Finalizer<GpuResourceRetirement>(
+    (retirement) => retirement.retire(),
   );
 
   PlatformSharedOutputTexture? _platformTex;
+  final GpuResourceRetirement _retirement;
   bool _isValid = true;
 
-  bool get isValid => _isValid && _platformTex != null;
+  bool get isValid =>
+      _isValid && _platformTex != null && !_retirement.isRetired;
 
-  int get width => _platformTex!.width;
-  int get height => _platformTex!.height;
+  int get width => _live.width;
+  int get height => _live.height;
+
+  PlatformSharedOutputTexture get _live {
+    final texture = _platformTex;
+    if (!isValid || texture == null) {
+      throw StateError('Shared output texture is destroyed');
+    }
+    return texture;
+  }
+
+  static PlatformBuffer _source(Buffer src) {
+    final buffer = src.platformBuffer;
+    if (!src.isValid || buffer == null) {
+      throw StateError('Cannot copy from a destroyed buffer');
+    }
+    return buffer;
+  }
 
   /// Native NT HANDLE (as integer) for `OpenSharedResource1` on a D3D11
   /// device. Owned by this object; do NOT call `CloseHandle` on it.
-  int get d3d11Handle => _platformTex!.d3d11Handle;
+  int get d3d11Handle => _live.d3d11Handle;
 
   /// Pointer (as integer) to the underlying `ID3D11Texture2D*`. Lives on
   /// the same device as [Minigpu.createD3D11DeviceOnDawnAdapter]. Use this
   /// to skip `OpenSharedResource1` when the consumer (e.g. FFmpeg) shares
   /// the same `ID3D11Device`.
-  int get d3d11TexturePtr => _platformTex!.d3d11TexturePtr;
+  int get d3d11TexturePtr => _live.d3d11TexturePtr;
 
   /// Copy the contents of [src] (an RGBA8 GPU storage buffer, e.g. the output
   /// of a [GpuEffect] dispatch) into this shared texture entirely on the GPU.
-  /// Returns true on success.
-  bool copyFromBuffer(Buffer src) =>
-      _platformTex!.copyFromBuffer(src.platformBuffer!);
+  /// Returns true once the GPU has finished the copy, false on failure or when
+  /// that wait timed out. Natively this BLOCKS the calling isolate until then:
+  /// on the UI isolate prefer [copyFromBufferAsync].
+  bool copyFromBuffer(Buffer src) => _live.copyFromBuffer(_source(src));
 
   /// Async variant of [copyFromBuffer]: completes when the GPU copy (including
   /// the cross-device present sync) has finished, without blocking the calling
   /// isolate on a busy-poll. Prefer this on a per-frame hot path.
   Future<bool> copyFromBufferAsync(Buffer src) =>
-      _platformTex!.copyFromBufferAsync(src.platformBuffer!);
+      _live.copyFromBufferAsync(_source(src));
 
   /// Variant of [copyFromBuffer] for buffers that hold 4 f32 components per
   /// pixel (R,G,B,A in [0,1]) instead of packed RGBA8 u32.  Used by
   /// visualizers (e.g. the spectrogram) that produce float colors directly
-  /// into a tensor-backed buffer.
-  bool copyFromBufferF32(Buffer src) =>
-      _platformTex!.copyFromBufferF32(src.platformBuffer!);
+  /// into a tensor-backed buffer. Natively it BLOCKS the calling isolate and
+  /// reports like [copyFromBuffer]: on the UI isolate prefer
+  /// [copyFromBufferF32Async].
+  bool copyFromBufferF32(Buffer src) => _live.copyFromBufferF32(_source(src));
+
+  /// Async variant of [copyFromBufferF32]: completes true once the GPU has
+  /// finished the copy, false on failure or when that wait timed out, without
+  /// blocking the calling isolate.
+  Future<bool> copyFromBufferF32Async(Buffer src) =>
+      _live.copyFromBufferF32Async(_source(src));
 
   /// Debug-only: synchronously read the first pixel (BGRA8 packed u32) from
   /// the underlying D3D11 texture using the cached Dawn-adapter D3D11 device.
   /// Used to verify that Dawn writes are visible to the D3D11 consumer.
   /// Returns 0xDEAD000N codes on failure.
-  int debugReadFirstPixel() => _platformTex!.debugReadFirstPixel();
+  int debugReadFirstPixel() => _live.debugReadFirstPixel();
 
   /// Debug-only: synchronously read the first pixel via Dawn's
   /// `CopyTextureToBuffer` + map. Compare against [debugReadFirstPixel] to
   /// determine whether Dawn sees its own writes (and the D3D11 side
   /// doesn't), or whether neither side does.
-  int debugReadFirstPixelDawn() => _platformTex!.debugReadFirstPixelDawn();
+  int debugReadFirstPixelDawn() => _live.debugReadFirstPixelDawn();
 
   /// Internal: exposes the platform-layer texture for use by
   /// `VideoTexture.bgraToRgbaSharedOutput`.
-  PlatformSharedOutputTexture get platformTexture => _platformTex!;
+  PlatformSharedOutputTexture get platformTexture => _live;
 
   void destroy() {
     if (!_isValid) return;
     _isValid = false;
-    final t = _platformTex;
     _platformTex = null;
-    if (t != null) {
-      _finalizer.detach(this);
-      t.destroy();
-    }
+    _finalizer.detach(this);
+    _retirement.retire();
   }
 }

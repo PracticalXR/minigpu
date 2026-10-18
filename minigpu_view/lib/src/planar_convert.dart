@@ -13,18 +13,22 @@
 /// are thousands of lanes for it.
 ///
 /// ── COLOUR ──────────────────────────────────────────────────────────────────
-/// BT.709, LIMITED range (luma 16..235, chroma 16..240) — what Media
-/// Foundation and Windows.Graphics.Capture deliver for camera and screen NV12.
-/// Getting this wrong is not subtle but it IS silent: full-range content
-/// decoded as limited looks washed out, and anything measuring quality against
-/// an RGB reference then reports a loss that has nothing to do with the codec.
-/// [PlanarColorRange] exists so a caller who knows better can say so.
+/// The caller names the range ([PlanarColorRange]) and the matrix
+/// ([YuvMatrix]); a frame that says nothing is taken as BT.709, limited range
+/// (luma 16..235, chroma 16..240). The miniAV adapter passes what the capture
+/// reports, and cameras differ: USB cameras are usually BT.601, and one that
+/// decodes MJPEG hands out full range. Getting this wrong is not subtle but it
+/// IS silent: full-range content decoded as limited looks washed out, the wrong
+/// matrix shifts skin tones, and anything measuring quality against an RGB
+/// reference then reports a loss that has nothing to do with the codec.
 ///
 /// ── CHROMA SITING ───────────────────────────────────────────────────────────
 /// Point-sampled at (x>>1, y>>1). Bilinear chroma is marginally nicer on
 /// gradients and costs a sampler plus four fetches per pixel on a path that
 /// runs per displayed frame; for preview it does not survive the trip.
 library;
+
+import 'package:minigpu/minigpu.dart' show YuvMatrix;
 
 /// Host-memory layouts this can unpack.
 enum PlanarFormat {
@@ -72,11 +76,11 @@ class PlanarPlane {
 /// per resolution would cost seconds on the D3D11/FXC path.
 ///
 /// cfg: [width, height, format, yOffset, yStride, uOffset, uStride, vOffset,
-///       vStride, fullRange]
+///       vStride, fullRange, matrix]
 const String kPlanarToRgbaWgsl = '''
-@group(0) @binding(0) var<storage, read_write> src: array<u32>;
+@group(0) @binding(0) var<storage, read> src: array<u32>;
 @group(0) @binding(1) var<storage, read_write> dst: array<u32>;
-@group(0) @binding(2) var<storage, read_write> cfg: array<u32>;
+@group(0) @binding(2) var<storage, read> cfg: array<u32>;
 
 fn byteAt(i: u32) -> u32 {
   let w = src[i >> 2u];
@@ -89,20 +93,23 @@ fn pack(r: f32, g: f32, b: f32) -> u32 {
   return u32(q.x) | (u32(q.y) << 8u) | (u32(q.z) << 16u) | (255u << 24u);
 }
 
-fn yuvToRgb(yRaw: f32, uRaw: f32, vRaw: f32, fullRange: u32) -> u32 {
+fn yuvToRgb(yRaw: f32, uRaw: f32, vRaw: f32, fullRange: u32,
+            matrix: u32) -> u32 {
   var y = yRaw;
-  var u = uRaw - 0.5;
-  var v = vRaw - 0.5;
+  var u = uRaw - 128.0 / 255.0;
+  var v = vRaw - 128.0 / 255.0;
   if (fullRange == 0u) {
-    // Studio swing: undo the 16..235 / 16..240 offsets before the matrix.
-    y = (y - 0.0625) * 1.164383;
-    u = u * 1.138393;
-    v = v * 1.138393;
+    // Studio swing: stretch luma 16..235 and chroma 16..240 to full range,
+    // then apply the full-range matrix below.
+    y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+    u = u * (255.0 / 224.0);
+    v = v * (255.0 / 224.0);
   }
-  // BT.709.
-  return pack(y + 1.792741 * v,
-              y - 0.213249 * u - 0.532909 * v,
-              y + 2.112402 * u);
+  // R = y + k.x v, G = y - k.y u - k.z v, B = y + k.w u.
+  var k = vec4<f32>(1.5748, 0.187324, 0.468124, 1.8556);           // BT.709
+  if (matrix == 1u) { k = vec4<f32>(1.402, 0.344136, 0.714136, 1.772); }   // BT.601
+  if (matrix == 2u) { k = vec4<f32>(1.4746, 0.164553, 0.571353, 1.8814); } // BT.2020
+  return pack(y + k.x * v, y - k.y * u - k.z * v, y + k.w * u);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -119,6 +126,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let vOffset = cfg[7];
   let vStride = cfg[8];
   let fullRange = cfg[9];
+  let matrix = cfg[10];
   let outIdx = gid.y * width + gid.x;
 
   // 0 = nv12
@@ -127,7 +135,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = uOffset + (gid.y >> 1u) * uStride + (gid.x >> 1u) * 2u;
     let u = f32(byteAt(c)) / 255.0;
     let v = f32(byteAt(c + 1u)) / 255.0;
-    dst[outIdx] = yuvToRgb(y, u, v, fullRange);
+    dst[outIdx] = yuvToRgb(y, u, v, fullRange, matrix);
     return;
   }
 
@@ -136,7 +144,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = f32(byteAt(yOffset + gid.y * yStride + gid.x)) / 255.0;
     let u = f32(byteAt(uOffset + (gid.y >> 1u) * uStride + (gid.x >> 1u))) / 255.0;
     let v = f32(byteAt(vOffset + (gid.y >> 1u) * vStride + (gid.x >> 1u))) / 255.0;
-    dst[outIdx] = yuvToRgb(y, u, v, fullRange);
+    dst[outIdx] = yuvToRgb(y, u, v, fullRange, matrix);
     return;
   }
 
@@ -148,7 +156,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let y = f32(byteAt(yByte)) / 255.0;
     let u = f32(byteAt(base + 1u)) / 255.0;
     let v = f32(byteAt(base + 3u)) / 255.0;
-    dst[outIdx] = yuvToRgb(y, u, v, fullRange);
+    dst[outIdx] = yuvToRgb(y, u, v, fullRange, matrix);
     return;
   }
 
@@ -162,7 +170,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 ''';
 
 /// Number of `cfg` words the kernel reads.
-const int kPlanarCfgWords = 10;
+const int kPlanarCfgWords = 11;
+
+extension YuvMatrixShaderCode on YuvMatrix {
+  /// Value the kernel switches on for the matrix (`cfg[10]`). Must match
+  /// [kPlanarToRgbaWgsl].
+  int get shaderCode => switch (this) {
+        YuvMatrix.bt709 => 0,
+        YuvMatrix.bt601 => 1,
+        YuvMatrix.bt2020 => 2,
+      };
+}
 
 extension PlanarFormatCode on PlanarFormat {
   /// Value the kernel switches on. Must match the comments in

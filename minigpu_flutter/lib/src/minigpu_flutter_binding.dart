@@ -1,7 +1,7 @@
 import 'package:flutter/widgets.dart';
 
 /// A thin widget that fires registered [MinigpuFlutterBinding] teardown
-/// callbacks during Flutter hot reload.
+/// callbacks on every Flutter hot reload.
 ///
 /// Wrap your root widget with [MinigpuBinding]:
 ///
@@ -11,17 +11,20 @@ import 'package:flutter/widgets.dart';
 /// }
 /// ```
 ///
-/// Register teardown callbacks for any long-lived GPU resources:
+/// A hot reload keeps every live GPU object and does not re-run `initState`,
+/// so register callbacks only for what the app rebuilds when next used:
 ///
 /// ```dart
-/// MinigpuFlutterBinding.addDisposeCallback(gpu.destroySync);
+/// MinigpuFlutterBinding.addDisposeCallback(effectCache.clear);
 /// ```
+///
+/// Never `gpu.destroySync`: nothing re-inits the context after the reload.
+/// A hot restart never reaches `reassemble`.
 ///
 /// Unregister when the resource is torn down normally:
 ///
 /// ```dart
-/// MinigpuFlutterBinding.removeDisposeCallback(gpu.destroySync);
-/// gpu.destroy(); // normal teardown path
+/// MinigpuFlutterBinding.removeDisposeCallback(effectCache.clear);
 /// ```
 class MinigpuBinding extends StatefulWidget {
   const MinigpuBinding({super.key, required this.child});

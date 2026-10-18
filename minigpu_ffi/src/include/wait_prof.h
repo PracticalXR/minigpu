@@ -34,18 +34,18 @@ namespace mgpu {
 
 // Instrumented sites. Keep in sync with kWaitSiteNames in buffer.cpp.
 enum WaitSite : int {
-  WP_RD_LOCK = 0,   // readDirect: acquiring the device mutex
-  WP_RD_FLUSH,      // readDirect: flushing the pending compute batch
-  WP_RD_ALLOC,      // readDirect: staging-buffer destroy + create
-  WP_RD_SUBMIT,     // readDirect: encoder + finish + submit
-  WP_RD_MAP,        // readDirect: waiting for the map to complete
-  WP_RD_COPY,       // readDirect: memcpy out of the mapped range
-  WP_RD_EVENTS,     // readDirect: the trailing wgpuInstanceProcessEvents
-  WP_RD_TOTAL,      // readDirect: whole call
-  WP_WR_LOCK,       // writeBytesAt: acquiring the device mutex
-  WP_WR_FLUSH,      // writeBytesAt: flushing the pending compute batch
-  WP_WR_WRITE,      // writeBytesAt: wgpuQueueWriteBuffer itself
-  WP_WR_TOTAL,      // writeBytesAt: whole call
+  WP_RD_LOCK = 0,   // buffer read: acquiring the device mutex
+  WP_RD_FLUSH,      // buffer read: flushing the pending compute batch
+  WP_RD_ALLOC,      // buffer read: growing the staging buffer
+  WP_RD_SUBMIT,     // buffer read: encoder + finish + submit
+  WP_RD_MAP,        // buffer read: waiting for the map (device mutex released)
+  WP_RD_COPY,       // buffer read: memcpy out of the mapped range
+  WP_RD_EVENTS,     // buffer read: the trailing wgpuInstanceProcessEvents
+  WP_RD_TOTAL,      // buffer read: whole call
+  WP_WR_LOCK,       // buffer write: acquiring the device mutex
+  WP_WR_FLUSH,      // buffer write: flushing the pending compute batch
+  WP_WR_WRITE,      // buffer write: wgpuQueueWriteBuffer itself
+  WP_WR_TOTAL,      // buffer write: whole call
   WP_RB_MAP,        // batched readback: waiting for the map to complete
   WP_Q_LAT,         // WebGPU worker thread: enqueue -> task start
   WP_DRAIN,         // drain_dawn_events_with_timeout: whole wait

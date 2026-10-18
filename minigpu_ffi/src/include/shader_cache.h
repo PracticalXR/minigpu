@@ -41,8 +41,7 @@ std::string shaderCacheIsolationKey(uint32_t vendorId, uint32_t deviceId,
                                     const std::string &adapterDesc);
 
 /// One INFO line summarising the cache after a device comes up. Per-entry
-/// detail is DEBUG only — this log channel defaults to INFO and a line per
-/// blob would bury real warnings.
+/// detail is DEBUG only: a line per blob would bury real warnings.
 std::string shaderCacheSummaryLine();
 
 /// Accumulates into MGPUShaderCacheStats::pipelineCreateMs. Called around the

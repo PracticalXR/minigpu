@@ -41,3 +41,9 @@ external int mgpuInitDartApi(Pointer<Void> initializeApiDLData);
 /// PROCESS-GLOBAL, LAST WRITER WINS across isolates.
 @Native<Void Function(Int64)>(symbol: 'mgpuSetLogPort')
 external void mgpuSetLogPort(int port);
+
+/// Stops delivery to [port] only: clears the registration while it is still
+/// [port] and returns 1, else leaves a newer isolate's port in place and
+/// returns 0 (always 0 without the Dart API).
+@Native<Int32 Function(Int64)>(symbol: 'mgpuClearLogPortIf')
+external int mgpuClearLogPortIf(int port);

@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.22.1)
 project(minigpu_ffi VERSION 1.0.0)
 set(CMAKE_CXX_STANDARD 20)
 
+# Scoped capture sources size their shared_ptr control blocks from the VS 2022
+# C++ library (include/minigpu_allocation_extent.h). Another toolset still
+# builds the library, but those sources then report Unsupported at run time.
+if(WIN32 AND (NOT MSVC OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+    NOT MSVC_TOOLSET_VERSION EQUAL 143 OR NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID STREQUAL "x64"))
+  message(WARNING "minigpu_ffi: scoped capture sources need MSVC v143 (VS 2022) for x64; "
+    "this ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} build reports them as unsupported.")
+endif()
+
 # Ensure iOS 13+ so std::filesystem APIs are available in simulator
 if(IOS)
   set(MINIGPU_IOS_DEPLOYMENT_TARGET "16.0" CACHE STRING "Minimum iOS version" FORCE)
@@ -20,7 +29,14 @@ if(TARGET_FILE_PATH)
 else()
     message(FATAL_ERROR "File ${FILENAME} not found within 8 levels up from ${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
-set(WEB_OUTPUT_DIR ${TARGET_FILE_PATH}/minigpu_web/lib/web)
+set(WEB_OUTPUT_DIR "${TARGET_FILE_PATH}/minigpu_web/lib/web" CACHE PATH
+    "Destination for generated web artifacts")
+# Dawn turns an empty build type into Debug, and a Debug wasm ships its DWARF
+# and function names, several times the size of the code itself. Web builds
+# are Release unless a type is given (-DCMAKE_BUILD_TYPE=Debug for debug info).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 endif()
 
 # Include Additional CMake Modules
@@ -73,10 +89,18 @@ if(NOT EMSCRIPTEN)
     add_library(${MAIN_LIB} SHARED)
 else()
     add_executable(${MAIN_LIB})
+    # Keep generated linker products out of the source-adjacent build root.
+    # Besides avoiding stale-output locks on Windows, this prevents the JS
+    # support-file glob below from mistaking the generated module for an input.
+    set_target_properties(${MAIN_LIB} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    )
 endif()
 
 # Add Source Files and Include Directories
-file(GLOB_RECURSE MAIN_SOURCES "${MAIN_PATH}/src/*.cpp")
+# CONFIGURE_DEPENDS re-runs the glob at build time, so an added or deleted
+# source reaches an existing build dir without a manual reconfigure.
+file(GLOB_RECURSE MAIN_SOURCES CONFIGURE_DEPENDS "${MAIN_PATH}/src/*.cpp")
 target_sources(${MAIN_LIB} PRIVATE ${MAIN_SOURCES})
 target_include_directories(${MAIN_LIB} PUBLIC ${MAIN_INCLUDES})
 target_compile_definitions(${MAIN_LIB} PUBLIC DART_SHARED_LIB)
@@ -101,7 +125,7 @@ endif()
 
 # ── Optional: fold EXTRA sources into the main target. Generic hook used to
 # build single-blob wasm modules that link client codecs against minigpu
-# in-module (e.g. the livetensor crosscoder, GSPLATS420_C_GPU_DESIGN.md §9).
+# in-module (e.g. a client video codec).
 # Configure with:
 #   -DMGPU_EXTRA_SOURCES="<src1>;<src2>;..."
 #   -DMGPU_EXTRA_INCLUDE_DIRS="<dir1>;..."
@@ -174,22 +198,41 @@ if(EMSCRIPTEN)
         "--use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true"
     )
 
-    set(EMSCRIPTEN_DEBUG           OFF CACHE INTERNAL "Enable Emscripten debugging features" FORCE)
+    # Overridable with -DMGPU_WEB_DEBUG=ON: builds the wasm with -sASSERTIONS=2
+    # etc. (below). 🔴 That is THE diagnostic for asyncify contract violations:
+    # the release build fails them SILENTLY (an awaited async ccall resolves
+    # while its C++ is still suspended — observed as init stopping after
+    # "Requesting WebGPU adapter..." and readDirect "returning" zeros), while
+    # the assertions build names the exact violation at the exact call.
+    option(MGPU_WEB_DEBUG "Debug Emscripten build (assertions, -O0; slow, large)" OFF)
+    set(EMSCRIPTEN_DEBUG ${MGPU_WEB_DEBUG})
 
-    # minigpu's own C ABI never crosses an asyncify operation through an
-    # indirect call, so IGNORE_INDIRECT is a safe size/speed win. Extra
-    # sources (single-blob clients) may use vtables on the asyncify path
-    # (e.g. the crosscoder's backend dispatch around readSync) — IGNORE
-    # would silently corrupt those frames, so drop it when they're present.
-    if(MGPU_EXTRA_SOURCES)
-        set(MGPU_ASYNCIFY_INDIRECT_FLAG "")
-        message(STATUS "MGPU_EXTRA_SOURCES set: ASYNCIFY_IGNORE_INDIRECT disabled")
-    else()
-        set(MGPU_ASYNCIFY_INDIRECT_FLAG "-sASYNCIFY_IGNORE_INDIRECT=1")
-    endif()
+    # 🔴 ASYNCIFY_IGNORE_INDIRECT is PERMANENTLY OFF (2026-08-17). The old
+    # rationale ("minigpu's own C ABI never crosses an asyncify operation
+    # through an indirect call") stopped being true: the emdawnwebgpu port's
+    # event dispatch invokes completion callbacks (buffer-map, adapter and
+    # device requests) THROUGH FUNCTION POINTERS while the caller is
+    # suspended in a platformSleep poll loop. Under IGNORE_INDIRECT those
+    # frames are uninstrumented and asyncify silently corrupts them — the
+    # OBSERVED failure in the plain (no-extra-sources) build was an awaited
+    # async ccall RESOLVING while its C++ never completed: init stopped
+    # after "Requesting WebGPU adapter..." yet returned success, and every
+    # readDirect logged its entry, suspended, and "returned" zeros. The
+    # single-blob build (MGPU_EXTRA_SOURCES) never had the flag, which is
+    # why the same wasm machinery worked there and failed here.
+    set(MGPU_ASYNCIFY_INDIRECT_FLAG "")
 
     message(STATUS "Needs Emscripten 4.0.10+, please upgrade if you face issues.")
     message(STATUS "toolchain dir ${EMSCRIPTEN_DIR}")
+    # C++ exception CATCHING stays OFF on web.
+    # JS-based catching (-sDISABLE_EXCEPTION_CATCHING=0) routes every call that
+    # may throw through a JS invoke_* trampoline, a tax on every call, and
+    # native wasm exceptions (-fwasm-exceptions) do not work with -sASYNCIFY.
+    # So a C++ throw aborts the module and every catch(...) fallback is dead
+    # code on web: an exported function must check its preconditions BEFORE
+    # anything that can throw instead of relying on a catch. The debug
+    # variant's two catching flags are link-only, so minigpu's own objects
+    # are compiled without catch support there too.
     if(EMSCRIPTEN_DEBUG)
         set(DEBUG_FLAGS "\
         -g3 \
@@ -204,15 +247,31 @@ if(EMSCRIPTEN)
         --source-map-base=http://localhost:8080/ \
     ")
     else()
-        # Release flags
+        # Release flags.
+        #
+        # 🔴 `-sENVIRONMENT=web,worker`, NOT `web`. `web` alone hard-codes
+        # `ENVIRONMENT_IS_WORKER = false` in the generated glue and strips the
+        # worker bootstrap, so the module cannot be instantiated inside a
+        # dedicated Worker at all. That one token confined every GPU workload
+        # on this platform to the main thread: WebGPU objects are not
+        # transferable between threads, so a pipeline can only ever be used by
+        # the thread that built it, and anything that must stay off the UI
+        # thread therefore could not use this backend. Costs a little glue.
+        #
+        # 🔴 AND KEEP COMMENTS OUT OF THE STRING. These flags are one quoted,
+        # backslash-continued CMake string: a `#` inside it is not a comment,
+        # it is passed to the linker, and em++ answers with the memorable
+        # `error: #: No such file or directory`.
+        #
+        # No -ffast-math: same reason as the native flags below (it lets the
+        # optimizer drop the NaN/Inf input validation).
         set(DEBUG_FLAGS "\
             -O3 \
             -flto \
-            -ffast-math \
             -DNDEBUG \
             -sMINIFY_HTML=1 \
             -sFILESYSTEM=0 \
-            -sENVIRONMENT=web \
+            -sENVIRONMENT=web,worker \
             -sMALLOC=emmalloc \
             -sNO_EXIT_RUNTIME=1 \
             -sTEXTDECODER=2 \
@@ -221,6 +280,15 @@ if(EMSCRIPTEN)
     endif()
 
     # (Additional compile options could be added here)
+    #
+    # -sASYNCIFY_STACK_SIZE=1MB: the buffer a suspension unwinds the wasm call
+    # stack into, malloc'd on EVERY sleep (each awaited read, poll-loop sleep,
+    # init); 64MB grew the heap on the first read and pinned 64MB per call in
+    # flight. Asyncify saves each frame's locals plus a call index, and the
+    # largest function in the shipped module has 41 locals (<= ~330 bytes a
+    # frame), so even a 100-frame-deep suspension needs ~33KB: 1MB is 30x that
+    # (Emscripten's default is 4KB). Too small does not corrupt anything: the
+    # unwind traps on `unreachable`.
     set_target_properties(${MAIN_LIB} PROPERTIES LINK_FLAGS "\
         ${DEBUG_FLAGS} \
         -sUSE_WEBGPU=0 \
@@ -234,28 +302,40 @@ if(EMSCRIPTEN)
         -sALLOW_MEMORY_GROWTH=1 \
         -sMAXIMUM_MEMORY=2GB \
         -sASYNCIFY \
-        -sASYNCIFY_STACK_SIZE=64MB \
+        -sASYNCIFY_STACK_SIZE=1MB \
         ${MGPU_ASYNCIFY_INDIRECT_FLAG} \
         -sEXIT_RUNTIME=0 \
         -sWASM_BIGINT=1 \
         --use-port=${MGPU_EMDAWNWEBGPU_PORT}:shared_memory=true \
         --closure-args=--externs=${EMSCRIPTEN_DIR}/src/closure-externs/webgpu-externs.js \
+        --post-js ${CMAKE_CURRENT_SOURCE_DIR}/web/webgpu_adapter_info_guard.post.js \
     ")
+
+    # Emscripten finalizes JavaScript through Python's shutil.move(). On
+    # Windows that operation does not replace an existing destination, so an
+    # otherwise successful incremental link stalls/fails at final emission.
+    # Remove only this build target's stale intermediates immediately before a
+    # relink. The separately packaged web runtime remains last-good until the
+    # post-build copy runs after a successful link.
+    add_custom_command(TARGET ${MAIN_LIB} PRE_LINK
+        COMMAND "${CMAKE_COMMAND}" -E rm -f
+            "$<TARGET_FILE:${MAIN_LIB}>"
+            "$<TARGET_FILE_DIR:${MAIN_LIB}>/${MAIN_LIB}.wasm"
+        VERBATIM
+    )
 else()
     # Compiler-specific optimizations
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        # Only use CPU-specific tuning when we are not on Apple and not cross-compiling
-        set(CPU_TUNING_FLAGS "")
-        if(NOT APPLE AND CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL CMAKE_SYSTEM_PROCESSOR)
-            list(APPEND CPU_TUNING_FLAGS -march=native -mtune=native)
-        endif()
-
-        target_compile_options(${MAIN_LIB} PRIVATE 
+        # No -march=native: this library ships inside apps, so the build
+        # machine's ISA (AVX2/AVX-512) would SIGILL on older user CPUs.
+        # No -ffast-math (nor /fp:fast below): it implies finite-math-only,
+        # which folds the library's std::isfinite / NaN input validation
+        # (sampler LOD clamps, clear values) to "valid". This is handle and
+        # validation code, not numeric kernels.
+        target_compile_options(${MAIN_LIB} PRIVATE
             -Wall
             -Wno-error
-            -ffast-math            # Aggressive floating-point optimizations
             -flto                  # Link-time optimization
-            ${CPU_TUNING_FLAGS}
         )
         
         # Release-specific flags
@@ -271,8 +351,7 @@ else()
             INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE
         )
     elseif(MSVC)
-        target_compile_options(${MAIN_LIB} PRIVATE 
-            /fp:fast               # Fast floating-point model
+        target_compile_options(${MAIN_LIB} PRIVATE
             /GL                    # Whole program optimization
         )
         
@@ -353,8 +432,108 @@ if(NOT EMSCRIPTEN)
     # adjust the following as needed
     target_link_libraries(minigpu_test PRIVATE ${MAIN_LIB})
     target_link_libraries(minigpu_test PRIVATE webgpu_dawn)
+    add_executable(minigpu_buffer_descriptor_test
+        "${MAIN_PATH}/test/buffer_descriptor_test.cpp")
+    target_link_libraries(minigpu_buffer_descriptor_test PRIVATE ${MAIN_LIB})
+    target_link_libraries(minigpu_buffer_descriptor_test PRIVATE webgpu_dawn)
+    add_executable(minigpu_context_lifetime_test
+        "${MAIN_PATH}/test/context_lifetime_test.cpp")
+    target_link_libraries(minigpu_context_lifetime_test PRIVATE ${MAIN_LIB})
+    target_link_libraries(minigpu_context_lifetime_test PRIVATE webgpu_dawn)
+    add_executable(minigpu_queue_completion_boundary_test
+        "${MAIN_PATH}/test/queue_completion_boundary_test.cpp")
+    target_link_libraries(minigpu_queue_completion_boundary_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_shader_exclusive_boundary_test
+        "${MAIN_PATH}/test/shader_exclusive_boundary_test.cpp")
+    target_link_libraries(minigpu_shader_exclusive_boundary_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_imported_frame_boundary_test
+        "${MAIN_PATH}/test/imported_frame_boundary_test.cpp"
+        "${MAIN_PATH}/test/imported_frame_abi_c.c")
+    target_link_libraries(minigpu_imported_frame_boundary_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_resource_cleanup_boundary_test
+        "${MAIN_PATH}/test/resource_cleanup_boundary_test.cpp"
+        "${MAIN_PATH}/test/resource_cleanup_abi_c.c")
+    target_link_libraries(minigpu_resource_cleanup_boundary_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_private_output_boundary_test
+        "${MAIN_PATH}/test/private_output_boundary_test.cpp"
+        "${MAIN_PATH}/test/private_output_abi_c.c")
+    target_link_libraries(minigpu_private_output_boundary_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_completion_ticket_cold_test
+        "${MAIN_PATH}/test/completion_ticket/completion_ticket_cold_test.cpp"
+        "${MAIN_PATH}/test/completion_ticket/completion_ticket_abi_c.c")
+    target_link_libraries(minigpu_completion_ticket_cold_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_private_resources_cold_test
+        "${MAIN_PATH}/test/private_resources_cold_test.cpp"
+        "${MAIN_PATH}/test/private_resources_abi_c.c")
+    target_link_libraries(minigpu_private_resources_cold_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_capture_source_cold_test
+        "${MAIN_PATH}/test/capture_source/capture_source_cold_test.cpp"
+        "${MAIN_PATH}/test/capture_source/capture_source_abi_c.c")
+    target_link_libraries(minigpu_capture_source_cold_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_external_pool_test
+        "${MAIN_PATH}/test/external_pool_test.cpp")
+    target_link_libraries(minigpu_external_pool_test PRIVATE ${MAIN_LIB} webgpu_dawn)
+    if(WIN32)
+        target_link_libraries(minigpu_external_pool_test PRIVATE d3d11 dxgi)
+    endif()
+    add_executable(minigpu_texture_resource_test
+        "${MAIN_PATH}/test/texture_resource_test.cpp")
+    target_link_libraries(minigpu_texture_resource_test PRIVATE ${MAIN_LIB})
+    target_link_libraries(minigpu_texture_resource_test PRIVATE webgpu_dawn)
+    # The contract tests bring d3d11/dxgi in with #pragma comment(lib).
+    add_executable(minigpu_external_contract_test
+        "${MAIN_PATH}/test/external_contract_test.cpp")
+    target_link_libraries(minigpu_external_contract_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_render_contract_test
+        "${MAIN_PATH}/test/render_contract_test.cpp")
+    target_link_libraries(minigpu_render_contract_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    if(WIN32)
+        add_executable(minigpu_external_pool_contract_test
+            "${MAIN_PATH}/test/external_pool_contract_test.cpp")
+        target_link_libraries(minigpu_external_pool_contract_test PRIVATE
+            ${MAIN_LIB} webgpu_dawn)
+    endif()
+    add_executable(minigpu_export_failure_test
+        "${MAIN_PATH}/test/export_failure_test.cpp")
+    target_link_libraries(minigpu_export_failure_test PRIVATE ${MAIN_LIB})
+    target_link_libraries(minigpu_export_failure_test PRIVATE webgpu_dawn)
+    add_executable(minigpu_render_resource_test
+        "${MAIN_PATH}/test/render_resource_test.cpp")
+    target_link_libraries(minigpu_render_resource_test PRIVATE ${MAIN_LIB})
+    target_link_libraries(minigpu_render_resource_test PRIVATE webgpu_dawn)
+    add_executable(minigpu_compute_guard_test
+        "${MAIN_PATH}/test/compute_guard_test.cpp")
+    target_link_libraries(minigpu_compute_guard_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_shader_cache_files_test
+        "${MAIN_PATH}/test/shader_cache_files_test.cpp")
+    target_link_libraries(minigpu_shader_cache_files_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_immutable_import_test
+        "${MAIN_PATH}/test/immutable_frame_import_test.cpp")
+    target_link_libraries(minigpu_immutable_import_test PRIVATE ${MAIN_LIB})
+    add_executable(minigpu_compute_pipeline_async_test
+        "${MAIN_PATH}/test/compute_pipeline_async_test.cpp")
+    target_link_libraries(minigpu_compute_pipeline_async_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
+    add_executable(minigpu_external_async_test
+        "${MAIN_PATH}/test/external_async_test.cpp")
+    target_link_libraries(minigpu_external_async_test PRIVATE
+        ${MAIN_LIB} webgpu_dawn)
     if(WIN32)
         target_link_libraries(minigpu_test PRIVATE d3d11 d3d12 dxgi)
+        target_link_libraries(minigpu_immutable_import_test PRIVATE d3d11 dxgi)
+        target_link_libraries(minigpu_external_async_test PRIVATE d3d11 d3d12 dxgi)
     endif()
     target_link_libraries(${MAIN_LIB} PRIVATE webgpu_dawn)
     # Dawn native include dirs needed for minigpu_external.cpp and test headers
@@ -372,6 +551,7 @@ endif()
 if(EMSCRIPTEN)
     # 1. Copy additional JS sources (e.g. support libraries) from the build_web folder
     file(GLOB JS_SOURCES "${MAIN_PATH}/build_web/*.js")
+    list(FILTER JS_SOURCES EXCLUDE REGEX "/${MAIN_LIB}\\.js$")
     set(JS_OUTPUTS "")
     foreach(JS_FILE ${JS_SOURCES})
         get_filename_component(JS_FILENAME ${JS_FILE} NAME)
@@ -393,10 +573,10 @@ if(EMSCRIPTEN)
     #    (We assume the output files are named after MAIN_LIB.)
     add_custom_command(TARGET ${MAIN_LIB} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_BINARY_DIR}/${MAIN_LIB}.js
+                $<TARGET_FILE:${MAIN_LIB}>
                 ${WEB_OUTPUT_DIR}/${MAIN_LIB}.js
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${CMAKE_CURRENT_BINARY_DIR}/${MAIN_LIB}.wasm
+                $<TARGET_FILE_DIR:${MAIN_LIB}>/${MAIN_LIB}.wasm
                 ${WEB_OUTPUT_DIR}/${MAIN_LIB}.wasm
         COMMENT "Copying output JS and WASM to web output directory"
     )

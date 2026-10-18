@@ -17,22 +17,497 @@ typedef ReadAsyncCallback = Pointer<NativeFunction<ReadAsyncCallbackFunc>>;
 
 MinigpuPlatform registeredInstance() => MinigpuFfi();
 
+DeviceBufferLimits? _readCurrentDeviceBufferLimits(
+  int Function(Pointer<Uint64>, Pointer<Uint64>, Pointer<Uint64>) query,
+) {
+  final values = calloc<Uint64>(3);
+  try {
+    final ok = query(values, values + 1, values + 2);
+    if (ok != 1 || values.value <= 0 || (values + 1).value <= 0 ||
+        (values + 2).value <= 0) {
+      return null;
+    }
+    return DeviceBufferLimits(
+      deviceGeneration: (values + 2).value,
+      maxBufferSize: values.value,
+      maxStorageBufferBindingSize: (values + 1).value,
+    );
+  } on ArgumentError {
+    // Older native binaries do not carry the bounded query export.
+    return null;
+  } finally {
+    calloc.free(values);
+  }
+}
+
+bool _hasBufferDescriptorV1() {
+  try {
+    return ffi.mgpuBufferDescriptorVersion() == 1;
+  } on ArgumentError {
+    return false;
+  }
+}
+
+DeviceTextureLimits? _readCurrentDeviceTextureLimits(
+  int Function(Pointer<Uint64>, Pointer<Uint64>, Pointer<Uint64>) query,
+) {
+  final values = calloc<Uint64>(3);
+  try {
+    if (query(values, values + 1, values + 2) != 1 ||
+        values.value < 1 || (values + 1).value < 1 ||
+        (values + 2).value < 1) return null;
+    return DeviceTextureLimits(
+      deviceGeneration: (values + 2).value,
+      maxTextureDimension2D: values.value,
+      maxTextureArrayLayers: (values + 1).value,
+      supportsRegionWrite: ffi.mgpuTextureRegionUploadVersion() == 1,
+    );
+  } on ArgumentError {
+    return null; // Optional export absent on older packaged backends.
+  } finally {
+    calloc.free(values);
+  }
+}
+
+bool _hasBufferBindingV1() {
+  try {
+    return ffi.mgpuBufferBindingVersion() == 1;
+  } on ArgumentError {
+    return false;
+  }
+}
+
+bool _hasTextureResourceV1() {
+  try {
+    return ffi.mgpuTextureResourceVersion() == 1;
+  } on ArgumentError {
+    return false;
+  }
+}
+
+bool _hasRasterResourceV1() {
+  try {
+    return ffi.mgpuRasterResourceVersion() == 1;
+  } on ArgumentError {
+    return false;
+  }
+}
+
+const int _maxRasterDescriptorWords = 4096;
+const int _maxRasterCommandWords = 65536;
+const int _maxRasterResourcesPerFamily = 256;
+const int _maxRasterDiagnosticBytes = 512;
+const int _maxUint32 = 0xffffffff;
+
+void _checkUint32Words(List<int> words, int maximum, String name) {
+  if (words.length > maximum) {
+    throw ArgumentError.value(words.length, name, 'Exceeds $maximum words');
+  }
+  for (final word in words) {
+    if (word < 0 || word > _maxUint32) {
+      throw ArgumentError.value(word, name, 'Must contain only uint32 values');
+    }
+  }
+}
+
+void _checkRasterSubmission(
+  List<double> clear,
+  int loadFlags,
+  bool hasDepth,
+  List<PlatformBuffer> buffers,
+  List<PlatformTextureView> views,
+  List<PlatformSampler> samplers,
+  List<int> commands,
+) {
+  if (clear.length != 5) {
+    throw ArgumentError.value(clear, 'clear', 'Must contain RGBA and depth');
+  }
+  final float32 = Float32List(1);
+  for (final value in clear) {
+    if (!value.isFinite) {
+      throw ArgumentError.value(value, 'clear', 'Must be finite');
+    }
+    float32[0] = value;
+    if (!float32[0].isFinite) {
+      throw ArgumentError.value(
+        value,
+        'clear',
+        'Must be representable as float32',
+      );
+    }
+  }
+  if (clear[4] < 0 || clear[4] > 1) {
+    throw ArgumentError.value(clear[4], 'clear', 'Depth must be in 0..1');
+  }
+  if (loadFlags < 0 || loadFlags > 3 || (!hasDepth && (loadFlags & 2) != 0)) {
+    throw ArgumentError.value(
+      loadFlags,
+      'loadFlags',
+      'Invalid render load flags',
+    );
+  }
+  if (buffers.length > _maxRasterResourcesPerFamily ||
+      views.length > _maxRasterResourcesPerFamily ||
+      samplers.length > _maxRasterResourcesPerFamily) {
+    throw ArgumentError('Render resource count exceeds 256');
+  }
+  _checkUint32Words(commands, _maxRasterCommandWords, 'commands');
+}
+
+Never _textureStatus(int status, String operation) {
+  switch (status) {
+    case 1:
+      throw ArgumentError('$operation was rejected');
+    case 2:
+      throw StateError('GPU device is unavailable');
+    case _shaderBindBusy:
+      throw StateError('$operation refused: $_shaderBusyReason');
+    default:
+      throw StateError('$operation failed');
+  }
+}
+
+/// Native MGPU_SHADER_BIND_BUSY: the shader is held exclusively by a scoped
+/// use, or is closing. Not a fault: the binding can be retried once the
+/// holder releases it.
+const int _shaderBindBusy = 4;
+const String _shaderBusyReason =
+    'the shader is held exclusively by another use or is closing';
+
+Future<void> _waitForSubmittedWork(PortIssue viaPort) async {
+  if (!GpuCompletion.usesPort) {
+    throw UnsupportedError(
+      'Submitted-work completion requires status-bearing native port support',
+    );
+  }
+  final bool completed;
+  try {
+    completed = await GpuCompletion.run(
+      viaPort,
+      (_) => throw UnsupportedError(
+        'Submitted-work completion requires status-bearing native port support',
+      ),
+    );
+  } on ArgumentError {
+    throw UnsupportedError(
+      'This native minigpu build does not expose submitted-work completion',
+    );
+  }
+  if (!completed) {
+    throw StateError('The GPU queue was unavailable or the device was lost');
+  }
+}
+
+PlatformRenderPipeline _createFfiRenderPipeline(
+  RenderPipelineDescriptor descriptor,
+  Pointer<ffi.MGPUContextHandle>? context,
+) {
+  if (!_hasRasterResourceV1()) {
+    throw UnsupportedError('Raster pipelines are unsupported by this binary');
+  }
+  final words = descriptor.encode();
+  _checkUint32Words(words, _maxRasterDescriptorWords, 'descriptor');
+  return using((Arena arena) {
+    final code = descriptor.code.toNativeUtf8(allocator: arena).cast<Char>();
+    final vertex = descriptor.vertexEntry
+        .toNativeUtf8(allocator: arena)
+        .cast<Char>();
+    final fragment = descriptor.fragmentEntry
+        .toNativeUtf8(allocator: arena)
+        .cast<Char>();
+    final nativeWords = arena<Uint32>(words.length);
+    nativeWords.asTypedList(words.length).setAll(0, words);
+    final Pointer<ffi.MGPURenderPipeline> pipeline;
+    try {
+      pipeline = context == null
+          ? ffi.mgpuCreateRenderPipeline(
+              code,
+              vertex,
+              fragment,
+              nativeWords,
+              words.length,
+            )
+          : ffi.mgpuContextCreateRenderPipeline(
+              context,
+              code,
+              vertex,
+              fragment,
+              nativeWords,
+              words.length,
+            );
+    } on ArgumentError {
+      throw UnsupportedError(
+        'This native minigpu build does not expose raster pipeline creation',
+      );
+    }
+    if (pipeline == nullptr) {
+      throw StateError('Render pipeline creation failed');
+    }
+    return FfiRenderPipeline(pipeline);
+  });
+}
+
+/// Native MGPU_CONTEXT_LEASE_WOULD_BLOCK.
+const int _leaseWouldBlock = -4;
+
+/// A lease retain refused with WOULD_BLOCK, which is temporary.
+final class _LeaseWouldBlock extends StateError {
+  _LeaseWouldBlock()
+      : super('GPU creation device cannot be retained ($_leaseWouldBlock)');
+}
+
+/// Retained while ready, since a lost device cannot issue new creation leases.
+/// This owner proves only native GPU retirement; imported/exported readers keep
+/// their own pins. Releasing it does not claim the whole context detached.
+final class _FfiDeviceEpoch {
+  _FfiDeviceEpoch(this._lease, this.generation)
+      : adapterIdentity = _readAdapterIdentity(_lease, generation);
+  Pointer<NativeContextLease> _lease;
+  final int generation;
+  final DeviceAdapterIdentity? adapterIdentity;
+  Future<void>? _retiring;
+  Future<void>? _contextRetirement;
+
+  static DeviceAdapterIdentity? _readAdapterIdentity(
+    Pointer<NativeContextLease> lease, int generation,
+  ) {
+    final out = calloc<NativeDeviceAdapterIdentity>();
+    try {
+      if (mgpuContextLeaseGetAdapterIdentity(
+            lease, out, sizeOf<NativeDeviceAdapterIdentity>()) != 0 ||
+          out.ref.version != 1 || out.ref.kind != 1 ||
+          out.ref.deviceGeneration != generation ||
+          !const {1, 2}.contains(out.ref.backend)) return null;
+      return DeviceAdapterIdentity(
+        backend: out.ref.backend, kind: out.ref.kind,
+        low: out.ref.low, high: out.ref.high,
+      );
+    } on ArgumentError {
+      return null; // Older binaries remain usable, without recovery support.
+    } finally {
+      calloc.free(out);
+    }
+  }
+
+  static _FfiDeviceEpoch retain([Pointer<ffi.MGPUContextHandle>? handle]) {
+    final lease = calloc<Pointer<NativeContextLease>>();
+    final context = calloc<Pointer<ffi.MGPUContextHandle>>();
+    final info = calloc<NativeContextLeaseInfo>();
+    try {
+      final result = handle == null
+          ? mgpuDefaultContextRetainLease(lease, context)
+          : mgpuContextRetainLease(handle, lease);
+      if (result == _leaseWouldBlock) throw _LeaseWouldBlock();
+      if (result != 0 ||
+          mgpuContextLeaseGetInfo(
+                lease.value, info, sizeOf<NativeContextLeaseInfo>()) != 0 ||
+          info.ref.current != 1) {
+        throw StateError('GPU creation device cannot be retained ($result)');
+      }
+      final retained = _FfiDeviceEpoch(lease.value, info.ref.deviceGeneration);
+      lease.value = nullptr;
+      return retained;
+    } finally {
+      if (lease.value != nullptr) mgpuContextReleaseLease(lease.value);
+      calloc.free(info);
+      calloc.free(context);
+      calloc.free(lease);
+    }
+  }
+
+  /// [retain] for the process-global context. While another isolate is still
+  /// publishing the context's shared owner, native refuses with WOULD_BLOCK;
+  /// that settles within the other isolate's attach, so retry for up to 5 s.
+  static Future<_FfiDeviceEpoch> retainDefault() async {
+    final waited = Stopwatch()..start();
+    for (var delayMs = 1;; delayMs = delayMs < 16 ? delayMs * 2 : 16) {
+      try {
+        return retain();
+      } on _LeaseWouldBlock {
+        if (waited.elapsed > const Duration(seconds: 5)) rethrow;
+      }
+      await Future<void>.delayed(Duration(milliseconds: delayMs));
+    }
+  }
+
+  Future<void> retireLost(int expectedGeneration) {
+    if (_lease == nullptr || expectedGeneration != generation) {
+      return Future.error(StateError('GPU retirement creation epoch changed'));
+    }
+    final existing = _retiring;
+    if (existing != null) return existing;
+    final info = calloc<NativeContextLeaseInfo>();
+    try {
+      if (mgpuContextLeaseGetInfo(
+                _lease, info, sizeOf<NativeContextLeaseInfo>()) != 0 ||
+          info.ref.deviceGeneration != generation ||
+          info.ref.current != 0) {
+        return Future.error(
+          StateError('GPU retirement requires an observed lost device'));
+      }
+    } finally {
+      calloc.free(info);
+    }
+    return _retiring = () async {
+      final ended = await GpuCompletion.run(
+        (port, token) =>
+            mgpuContextLeaseRetireDeviceAsyncToPort(_lease, port, token),
+        (_) => throw UnsupportedError('Native retirement requires port receipts'),
+      );
+      if (!ended) throw StateError('Native GPU retirement was not confirmed');
+    }();
+  }
+
+  Future<void> observeContextRetirement(int expectedGeneration) {
+    if (expectedGeneration != generation) {
+      return Future.error(StateError('Context retirement creation epoch changed'));
+    }
+    final existing = _contextRetirement;
+    if (existing != null) return existing;
+    if (_lease == nullptr) {
+      return Future.error(StateError('Context observation requires its creation lease'));
+    }
+    return _contextRetirement = () async {
+      final completed = await GpuCompletion.run(
+        (port, token) =>
+            mgpuContextLeaseObserveRetirementAsyncToPort(_lease, port, token),
+        (_) => throw UnsupportedError('Context retirement requires port receipts'),
+      );
+      if (!completed) throw StateError('Final native context retirement was not confirmed');
+    }();
+  }
+
+  Future<void> verifyReplacement(
+    DeviceAdapterIdentity expected, Future<void> Function() detach,
+  ) async {
+    if (adapterIdentity == expected) return;
+    // A name filter can select a different physical device. It must never be
+    // published to callers as a replacement; retire that candidate first.
+    final retired = observeContextRetirement(generation);
+    retired.ignore();
+    await detach();
+    await retired;
+    throw DeviceReplacementDiscarded(
+      expectedAdapter: expected,
+      message: 'Replacement GPU does not match the creation adapter',
+    );
+  }
+
+  void release() {
+    if (_lease == nullptr) return;
+    mgpuContextReleaseLease(_lease);
+    _lease = nullptr;
+  }
+}
+
 // Minigpu FFI
 class MinigpuFfi extends MinigpuPlatform {
+  _FfiDeviceEpoch? _epoch;
+
+  @override
+  DeviceAdapterIdentity? get creationAdapterIdentity => _epoch?.adapterIdentity;
+
+  @override
+  Future<void> initializeContextForRecovery(DeviceAdapterIdentity expected) async {
+    if (_epoch != null) throw StateError('Old GPU attachment has not retired');
+    await initializeContext();
+    await _epoch!.verifyReplacement(expected, destroyContext);
+  }
+
+  @override
+  Future<void> observeContextRetirement({required int deviceGeneration}) =>
+      _epoch?.observeContextRetirement(deviceGeneration) ??
+      Future.error(StateError('GPU creation epoch was not retained'));
+
+  @override
+  Future<void> retireLostDevice({required int deviceGeneration}) =>
+      _epoch?.retireLost(deviceGeneration) ??
+      Future.error(StateError('GPU creation epoch was not retained'));
+
+  @override
+  DeviceTextureLimits? get currentDeviceTextureLimits =>
+      _readCurrentDeviceTextureLimits(ffi.mgpuGetCurrentDeviceTextureLimits);
   MinigpuFfi();
+
+  void Function()? _deviceLostCallback;
+  bool _hadCurrentDevice = false;
+
+  @override
+  void setDeviceLostCallback(void Function()? callback) =>
+      _deviceLostCallback = callback;
+
+  @override
+  DeviceBufferLimits? get currentDeviceBufferLimits {
+    final limits = _readCurrentDeviceBufferLimits(
+      ffi.mgpuGetCurrentDeviceBufferLimits,
+    );
+    if (limits == null && _hadCurrentDevice) _deviceLostCallback?.call();
+    _hadCurrentDevice = limits != null;
+    return limits;
+  }
+
+  /// Start a trusted native consumer on the already-ready display device.
+  /// The consumer must retain its own ready-context pin inside [start] before
+  /// scheduling asynchronous work. This synchronous scope never initializes
+  /// or replaces the renderer's device and grants no source or room access.
+  int withLiveExternalPoolContext(
+    int Function(Pointer<Void> installedQuery, Pointer<Void> context) start,
+  ) {
+    final lease = calloc<Pointer<NativeContextLease>>();
+    final context = calloc<Pointer<ffi.MGPUContextHandle>>();
+    try {
+      final result = mgpuDefaultContextRetainLease(lease, context);
+      if (result != 0) {
+        throw StateError('Display GPU context cannot be retained ($result)');
+      }
+      return start(
+        externalPoolQueryFunctionForHost,
+        context.value.cast<Void>(),
+      );
+    } finally {
+      if (lease.value != nullptr) mgpuContextReleaseLease(lease.value);
+      calloc.free(context);
+      calloc.free(lease);
+    }
+  }
 
   @override
   Future<void> initializeContext() async {
     // Completion arrives on a Dart port, not through a NativeCallable — see
     // minigpu_ffi_completion.dart for why the callback form aborts the VM.
-    await GpuCompletion.run(
+    if (_epoch != null) {
+      if (currentDeviceBufferLimits?.deviceGeneration == _epoch!.generation) return;
+      throw StateError('Lost GPU context requires explicit retirement');
+    }
+    final initialized = await GpuCompletion.run(
       (port, token) => mgpuInitializeContextAsyncToPort(port, token),
       (callback) => ffi.mgpuInitializeContextAsync(callback),
     );
+    if (!initialized) {
+      throw StateError('GPU context initialization failed or device is lost');
+    }
+    if (currentDeviceBufferLimits == null) {
+      // A positive port receipt owns an attachment even if loss races Dart's
+      // delivery. Return that attachment before rejecting the initialization.
+      // The legacy void callback does not prove whether one was acquired.
+      if (GpuCompletion.usesPort) ffi.mgpuDestroyContext();
+      throw StateError('GPU device was lost during initialization');
+    }
+    try {
+      _epoch = await _FfiDeviceEpoch.retainDefault();
+    } catch (_) {
+      ffi.mgpuDestroyContext();
+      rethrow;
+    }
   }
 
   @override
   Future<void> destroyContext() async {
+    final epoch = _epoch;
+    if (epoch == null) return;
+    _hadCurrentDevice = false;
+    epoch.release();
+    _epoch = null;
     ffi.mgpuDestroyContext();
   }
 
@@ -45,10 +520,77 @@ class MinigpuFfi extends MinigpuPlatform {
 
   @override
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
+    // The native size is a 32-bit int: a larger value would arrive truncated
+    // to a small valid size, and a negative one is refused there.
+    RangeError.checkValueInInterval(bufferSize, 0, 0x7fffffff, 'bufferSize');
     final self = ffi.mgpuCreateBuffer(bufferSize, dataType.index);
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
-    return FfiBuffer(self);
+    return FfiBuffer(
+      self,
+      sizeBytes: FfiBuffer._legacyPhysicalBytes(bufferSize, dataType),
+    );
   }
+
+  @override
+  PlatformBuffer createBufferFromDescriptor(BufferDescriptor descriptor) {
+    descriptor.validate();
+    if (!_hasBufferDescriptorV1()) {
+      if (descriptor.usage == BufferUsage.legacy) {
+        return createBuffer(descriptor.sizeBytes, BufferDataType.uint32);
+      }
+      throw UnsupportedError(
+        'Explicit buffer usage is unsupported by this binary',
+      );
+    }
+    final self = ffi.mgpuCreateBufferWithUsage(
+      descriptor.sizeBytes,
+      descriptor.usage,
+    );
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiBuffer(self, sizeBytes: descriptor.sizeBytes);
+  }
+
+  @override
+  PlatformTexture createTexture(TextureDescriptor descriptor) {
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned textures are unsupported by this binary');
+    }
+    final texture = ffi.mgpuCreateTexture2D(
+      descriptor.width,
+      descriptor.height,
+      descriptor.format.wireCode,
+      descriptor.usage,
+      descriptor.arrayLayerCount,
+      descriptor.mipLevelCount,
+    );
+    if (texture == nullptr) throw StateError('Texture creation failed');
+    return FfiTexture(texture);
+  }
+
+  @override
+  PlatformSampler createSampler(SamplerDescriptor descriptor) {
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned samplers are unsupported by this binary');
+    }
+    final sampler = ffi.mgpuCreateSampler(
+      descriptor.addressModeU.wireCode,
+      descriptor.addressModeV.wireCode,
+      descriptor.addressModeW.wireCode,
+      descriptor.magFilter.wireCode,
+      descriptor.minFilter.wireCode,
+      descriptor.mipmapFilter.wireCode,
+      descriptor.lodMinClamp,
+      descriptor.lodMaxClamp,
+      descriptor.compare?.wireCode ?? 0,
+    );
+    if (sampler == nullptr) throw StateError('Sampler creation failed');
+    return FfiSampler(sampler);
+  }
+
+  @override
+  PlatformRenderPipeline createRenderPipeline(
+    RenderPipelineDescriptor descriptor,
+  ) => _createFfiRenderPipeline(descriptor, null);
 
   @override
   int queryVramBytes() => ffi.mgpuQueryVramBytes();
@@ -97,9 +639,21 @@ class MinigpuFfi extends MinigpuPlatform {
     try {
       final ptr = ffi.mgpuImportVideoFrame(nativeBuf.cast());
       if (ptr == nullptr) return null;
+      if (buf.yuvMatrix != YuvMatrix.bt709 || !buf.yuvFullRange) {
+        final matrix = switch (buf.yuvMatrix) {
+          YuvMatrix.bt709 => 0,
+          YuvMatrix.bt601 => 1,
+          YuvMatrix.bt2020 => 2,
+        };
+        try {
+          mgpuVideoTextureSetYuvColor(ptr, matrix, buf.yuvFullRange ? 1 : 0);
+        } on ArgumentError {
+          // A native build without the export converts as BT.709 full range.
+        }
+      }
       return FfiVideoTexture(ptr, buf.pixelFormat, buf.width, buf.height);
     } finally {
-      malloc.free(nativeBuf);
+      calloc.free(nativeBuf);
     }
   }
 
@@ -133,6 +687,11 @@ class MinigpuFfi extends MinigpuPlatform {
   }
 
   @override
+  Future<void> waitForSubmittedWork() => _waitForSubmittedWork(
+    (port, token) => mgpuWaitForSubmittedWorkAsyncToPort(port, token),
+  );
+
+  @override
   int? get drainSpinBudgetMs {
     try {
       return ffi.mgpuDrainSpinBudgetMs();
@@ -161,7 +720,7 @@ class MinigpuFfi extends MinigpuPlatform {
     try {
       final handle = ffi.mgpuCreateContextHandle(filterPtr.cast());
       if (handle == nullptr) return null;
-      return FfiSecondaryPlatform(handle);
+      return FfiSecondaryPlatform(handle, adapterFilter: adapterFilter);
     } finally {
       malloc.free(filterPtr);
     }
@@ -284,7 +843,9 @@ class MinigpuFfi extends MinigpuPlatform {
   @override
   void setLogCallback(
     void Function(int level, String message)? callback, {
-    int level = 1,
+    // WARN, the native default: installing or clearing a callback must not
+    // turn INFO lines on as a side effect.
+    int level = 2,
   }) {
     ffi.mgpuSetLogLevel(level);
 
@@ -295,7 +856,10 @@ class MinigpuFfi extends MinigpuPlatform {
     _logPort = null;
 
     if (callback == null) {
-      log_port.mgpuSetLogPort(0);
+      // The native port is one process-global slot: clear it only while it is
+      // still this platform's port, never one another isolate registered (or
+      // took over since).
+      if (old != null) log_port.mgpuClearLogPortIf(old.sendPort.nativePort);
       old?.close();
       return;
     }
@@ -332,13 +896,34 @@ class MinigpuFfi extends MinigpuPlatform {
   Pointer<ffi.MGPUExternalVideoBuffer> _allocExternalVideoBuffer(
     ExternalVideoBuffer buf,
   ) {
-    final p = malloc<ffi.MGPUExternalVideoBuffer>();
+    // The native importers read planes by content type and pixel format, not
+    // by num_planes, so a short list would hand them unset slots; the struct
+    // holds four, so a longer list cannot be represented. calloc zeroes the
+    // slots no plane fills.
+    final int requiredPlanes = switch (buf.contentType) {
+      ExternalContentType.webVideoFrame => 0,
+      ExternalContentType.cpu => switch (buf.pixelFormat) {
+        ExternalPixelFormat.nv12 || ExternalPixelFormat.yuv420pAsNV12Planes => 2,
+        ExternalPixelFormat.yuv420pAsRGBPlanes => 3,
+        _ => 1,
+      },
+      _ => 1,
+    };
+    if (buf.planes.length < requiredPlanes || buf.planes.length > 4) {
+      throw ArgumentError.value(
+        buf.planes.length,
+        'buf.planes',
+        'A ${buf.contentType.name} ${buf.pixelFormat.name} frame needs '
+            '$requiredPlanes to 4 planes',
+      );
+    }
+    final p = calloc<ffi.MGPUExternalVideoBuffer>();
     p.ref.content_typeAsInt = buf.contentType.index;
     p.ref.pixel_formatAsInt = buf.pixelFormat.index;
     p.ref.width = buf.width;
     p.ref.height = buf.height;
     p.ref.num_planes = buf.planes.length;
-    for (int i = 0; i < buf.planes.length && i < 4; i++) {
+    for (int i = 0; i < buf.planes.length; i++) {
       final sp = buf.planes[i];
       p.ref.planes[i].data_ptr = Pointer.fromAddress(sp.dataPtr);
       p.ref.planes[i].width = sp.width;
@@ -362,6 +947,25 @@ class MinigpuFfi extends MinigpuPlatform {
 
 // Video texture FFI
 final class FfiVideoTexture implements PlatformVideoTexture {
+  /// Native backends bind a texture to a shader the ordinary way
+  /// ([setOnShader]) and drive the dispatch through the same native pipeline as
+  /// every other kernel, so there is nothing for this to do. It exists because
+  /// the WEB backend's imported resource is a `GPUExternalTexture`, which that
+  /// route cannot carry at all — see `WebVideoTexture.landPackedRgba8`.
+  ///
+  /// Declared here rather than inherited because this class `implements` the
+  /// interface, which takes the signature and not the default body.
+  @override
+  bool get requiresExternalLanding => false;
+
+  @override
+  bool landPackedRgba8(
+    PlatformBuffer dst, {
+    required int width,
+    required int height,
+    int downscale = 1,
+  }) => false;
+
   FfiVideoTexture(
     Pointer<ffi.MGPUVideoTexture> ptr,
     ExternalPixelFormat fmt,
@@ -407,11 +1011,67 @@ final class FfiVideoTexture implements PlatformVideoTexture {
     );
   }
 
+  /// Async conversions whose completion has not arrived. The native texture
+  /// must outlive them, so [destroy] during one only marks it, and the last
+  /// completion releases it.
+  int _inFlight = 0;
+  bool _destroyRequested = false;
+
+  /// Native answers null for a format it cannot convert, a frame without its
+  /// planes, or no device: none of them is out of memory.
+  Never _conversionRefused() {
+    if (_pixelFormat == ExternalPixelFormat.unknown) {
+      throw UnsupportedError(
+        'toRGBA() cannot convert a frame of unknown format',
+      );
+    }
+    throw StateError(
+      'toRGBA() failed: the frame is missing a plane or the GPU device is gone',
+    );
+  }
+
   @override
   PlatformBuffer toRGBA() {
     final ptr = ffi.mgpuVideoTextureToRGBA(_self);
-    if (ptr == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    if (ptr == nullptr) _conversionRefused();
     return FfiBuffer(ptr);
+  }
+
+  @override
+  Future<PlatformBuffer> toRGBAAsync() async {
+    if (_destroyRequested) throw StateError('Video texture is destroyed');
+    Pointer<ffi.MGPUBuffer> out = nullptr;
+    final Future<bool>? done;
+    try {
+      done = GpuCompletion.tryPort((port, token) {
+        out = mgpuVideoTextureToRGBAAsyncToPort(_self, port, token);
+        // Refused: nothing will be posted, and tryPort drops the token.
+        if (out == nullptr) _conversionRefused();
+      });
+    } on ArgumentError {
+      // A native build without the async export.
+      return toRGBA();
+    }
+    if (done == null) return toRGBA();
+    final ok = await _holding(done);
+    final buffer = FfiBuffer(out);
+    if (!ok) {
+      buffer.destroy();
+      throw StateError('toRGBA() failed: the GPU device is gone');
+    }
+    return buffer;
+  }
+
+  /// Keeps the native texture alive until [work] completes.
+  Future<T> _holding<T>(Future<T> work) async {
+    _inFlight++;
+    try {
+      return await work;
+    } finally {
+      if (--_inFlight == 0 && _destroyRequested) {
+        ffi.mgpuDestroyVideoTexture(_self);
+      }
+    }
   }
 
   @override
@@ -425,23 +1085,30 @@ final class FfiVideoTexture implements PlatformVideoTexture {
     PlatformSharedOutputTexture dst,
   ) async {
     if (dst is! FfiSharedOutputTexture) return false;
-    return GpuCompletion.runInt(
-      (port, token) => mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
-        _self,
-        dst._self,
-        port,
-        token,
-      ),
-      (callback) => ffi.mgpuVideoTextureBGRAToRGBASharedOutputAsync(
-        _self,
-        dst._self,
-        callback,
+    if (_destroyRequested) throw StateError('Video texture is destroyed');
+    return _holding(
+      GpuCompletion.runInt(
+        (port, token) => mgpuVideoTextureBGRAToRGBASharedOutputAsyncToPort(
+          _self,
+          dst._self,
+          port,
+          token,
+        ),
+        (callback) => ffi.mgpuVideoTextureBGRAToRGBASharedOutputAsync(
+          _self,
+          dst._self,
+          callback,
+        ),
       ),
     );
   }
 
   @override
-  void destroy() => ffi.mgpuDestroyVideoTexture(_self);
+  void destroy() {
+    if (_destroyRequested) return;
+    _destroyRequested = true;
+    if (_inFlight == 0) ffi.mgpuDestroyVideoTexture(_self);
+  }
 }
 
 // Cross-API shared output texture FFI wrapper.
@@ -508,6 +1175,26 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
         0;
   }
 
+  /// [copyFromBufferF32] without blocking the calling isolate: the copy and
+  /// its completion wait run on the WebGPU worker, like [copyFromBufferAsync].
+  @override
+  // `async` for the same reason as copyFromBufferAsync.
+  Future<bool> copyFromBufferF32Async(PlatformBuffer src) async {
+    final self = (src as FfiBuffer)._self;
+    // The f32 copy has no callback-completed twin, so a build without the
+    // port path blocks as copyFromBufferF32 does.
+    if (!GpuCompletion.usesPort) return copyFromBufferF32(src);
+    return GpuCompletion.runInt(
+      (port, token) => mgpuCopyBufferF32ToSharedOutputTextureAsyncToPort(
+        self,
+        _self,
+        port,
+        token,
+      ),
+      (_) => throw StateError('No callback-completed f32 shared-output copy'),
+    );
+  }
+
   @override
   int debugReadFirstPixel() =>
       ffi.mgpuSharedOutputTextureDebugReadFirstPixel(_self);
@@ -530,29 +1217,133 @@ final class FfiSharedOutputTexture implements PlatformSharedOutputTexture {
 /// later operation through that instance automatically — only creation and
 /// context lifecycle need handle-aware calls.
 class FfiSecondaryPlatform extends MinigpuPlatform {
-  FfiSecondaryPlatform(this._handle);
+  FfiSecondaryPlatform(this._handle, {String adapterFilter = ''})
+      : _adapterFilter = adapterFilter;
 
-  final Pointer<ffi.MGPUContextHandle> _handle;
+  _FfiDeviceEpoch? _epoch;
+  final String _adapterFilter;
+
+  @override
+  DeviceAdapterIdentity? get creationAdapterIdentity => _epoch?.adapterIdentity;
+
+  @override
+  Future<void> initializeContextForRecovery(DeviceAdapterIdentity expected) async {
+    if (!_destroyed) throw StateError('Old GPU handle has not retired');
+    final filter = _adapterFilter.toNativeUtf8();
+    try {
+      _handle = ffi.mgpuCreateContextHandle(filter.cast<Char>());
+    } finally {
+      malloc.free(filter);
+    }
+    if (_handle == nullptr) throw StateError('Replacement GPU context unavailable');
+    _destroyed = false;
+    try {
+      await initializeContext();
+      await _epoch!.verifyReplacement(expected, destroyContext);
+    } catch (_) {
+      await destroyContext();
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> observeContextRetirement({required int deviceGeneration}) =>
+      _epoch?.observeContextRetirement(deviceGeneration) ??
+      Future.error(StateError('GPU creation epoch was not retained'));
+
+  @override
+  Future<void> retireLostDevice({required int deviceGeneration}) =>
+      _epoch?.retireLost(deviceGeneration) ??
+      Future.error(StateError('GPU creation epoch was not retained'));
+
+  Pointer<ffi.MGPUContextHandle> _handle;
   bool _destroyed = false;
+  @override
+  DeviceTextureLimits? get currentDeviceTextureLimits => _destroyed ? null :
+      _readCurrentDeviceTextureLimits((dimension, layers, generation) =>
+        ffi.mgpuContextGetCurrentDeviceTextureLimits(
+          _handle, dimension, layers, generation));
+  bool _hadCurrentDevice = false;
+  void Function()? _deviceLostCallback;
+
+  @override
+  void setDeviceLostCallback(void Function()? callback) =>
+      _deviceLostCallback = callback;
+
+  @override
+  DeviceBufferLimits? get currentDeviceBufferLimits {
+    if (_destroyed) return null;
+    final limits = _readCurrentDeviceBufferLimits(
+      (maxBufferSize, maxStorageBufferBindingSize, deviceGeneration) =>
+          ffi.mgpuContextGetCurrentDeviceBufferLimits(
+            _handle, maxBufferSize, maxStorageBufferBindingSize,
+            deviceGeneration,
+          ),
+    );
+    if (limits == null && _hadCurrentDevice) _deviceLostCallback?.call();
+    _hadCurrentDevice = limits != null;
+    return limits;
+  }
 
   @override
   Future<void> initializeContext() async {
-    await GpuCompletion.run(
-      (port, token) =>
-          mgpuContextInitializeAsyncToPort(_handle, port, token),
-      (callback) => ffi.mgpuContextInitializeAsync(_handle, callback),
-    );
+    if (_destroyed) throw StateError('GPU context has retired');
+    if (_epoch != null) {
+      if (currentDeviceBufferLimits?.deviceGeneration == _epoch!.generation) return;
+      throw StateError('Lost GPU context requires explicit retirement');
+    }
+    try {
+      final initialized = await GpuCompletion.run(
+        (port, token) => mgpuContextInitializeAsyncToPort(_handle, port, token),
+        (callback) => ffi.mgpuContextInitializeAsync(_handle, callback),
+      );
+      if (!initialized || currentDeviceBufferLimits == null) {
+        throw StateError('GPU context initialization failed or device is lost');
+      }
+      _epoch = _FfiDeviceEpoch.retain(_handle);
+    } catch (_) {
+      // Nothing else can free the handle: the public wrapper refuses destroy()
+      // after a failed init and has no finalizer. A retry needs a new platform.
+      await destroyContext();
+      rethrow;
+    }
+  }
+
+  /// Synchronously start a trusted native consumer of this context. The
+  /// consumer must retain its ready-context lease inside [start] before
+  /// transferring work to a thread. An int callback cannot suspend across
+  /// context destruction. This does not initialize or replace a device and is
+  /// available separately on [MinigpuFfi] for the ready display context.
+  int withLiveExternalPoolContext(
+    int Function(Pointer<Void> installedQuery, Pointer<Void> context) start,
+  ) {
+    if (_destroyed) throw StateError('GPU context has retired');
+    return start(externalPoolQueryFunctionForHost, _handle.cast<Void>());
   }
 
   @override
   Future<void> destroyContext() async {
     if (_destroyed) return;
     _destroyed = true;
+    _hadCurrentDevice = false;
+    _epoch?.release();
+    _epoch = null;
     ffi.mgpuDestroyContextHandle(_handle);
   }
 
   @override
+  Future<void> waitForSubmittedWork() async {
+    // A destroyed handle is freed native memory, never a key to look up.
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    return _waitForSubmittedWork(
+      (port, token) =>
+          mgpuContextWaitForSubmittedWorkAsyncToPort(_handle, port, token),
+    );
+  }
+
+  @override
   PlatformComputeShader createComputeShader() {
+    if (_destroyed) throw StateError('GPU context is destroyed');
     final self = ffi.mgpuContextCreateComputeShader(_handle);
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
     return FfiComputeShader(self);
@@ -560,14 +1351,96 @@ class FfiSecondaryPlatform extends MinigpuPlatform {
 
   @override
   PlatformBuffer createBuffer(int bufferSize, BufferDataType dataType) {
-    final self =
-        ffi.mgpuContextCreateBuffer(_handle, bufferSize, dataType.index);
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    // The native size is a 32-bit int (see the default context's createBuffer).
+    RangeError.checkValueInInterval(bufferSize, 0, 0x7fffffff, 'bufferSize');
+    final self = ffi.mgpuContextCreateBuffer(
+      _handle,
+      bufferSize,
+      dataType.index,
+    );
     if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
-    return FfiBuffer(self);
+    return FfiBuffer(
+      self,
+      sizeBytes: FfiBuffer._legacyPhysicalBytes(bufferSize, dataType),
+    );
+  }
+
+  @override
+  PlatformBuffer createBufferFromDescriptor(BufferDescriptor descriptor) {
+    descriptor.validate();
+    if (!_hasBufferDescriptorV1()) {
+      if (descriptor.usage == BufferUsage.legacy) {
+        return createBuffer(descriptor.sizeBytes, BufferDataType.uint32);
+      }
+      throw UnsupportedError(
+        'Explicit buffer usage is unsupported by this binary',
+      );
+    }
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    final self = ffi.mgpuContextCreateBufferWithUsage(
+      _handle,
+      descriptor.sizeBytes,
+      descriptor.usage,
+    );
+    if (self == nullptr) throw MinigpuPlatformOutOfMemoryException();
+    return FfiBuffer(self, sizeBytes: descriptor.sizeBytes);
+  }
+
+  @override
+  PlatformTexture createTexture(TextureDescriptor descriptor) {
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned textures are unsupported by this binary');
+    }
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    final texture = ffi.mgpuContextCreateTexture2D(
+      _handle,
+      descriptor.width,
+      descriptor.height,
+      descriptor.format.wireCode,
+      descriptor.usage,
+      descriptor.arrayLayerCount,
+      descriptor.mipLevelCount,
+    );
+    if (texture == nullptr) throw StateError('Texture creation failed');
+    return FfiTexture(texture);
+  }
+
+  @override
+  PlatformSampler createSampler(SamplerDescriptor descriptor) {
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned samplers are unsupported by this binary');
+    }
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    final sampler = ffi.mgpuContextCreateSampler(
+      _handle,
+      descriptor.addressModeU.wireCode,
+      descriptor.addressModeV.wireCode,
+      descriptor.addressModeW.wireCode,
+      descriptor.magFilter.wireCode,
+      descriptor.minFilter.wireCode,
+      descriptor.mipmapFilter.wireCode,
+      descriptor.lodMinClamp,
+      descriptor.lodMaxClamp,
+      descriptor.compare?.wireCode ?? 0,
+    );
+    if (sampler == nullptr) throw StateError('Sampler creation failed');
+    return FfiSampler(sampler);
+  }
+
+  @override
+  PlatformRenderPipeline createRenderPipeline(
+    RenderPipelineDescriptor descriptor,
+  ) {
+    if (_destroyed) throw StateError('GPU context is destroyed');
+    return _createFfiRenderPipeline(descriptor, _handle);
   }
 
   @override
   String? get selectedAdapterName {
+    // Reachable through Minigpu.adapterName after a failed init released the
+    // handle, so this must not touch it once destroyed.
+    if (_destroyed) return null;
     const cap = 256;
     final buf = malloc.allocate<Char>(cap);
     try {
@@ -585,6 +1458,29 @@ final class FfiComputeShader implements PlatformComputeShader {
   FfiComputeShader(Pointer<ffi.MGPUComputeShader> self) : _self = self;
 
   final Pointer<ffi.MGPUComputeShader> _self;
+  bool _destroyed = false;
+
+  /// Synchronously bind a trusted host's retained GPU input. Never serialize
+  /// this pointer or retain it after this scope. The native binder must check
+  /// the shader's actual device/context and its current input authority.
+  int withNativeShaderForHostInterop(int Function(Pointer<Void>) bind) {
+    if (_destroyed) throw StateError('Compute shader has retired');
+    return bind(_self.cast<Void>());
+  }
+
+  /// Trusted host cleanup after actual GPU input reads. Removes cached input
+  /// and bind-group references on the same GPU FIFO while keeping the pipeline.
+  @override
+  void releaseTextureBindingAfterGpuRead(int slot) {
+    if (_destroyed) throw StateError('Compute shader has retired');
+    final status = mgpuReleaseTextureBinding(_self, slot);
+    if (status == _shaderBindBusy) {
+      throw StateError('GPU input binding could not retire: $_shaderBusyReason');
+    }
+    if (status != 0) {
+      throw StateError('GPU input binding could not retire');
+    }
+  }
 
   @override
   void loadKernelString(String kernelString) {
@@ -614,17 +1510,146 @@ final class FfiComputeShader implements PlatformComputeShader {
   }
 
   @override
+  void setBufferRange(
+    int slot,
+    PlatformBuffer buffer,
+    BufferBindingDescriptor descriptor,
+  ) {
+    if (!_hasBufferBindingV1()) {
+      throw UnsupportedError(
+        'Explicit buffer ranges are unsupported by this binary',
+      );
+    }
+    final result = ffi.mgpuSetBufferRange(
+      _self,
+      slot,
+      (buffer as FfiBuffer)._self,
+      descriptor.kind.wireCode,
+      descriptor.offsetBytes,
+      descriptor.sizeBytes,
+    );
+    switch (result) {
+      case 0:
+        return;
+      case 1:
+        throw ArgumentError('Invalid buffer range binding');
+      case 2:
+        throw StateError('GPU device is unavailable');
+      case _shaderBindBusy:
+        throw StateError('Buffer range binding refused: $_shaderBusyReason');
+      default:
+        throw StateError('Buffer range binding failed');
+    }
+  }
+
+  @override
+  void setTexture(int slot, PlatformTextureView view, TextureBindingKind kind) {
+    if (_destroyed) {
+      throw StateError('Compute shader is destroyed');
+    }
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned textures are unsupported by this binary');
+    }
+    if (view is! FfiTextureView) {
+      throw ArgumentError.value(view, 'view', 'Expected an FFI texture view');
+    }
+    if (view._destroyed) {
+      throw StateError('Texture view is destroyed');
+    }
+    final status = ffi.mgpuSetOwnedTexture(
+      _self,
+      slot,
+      view._self,
+      kind.wireCode,
+    );
+    if (status != 0) {
+      _textureStatus(status, 'Texture binding');
+    }
+  }
+
+  @override
+  void setSampler(int slot, PlatformSampler sampler, SamplerBindingKind kind) {
+    if (_destroyed) {
+      throw StateError('Compute shader is destroyed');
+    }
+    if (!_hasTextureResourceV1()) {
+      throw UnsupportedError('Owned samplers are unsupported by this binary');
+    }
+    if (sampler is! FfiSampler) {
+      throw ArgumentError.value(sampler, 'sampler', 'Expected an FFI sampler');
+    }
+    if (sampler._destroyed) {
+      throw StateError('Sampler is destroyed');
+    }
+    final status = ffi.mgpuSetOwnedSampler(
+      _self,
+      slot,
+      sampler._self,
+      kind.wireCode,
+    );
+    if (status != 0) {
+      _textureStatus(status, 'Sampler binding');
+    }
+  }
+
+  @override
   Future<void> dispatch(int groupsX, int groupsY, int groupsZ) async {
     // Awaited dispatches are the densest source of completions in a codec
     // frame (5-10 per frame), so this is where the per-call NativeCallable hurt
     // most: the C layer cannot cancel an enqueued dispatch, and a trampoline
     // closed while one is still queued aborts the process.
-    await GpuCompletion.run(
-      (port, token) =>
-          mgpuDispatchAsyncToPort(_self, groupsX, groupsY, groupsZ, port, token),
+    //
+    // An empty grid is a valid WebGPU dispatch that does nothing; the C layer
+    // refuses it, so answer it here rather than report it as a failure.
+    if (groupsX == 0 || groupsY == 0 || groupsZ == 0) return;
+    final submitted = await GpuCompletion.run(
+      (port, token) => mgpuDispatchAsyncToPort(
+        _self,
+        groupsX,
+        groupsY,
+        groupsZ,
+        port,
+        token,
+      ),
       (callback) =>
           ffi.mgpuDispatchAsync(_self, groupsX, groupsY, groupsZ, callback),
     );
+    if (!submitted) {
+      throw StateError(
+        'Compute dispatch ($groupsX, $groupsY, $groupsZ) was not submitted: '
+        'the pipeline or bind group failed to build, a bound resource was '
+        'destroyed, or the device is gone',
+      );
+    }
+  }
+
+  /// Set once the loaded library proves it has no build-only export.
+  static bool _cannotBuildAlone = false;
+
+  @override
+  Future<void> buildPipeline() async {
+    if (_cannotBuildAlone) return dispatch(1, 1, 1);
+    final bool built;
+    try {
+      final posted = GpuCompletion.tryPort(
+        (port, token) =>
+            mgpuComputeShaderBuildPipelineAsyncToPort(_self, port, token),
+      );
+      // A build that cannot post waits for the GPU worker on this thread.
+      built = posted != null
+          ? await posted
+          : mgpuComputeShaderBuildPipeline(_self) == 1;
+    } on ArgumentError {
+      // A library from before the export: warm up the old way, one workgroup.
+      _cannotBuildAlone = true;
+      return dispatch(1, 1, 1);
+    }
+    if (!built) {
+      throw StateError(
+        'Compute pipeline was not built: no kernel or bindings, the shader is '
+        'closed or busy, or the kernel failed to compile',
+      );
+    }
   }
 
   @override
@@ -636,15 +1661,421 @@ final class FfiComputeShader implements PlatformComputeShader {
 
   @override
   void destroy() {
+    if (_destroyed) {
+      return;
+    }
+    _destroyed = true;
     ffi.mgpuDestroyComputeShader(_self);
+  }
+}
+
+// Owned texture FFI
+final class FfiTexture implements PlatformTexture {
+  FfiTexture(this._self);
+
+  final Pointer<ffi.MGPUTexture> _self;
+  bool _destroyed = false;
+
+  @override
+  bool get supportsRegionWrite {
+    if (_destroyed) return false;
+    try {
+      return ffi.mgpuTextureRegionUploadVersion() == 1;
+    } on ArgumentError {
+      return false; // The installed binary may predate this additive export.
+    }
+  }
+
+  @override
+  PlatformTextureView createView(TextureViewDescriptor descriptor) {
+    _checkLive();
+    final view = ffi.mgpuCreateTextureView(
+      _self,
+      descriptor.dimension.wireCode,
+      descriptor.baseMipLevel,
+      descriptor.mipLevelCount,
+      descriptor.baseArrayLayer,
+      descriptor.arrayLayerCount,
+    );
+    if (view == nullptr) {
+      throw StateError('Texture view creation failed');
+    }
+    return FfiTextureView(view);
+  }
+
+  @override
+  Future<void> write(
+    Uint8List bytes, {
+    int mipLevel = 0,
+    int arrayLayer = 0,
+  }) async {
+    _checkLive();
+    // C copies the payload before returning, so the list's own storage is
+    // passed (leaf call) instead of a malloc'd copy of the frame.
+    final status = ffi.mgpuWriteTexture2DLeaf(
+      _self,
+      bytes.address,
+      bytes.lengthInBytes,
+      mipLevel,
+      arrayLayer,
+    );
+    if (status != 0) {
+      _textureStatus(status, 'Texture upload');
+    }
+  }
+
+  @override
+  Future<void> writeRegion(
+    Uint8List bytes, {
+    required int x,
+    required int y,
+    required int width,
+    required int height,
+    int mipLevel = 0,
+    int arrayLayer = 0,
+  }) async {
+    _checkLive();
+    // Refuse unsafe narrowing even if called without the public wrapper.
+    if (x < 0 ||
+        x >= 32768 ||
+        y < 0 ||
+        y >= 32768 ||
+        width <= 0 ||
+        width > 32768 ||
+        height <= 0 ||
+        height > 32768 ||
+        mipLevel < 0 ||
+        mipLevel > 15 ||
+        arrayLayer < 0 ||
+        arrayLayer >= 32768 ||
+        bytes.isEmpty ||
+        bytes.lengthInBytes > 0x7fffffff) {
+      throw ArgumentError('Invalid texture region upload');
+    }
+    if (!supportsRegionWrite) {
+      throw UnsupportedError('Region uploads are unsupported by this binary');
+    }
+    final int status;
+    try {
+      // Leaf call on the list's own storage; see write().
+      status = ffi.mgpuWriteTextureRegion2DLeaf(
+        _self,
+        bytes.address,
+        bytes.lengthInBytes,
+        x,
+        y,
+        width,
+        height,
+        mipLevel,
+        arrayLayer,
+      );
+    } on ArgumentError {
+      throw UnsupportedError('Region uploads are unsupported by this binary');
+    }
+    if (status != 0) _textureStatus(status, 'Texture region upload');
+  }
+
+  @override
+  void destroy() {
+    if (_destroyed) {
+      return;
+    }
+    _destroyed = true;
+    ffi.mgpuDestroyTexture(_self);
+  }
+
+  void _checkLive() {
+    if (_destroyed) {
+      throw StateError('Texture is destroyed');
+    }
+  }
+}
+
+final class FfiTextureView implements PlatformTextureView {
+  FfiTextureView(this._self);
+
+  final Pointer<ffi.MGPUTextureView> _self;
+  bool _destroyed = false;
+
+  @override
+  void destroy() {
+    if (_destroyed) {
+      return;
+    }
+    _destroyed = true;
+    ffi.mgpuDestroyTextureView(_self);
+  }
+}
+
+final class FfiSampler implements PlatformSampler {
+  FfiSampler(this._self);
+
+  final Pointer<ffi.MGPUSampler> _self;
+  bool _destroyed = false;
+
+  @override
+  void destroy() {
+    if (_destroyed) {
+      return;
+    }
+    _destroyed = true;
+    ffi.mgpuDestroySampler(_self);
+  }
+}
+
+final class FfiRenderPipeline implements PlatformRenderPipeline {
+  FfiRenderPipeline(this._self);
+
+  final Pointer<ffi.MGPURenderPipeline> _self;
+  bool _destroyed = false;
+  Completer<void>? _settled;
+
+  /// Set once the loaded library proves it cannot signal a settle.
+  static bool _cannotSignalSettle = false;
+
+  @override
+  int get status {
+    if (_destroyed) return 3;
+    try {
+      return ffi.mgpuRenderPipelineStatus(_self);
+    } on ArgumentError {
+      throw UnsupportedError(
+        'This native minigpu build does not expose raster pipeline status',
+      );
+    }
+  }
+
+  @override
+  Future<void>? get settled {
+    final known = _settled;
+    if (known != null) return known.future;
+    if (_cannotSignalSettle) return null;
+    final settled = Completer<void>();
+    if (_destroyed) {
+      settled.complete();
+    } else {
+      final Future<bool>? posted;
+      try {
+        posted = GpuCompletion.tryPort(
+          (port, token) =>
+              mgpuRenderPipelineNotifySettledToPort(_self, port, token),
+        );
+      } on ArgumentError {
+        // A native build without the export: the caller polls instead.
+        _cannotSignalSettle = true;
+        return null;
+      }
+      if (posted == null) {
+        _cannotSignalSettle = true;
+        return null;
+      }
+      // Ready, failed and closed all count; the status says which.
+      posted.then((_) {
+        if (!settled.isCompleted) settled.complete();
+      });
+    }
+    _settled = settled;
+    return settled.future;
+  }
+
+  @override
+  String get diagnostic {
+    if (_destroyed) return 'Render pipeline is destroyed';
+    return using((Arena arena) {
+      final bytes = arena<Uint8>(_maxRasterDiagnosticBytes + 1);
+      final int length;
+      try {
+        length = ffi.mgpuRenderPipelineDiagnostic(
+          _self,
+          bytes.cast<Char>(),
+          _maxRasterDiagnosticBytes + 1,
+        );
+      } on ArgumentError {
+        throw UnsupportedError(
+          'This native minigpu build does not expose raster diagnostics',
+        );
+      }
+      if (length < 0 || length > _maxRasterDiagnosticBytes) {
+        return 'Render pipeline diagnostic was invalid';
+      }
+      return utf8.decode(bytes.asTypedList(length), allowMalformed: true);
+    });
+  }
+
+  @override
+  List<int>? get bindingCacheStats {
+    if (_destroyed) return null;
+    try {
+      return List<int>.unmodifiable([
+        for (var selector = 0; selector < 4; selector++)
+          ffi.mgpuRenderPipelineBindingStat(_self, selector).toInt(),
+      ]);
+    } on ArgumentError {
+      // A stale packaged native library is still usable, but cannot prove
+      // retained bindings. Callers surface the missing receipt explicitly.
+      return null;
+    }
+  }
+
+  @override
+  Future<void> submitRender({
+    required PlatformTextureView color,
+    PlatformTextureView? depth,
+    required List<double> clear,
+    required int loadFlags,
+    required List<PlatformBuffer> buffers,
+    required List<PlatformTextureView> views,
+    required List<PlatformSampler> samplers,
+    required List<int> commands,
+  }) async {
+    if (_destroyed) throw StateError('Render pipeline is destroyed');
+    if (color is! FfiTextureView ||
+        (depth != null && depth is! FfiTextureView) ||
+        buffers.any((buffer) => buffer is! FfiBuffer) ||
+        views.any((view) => view is! FfiTextureView) ||
+        samplers.any((sampler) => sampler is! FfiSampler)) {
+      throw ArgumentError('Render resources belong to another backend');
+    }
+    final ffiColor = color;
+    final ffiDepth = depth as FfiTextureView?;
+    final ffiBuffers = buffers.cast<FfiBuffer>();
+    final ffiViews = views.cast<FfiTextureView>();
+    final ffiSamplers = samplers.cast<FfiSampler>();
+    if (ffiColor._destroyed || (ffiDepth?._destroyed ?? false)) {
+      throw StateError('Render attachment view is destroyed');
+    }
+    if (ffiBuffers.any((buffer) => buffer._destroyed)) {
+      throw StateError('Render buffer is destroyed');
+    }
+    if (ffiViews.any((view) => view._destroyed)) {
+      throw StateError('Render texture view is destroyed');
+    }
+    if (ffiSamplers.any((sampler) => sampler._destroyed)) {
+      throw StateError('Render sampler is destroyed');
+    }
+    _checkRasterSubmission(
+      clear,
+      loadFlags,
+      ffiDepth != null,
+      buffers,
+      views,
+      samplers,
+      commands,
+    );
+    final result = using((Arena arena) {
+      final clearPtr = arena<Float>(5);
+      final commandPtr = commands.isEmpty
+          ? nullptr.cast<Uint32>()
+          : arena<Uint32>(commands.length);
+      final bufferPtr = ffiBuffers.isEmpty
+          ? nullptr.cast<Pointer<ffi.MGPUBuffer>>()
+          : arena<Pointer<ffi.MGPUBuffer>>(ffiBuffers.length);
+      final viewPtr = ffiViews.isEmpty
+          ? nullptr.cast<Pointer<ffi.MGPUTextureView>>()
+          : arena<Pointer<ffi.MGPUTextureView>>(ffiViews.length);
+      final samplerPtr = ffiSamplers.isEmpty
+          ? nullptr.cast<Pointer<ffi.MGPUSampler>>()
+          : arena<Pointer<ffi.MGPUSampler>>(ffiSamplers.length);
+      clearPtr.asTypedList(5).setAll(0, clear);
+      if (commands.isNotEmpty) {
+        commandPtr.asTypedList(commands.length).setAll(0, commands);
+      }
+      for (var i = 0; i < ffiBuffers.length; i++) {
+        bufferPtr[i] = ffiBuffers[i]._self;
+      }
+      for (var i = 0; i < ffiViews.length; i++) {
+        viewPtr[i] = ffiViews[i]._self;
+      }
+      for (var i = 0; i < ffiSamplers.length; i++) {
+        samplerPtr[i] = ffiSamplers[i]._self;
+      }
+      try {
+        return ffi.mgpuSubmitRender(
+          _self,
+          ffiColor._self,
+          ffiDepth?._self ?? nullptr,
+          clearPtr,
+          loadFlags,
+          bufferPtr,
+          ffiBuffers.length,
+          viewPtr,
+          ffiViews.length,
+          samplerPtr,
+          ffiSamplers.length,
+          commandPtr,
+          commands.length,
+        );
+      } on ArgumentError {
+        throw UnsupportedError(
+          'This native minigpu build does not expose raster submission',
+        );
+      }
+    });
+    if (result != 0) _textureStatus(result, 'Render submission');
+  }
+
+  @override
+  void destroy() {
+    if (_destroyed) return;
+    try {
+      ffi.mgpuDestroyRenderPipeline(_self);
+      _destroyed = true;
+    } on ArgumentError {
+      throw UnsupportedError(
+        'This native minigpu build does not expose raster pipeline destruction',
+      );
+    }
+    // The native close posts too, but a waiter need not wait for the port.
+    final settled = _settled;
+    if (settled != null && !settled.isCompleted) settled.complete();
   }
 }
 
 // Buffer FFI
 final class FfiBuffer implements PlatformBuffer {
-  FfiBuffer(Pointer<ffi.MGPUBuffer> self) : _self = self;
+  FfiBuffer(Pointer<ffi.MGPUBuffer> self, {int? sizeBytes})
+      : _self = self,
+        _sizeBytes = sizeBytes;
 
   final Pointer<ffi.MGPUBuffer> _self;
+
+  /// The GPU allocation's size in bytes, or null when the creator cannot know
+  /// it. Writes and reads past it are refused HERE: the native typed writes
+  /// throw C++ exceptions through the FFI boundary, and an out-of-range read
+  /// would hand back whatever the scratch held.
+  final int? _sizeBytes;
+
+  /// The bytes the legacy `(bufferSize, dataType)` creators allocate. Mirrors
+  /// `Buffer::createBuffer` (packed 8/16-bit words, 4-byte minimum and
+  /// alignment) on the 32-bit C `int` the binding actually passes. Null when
+  /// that int is negative, which C turns into a size no device accepts.
+  static int? _legacyPhysicalBytes(int bufferSize, BufferDataType dataType) {
+    final int s = bufferSize.toSigned(32);
+    if (s < 0) return null;
+    final int bytes;
+    switch (dataType) {
+      case BufferDataType.int8:
+      case BufferDataType.uint8:
+        bytes = ((s + 3) ~/ 4) * 4;
+      case BufferDataType.int16:
+      case BufferDataType.uint16:
+        bytes = ((s ~/ 2 + 1) ~/ 2) * 4;
+      case BufferDataType.int64:
+      case BufferDataType.uint64:
+      case BufferDataType.float64:
+        bytes = (s ~/ 8) * 8;
+      case BufferDataType.float16: // allocated as float32 natively
+      case BufferDataType.float32:
+      case BufferDataType.int32:
+      case BufferDataType.uint32:
+        bytes = (s ~/ 4) * 4;
+    }
+    return ((bytes < 4 ? 4 : bytes) + 3) & ~3;
+  }
+
+  /// Web-only concept (Emscripten WGPUBuffer handle); nothing here.
+  @override
+  int get webBufferHandle => 0;
 
   // --- Pooled scratch + readback callback ---------------------------------
   // The read/write hot path used to `malloc` a scratch buffer and allocate a
@@ -740,35 +2171,85 @@ final class FfiBuffer implements PlatformBuffer {
   ) {
     switch (dataType) {
       case BufferDataType.int8:
-        ffi.mgpuReadAsyncInt8(_self, nativePtr.cast<Int8>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncInt8(
+          _self,
+          nativePtr.cast<Int8>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.uint8:
-        ffi.mgpuReadAsyncUint8(_self, nativePtr.cast<Uint8>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncUint8(
+          _self,
+          nativePtr.cast<Uint8>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.int16:
-        ffi.mgpuReadAsyncInt16(_self, nativePtr.cast<Int16>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncInt16(
+          _self,
+          nativePtr.cast<Int16>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.uint16:
-        ffi.mgpuReadAsyncUint16(_self, nativePtr.cast<Uint16>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncUint16(
+          _self,
+          nativePtr.cast<Uint16>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.int32:
-        ffi.mgpuReadAsyncInt32(_self, nativePtr.cast<Int32>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncInt32(
+          _self,
+          nativePtr.cast<Int32>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.uint32:
-        ffi.mgpuReadAsyncUint32(_self, nativePtr.cast<Uint32>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncUint32(
+          _self,
+          nativePtr.cast<Uint32>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.int64:
-        ffi.mgpuReadAsyncInt64(_self, nativePtr.cast<Int64>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncInt64(
+          _self,
+          nativePtr.cast<Int64>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.uint64:
-        ffi.mgpuReadAsyncUint64(_self, nativePtr.cast<Uint64>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncUint64(
+          _self,
+          nativePtr.cast<Uint64>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.float32:
-        ffi.mgpuReadAsyncFloat(_self, nativePtr.cast<Float>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncFloat(
+          _self,
+          nativePtr.cast<Float>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.float64:
-        ffi.mgpuReadAsyncDouble(_self, nativePtr.cast<Double>(), elementsToRead,
-            elementOffset, callback);
+        ffi.mgpuReadAsyncDouble(
+          _self,
+          nativePtr.cast<Double>(),
+          elementsToRead,
+          elementOffset,
+          callback,
+        );
       case BufferDataType.float16:
         throw UnimplementedError(
           'BufferDataType.float16 read is not implemented yet.',
@@ -794,6 +2275,8 @@ final class FfiBuffer implements PlatformBuffer {
     int byteOffset = 0,
     BufferDataType dataType = BufferDataType.float32,
   }) async {
+    // The native object may already be deleted; never hand C its pointer.
+    if (_destroyed) throw StateError('Buffer is destroyed');
     // Determine element size based on data type.
     final int elementSize;
     switch (dataType) {
@@ -882,11 +2365,23 @@ final class FfiBuffer implements PlatformBuffer {
       );
     }
 
+    // The source range must lie inside the GPU buffer: C logs an out-of-range
+    // read and completes it, which would hand back stale scratch bytes. The
+    // first test also keeps the product below from overflowing.
+    final int? sizeBytes = _sizeBytes;
+    if (sizeBytes != null &&
+        (elementOffset > sizeBytes ||
+            (elementOffset + elementsToRead) * elementSize > sizeBytes)) {
+      throw RangeError(
+        'Read range (offset: $elementOffset, count: $elementsToRead) exceeds the GPU buffer ($sizeBytes bytes)',
+      );
+    }
+
     // Use the pooled scratch on the common (non-reentrant) path; fall back to
     // a private local allocation if a read is already in flight or the
     // transfer is too large to pin (see _maxPooledScratchBytes).
-    final bool usePool = !_readInFlight &&
-        !_destroyed &&
+    final bool usePool =
+        !_readInFlight &&
         bytesToAllocate <= _maxPooledScratchBytes;
     final Pointer<NativeType> nativePtr;
     final bool ownsLocal;
@@ -902,9 +2397,9 @@ final class FfiBuffer implements PlatformBuffer {
     try {
       // ONE issue + ONE await for every element type. The port entry point
       // takes the element type as an argument, so the ten typed native calls
-      // collapse into one; the fallback keeps the typed form. What remains in
-      // the switch below is only the copy-out into [outputData].
-      await GpuCompletion.run(
+      // collapse into one; the fallback keeps the typed form. What remains
+      // below is only the copy-out into [outputData].
+      final bool completed = await GpuCompletion.run(
         (port, token) => mgpuReadAsyncToPort(
           _self,
           nativePtr.cast<Void>(),
@@ -922,202 +2417,37 @@ final class FfiBuffer implements PlatformBuffer {
           callback,
         ),
       );
-
-      // Copy the landed bytes into the caller's typed buffer.
-      switch (dataType) {
-        case BufferDataType.int8:
-          {
-            final List<int> data = nativePtr.cast<Int8>().asTypedList(
-              elementsToRead,
-            );
-            // Copy data into the correct portion of the outputData
-            if (outputData is Int8List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setInt8(startByte + i * elementSize, data[i]);
-              }
-            } else {
-              /* Handle other potential TypedData types if needed */
-            }
-          }
-          break;
-        case BufferDataType.int16:
-          {
-            final List<int> data = nativePtr.cast<Int16>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Int16List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setInt16(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.int32:
-          {
-            final List<int> data = nativePtr.cast<Int32>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Int32List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setInt32(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.int64:
-          {
-            final List<int> data = nativePtr.cast<Int64>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Int64List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setInt64(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.uint8:
-          {
-            final List<int> data = nativePtr.cast<Uint8>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Uint8List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setUint8(startByte + i * elementSize, data[i]);
-              }
-            }
-          }
-          break;
-        case BufferDataType.uint16:
-          {
-            final List<int> data = nativePtr.cast<Uint16>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Uint16List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setUint16(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.uint32:
-          {
-            final List<int> data = nativePtr.cast<Uint32>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Uint32List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setUint32(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.uint64:
-          {
-            final List<int> data = nativePtr.cast<Uint64>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Uint64List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setUint64(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.float16:
-          break; // rejected above, before the read was issued
-        case BufferDataType.float32:
-          {
-            final List<double> data = nativePtr.cast<Float>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Float32List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setFloat32(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
-        case BufferDataType.float64:
-          {
-            final List<double> data = nativePtr.cast<Double>().asTypedList(
-              elementsToRead,
-            );
-            if (outputData is Float64List) {
-              outputData.setRange(0, elementsToRead, data);
-            } else if (outputData is ByteData) {
-              final int startByte = elementOffset * elementSize;
-              for (int i = 0; i < elementsToRead; ++i) {
-                outputData.setFloat64(
-                  startByte + i * elementSize,
-                  data[i],
-                  Endian.host,
-                );
-              }
-            }
-          }
-          break;
+      // A failed read leaves the scratch as it was (the previous read's bytes,
+      // or uninitialised memory), so nothing may be copied out of it.
+      if (!completed) {
+        throw StateError('Buffer read failed: the device is lost or the read '
+            'was refused');
       }
+
+      // Copy the landed bytes into the START of [outputData] (elementOffset is
+      // a GPU-side offset, not an output one). They are already host-endian
+      // values of [dataType], so one byte copy serves a list of that type,
+      // ByteData, or a list of any other element type alike; the capacity
+      // check above guarantees the destination holds them.
+      outputData.buffer
+          .asUint8List(outputData.offsetInBytes, bytesToAllocate)
+          .setRange(
+            0,
+            bytesToAllocate,
+            nativePtr.cast<Uint8>().asTypedList(bytesToAllocate),
+          );
     } finally {
       if (ownsLocal) {
         malloc.free(nativePtr);
       } else {
         _readInFlight = false;
+        // destroy() during this read left the pooled scratch to it; nothing
+        // can reuse it now.
+        if (_destroyed) {
+          malloc.free(nativePtr);
+          _readScratch = null;
+          _readScratchBytes = 0;
+        }
       }
     }
   }
@@ -1128,6 +2458,8 @@ final class FfiBuffer implements PlatformBuffer {
     int elementCount, {
     BufferDataType dataType = BufferDataType.float32,
   }) async {
+    // The native object may already be deleted; never hand C its pointer.
+    if (_destroyed) throw StateError('Buffer is destroyed');
     // Determine element size based on data type.
     final int elementSize;
     switch (dataType) {
@@ -1186,13 +2518,30 @@ final class FfiBuffer implements PlatformBuffer {
     }
 
     final int byteSize = elementCount * elementSize;
+    // Typed writes upload from offset 0, packed types padded to a 4-byte word.
+    // C only logs and drops a write past the end; the caller gets an error.
+    final int? sizeBytes = _sizeBytes;
+    if (sizeBytes != null && ((byteSize + 3) & ~3) > sizeBytes) {
+      throw RangeError(
+        'Write of $byteSize bytes exceeds the GPU buffer ($sizeBytes bytes)',
+      );
+    }
+    // The typed exports upload the elements' bytes unchanged at offset 0 and
+    // only zero-fill a partial last word. Whole words are therefore exactly a
+    // raw write of the list's own store, which needs no scratch copy; only an
+    // 8- or 16-bit write ending mid-word (or float16, rejected below) goes on.
+    if (byteSize % 4 == 0 && dataType != BufferDataType.float16) {
+      return writeRawBytes(
+        inputData.buffer.asUint8List(inputData.offsetInBytes, byteSize),
+      );
+    }
     // Int8/Uint8 writes are padded up to a 4-byte boundary by the native side.
     final int scratchBytes = (inputData is Int8List || inputData is Uint8List)
         ? ((byteSize + 3) & ~3)
         : byteSize;
 
-    final bool usePool = !_writeInFlight &&
-        !_destroyed &&
+    final bool usePool =
+        !_writeInFlight &&
         scratchBytes <= _maxPooledScratchBytes;
     final Pointer<NativeType> nativePtr;
     final bool ownsLocal;
@@ -1218,16 +2567,6 @@ final class FfiBuffer implements PlatformBuffer {
             .cast<Int16>()
             .asTypedList(elementCount)
             .setRange(0, elementCount, inputData);
-      } else if (inputData is Int32List && dataType == BufferDataType.int32) {
-        nativePtr
-            .cast<Int32>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
-      } else if (inputData is Int64List && dataType == BufferDataType.int64) {
-        nativePtr
-            .cast<Int64>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
       } else if (inputData is Uint8List && dataType == BufferDataType.uint8) {
         nativePtr
             .cast<Uint8>()
@@ -1238,39 +2577,17 @@ final class FfiBuffer implements PlatformBuffer {
             .cast<Uint16>()
             .asTypedList(elementCount)
             .setRange(0, elementCount, inputData);
-      } else if (inputData is Uint32List && dataType == BufferDataType.uint32) {
-        nativePtr
-            .cast<Uint32>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
-      } else if (inputData is Uint64List && dataType == BufferDataType.uint64) {
-        nativePtr
-            .cast<Uint64>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
-      } else if (inputData is Float32List &&
-          dataType == BufferDataType.float32) {
-        nativePtr
-            .cast<Float>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
-      } else if (inputData is Float64List &&
-          dataType == BufferDataType.float64) {
-        nativePtr
-            .cast<Double>()
-            .asTypedList(elementCount)
-            .setRange(0, elementCount, inputData);
       } else {
-        // Fallback using ByteData view (less efficient but handles generic TypedData)
-        final inputBytes = ByteData.view(
-          inputData.buffer,
-          inputData.offsetInBytes,
-          byteSize,
-        );
-        final nativeBytes = nativePtr.cast<Uint8>().asTypedList(byteSize);
-        for (int i = 0; i < byteSize; i++) {
-          nativeBytes[i] = inputBytes.getUint8(i);
-        }
+        // ByteData, or a list of another element type: its raw bytes, in one
+        // block copy rather than a Dart loop over every byte.
+        nativePtr
+            .cast<Uint8>()
+            .asTypedList(byteSize)
+            .setRange(
+              0,
+              byteSize,
+              inputData.buffer.asUint8List(inputData.offsetInBytes, byteSize),
+            );
       }
 
       // Switch to call the proper native function
@@ -1323,27 +2640,44 @@ final class FfiBuffer implements PlatformBuffer {
   /// `mgpuWriteBufferAt` a chunk (32 MiB) at a time, so a multi-GB weight
   /// upload never makes Dawn's staging ring hold more than one chunk.
   ///
-  /// NO HOST COPY. `TypedData.address` in a leaf call gives C the list's real
-  /// address, so the bytes go straight from the caller's list into
-  /// `wgpuQueueWriteBuffer`. This path used to memcpy the whole payload into a
-  /// native scratch first, purely to obtain a stable pointer — at 4K that was a
-  /// 33 MB host copy per frame, about half of the whole upload stage, on top of
-  /// the copy `wgpuQueueWriteBuffer` makes into its own staging ring.
+  /// NO DART-SIDE COPY. `TypedData.address` in a leaf call gives C the list's
+  /// real address, so while the WebGPU worker is idle the bytes go straight
+  /// from the caller's list into `wgpuQueueWriteBuffer`; C copies a chunk only
+  /// when the write has to queue behind work already queued on the worker.
+  /// This path used to memcpy the whole payload into a native scratch first,
+  /// purely to obtain a stable pointer — at 4K that was a 33 MB host copy per
+  /// frame, about half of the whole upload stage, on top of the copy
+  /// `wgpuQueueWriteBuffer` makes into its own staging ring.
   ///
-  /// See [ffi.mgpuWriteBufferAtLeaf] for why a leaf call is safe here.
+  /// See [ffi.mgpuWriteBufferAtLeaf] for why a leaf call is acceptable here.
   @override
   Future<void> writeRawBytes(Uint8List bytes, {int dstByteOffset = 0}) async {
+    if (_destroyed) throw StateError('Buffer is destroyed');
     if (bytes.length % 4 != 0 || dstByteOffset % 4 != 0) {
       throw ArgumentError('writeRawBytes needs 4-byte-aligned length/offset');
     }
+    // -4 passes the alignment test, and C sees it as a size_t near 2^64.
+    if (dstByteOffset < 0) {
+      throw RangeError.value(dstByteOffset, 'dstByteOffset', 'Cannot be negative');
+    }
     if (bytes.isEmpty) return;
+    final int? sizeBytes = _sizeBytes;
+    if (sizeBytes != null && dstByteOffset > sizeBytes - bytes.length) {
+      throw RangeError(
+        'Write of ${bytes.length} bytes at $dstByteOffset exceeds the GPU buffer ($sizeBytes bytes)',
+      );
+    }
     const chunkBytes = 32 << 20;
     // Fast path: one chunk, so the list itself is the argument and no view
     // object is built at all. This is the per-frame streaming shape (a 4K RGBA
     // frame is 33.2 MB, under the 33.55 MB chunk).
     if (bytes.length <= chunkBytes) {
-      ffi.mgpuWriteBufferAtLeaf(_self, bytes.address, bytes.length,
-          dstByteOffset);
+      ffi.mgpuWriteBufferAtLeaf(
+        _self,
+        bytes.address,
+        bytes.length,
+        dstByteOffset,
+      );
       return;
     }
     var off = 0;
@@ -1363,7 +2697,10 @@ final class FfiBuffer implements PlatformBuffer {
   void destroy() {
     if (_destroyed) return;
     _destroyed = true;
-    if (_readScratch != null) {
+    // A pooled read in flight is the worker's memcpy target until its
+    // completion arrives, so that read frees the scratch (see read()). Never
+    // wait for it here: a read that never completes must not hang destroy.
+    if (_readScratch != null && !_readInFlight) {
       malloc.free(_readScratch!);
       _readScratch = null;
     }
@@ -1375,7 +2712,8 @@ final class FfiBuffer implements PlatformBuffer {
     // read listener, which is a process abort if a read is still in flight —
     // the C layer cannot be told to forget a pointer it has already been
     // handed. Completion slots are pooled and never closed; see
-    // minigpu_ffi_completion.dart.
+    // minigpu_ffi_completion.dart. The native object itself is deleted on the
+    // buffer's WebGPU FIFO, behind every read already queued against it.
     ffi.mgpuDestroyBuffer(_self);
   }
 }

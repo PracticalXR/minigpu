@@ -154,27 +154,28 @@ void main() {
       // Single-consumer semantics must be BYTE-FOR-BYTE what they were:
       // init -> 1 -> real init, destroy -> 0 -> real teardown.
       //
-      // The EXACT counts are only observable when this suite owns the process.
       // In a whole-package run other suites are isolates attaching to the SAME
-      // process-global context and the absolute count moves underneath us —
-      // which is the fix working, not a failure. So: assert exact counts when
-      // we start from a quiet process, and assert the concurrency-safe
-      // invariants (attached => >= 1, context stays usable across a paired
-      // attach/detach) either way.
-      final base = ffi.mgpuContextRefCount();
-      final alone = base == 0;
-
+      // process-global context on other threads, so the absolute count moves
+      // underneath us — which is the fix working, not a failure. A count read
+      // across an await (an init takes a while) is therefore never exact. The
+      // exact steps are instead read around synchronous calls, microseconds
+      // apart, and retried until one pass is undisturbed.
       final gpu = Minigpu();
       await gpu.init();
       expect(ffi.mgpuContextRefCount(), greaterThanOrEqualTo(1));
-      if (alone) expect(ffi.mgpuContextRefCount(), 1);
 
       // A second attach from the same process (what a second isolate does)
       // must not re-initialize, and the FIRST detach must not tear down.
-      ffi.mgpuInitializeContext();
-      if (alone) expect(ffi.mgpuContextRefCount(), 2);
-      ffi.mgpuDestroyContext();
-      if (alone) expect(ffi.mgpuContextRefCount(), 1);
+      var balanced = false;
+      for (var i = 0; i < 100 && !balanced; i++) {
+        final before = ffi.mgpuContextRefCount();
+        ffi.mgpuInitializeContext();
+        final attached = ffi.mgpuContextRefCount();
+        ffi.mgpuDestroyContext();
+        final detached = ffi.mgpuContextRefCount();
+        balanced = attached == before + 1 && detached == before;
+      }
+      expect(balanced, isTrue, reason: 'attach adds one; detach takes it back');
       expect(ffi.mgpuContextRefCount(), greaterThanOrEqualTo(1));
 
       // The context must still be LIVE for the remaining consumer — this is
@@ -187,12 +188,27 @@ void main() {
       );
 
       await gpu.destroy();
-      if (alone) {
-        expect(
-          ffi.mgpuContextRefCount(),
-          0,
-          reason: 'the last detach must tear the context down',
-        );
+
+      // The last detach is observable only in a quiet window, when no other
+      // suite holds the context: attach from zero (a real, synchronous init),
+      // and if that left exactly our one reference, detach at once.
+      var quietProbes = 0;
+      for (var i = 0; i < 20 && quietProbes == 0; i++) {
+        if (ffi.mgpuContextRefCount() != 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+          continue;
+        }
+        ffi.mgpuInitializeContext();
+        final attached = ffi.mgpuContextRefCount();
+        ffi.mgpuDestroyContext();
+        final detached = ffi.mgpuContextRefCount();
+        if (attached != 1) continue; // another suite attached during the init
+        quietProbes++;
+        expect(detached, 0, reason: 'the last detach must tear the context down');
+      }
+      if (quietProbes == 0) {
+        // ignore: avoid_print
+        print('teardown-at-zero not observed: other suites held the context');
       }
     }, timeout: const Timeout(Duration(minutes: 2)));
 
