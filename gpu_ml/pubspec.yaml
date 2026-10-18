@@ -1,7 +1,7 @@
 name: gpu_ml
 description: GPU-accelerated ML inference for Dart and Flutter on WebGPU — GGUF loading, quantized weights (fused dequant kernels), and transformer/SSM building blocks on top of gpu_tensor.
 version: 0.1.0
-repository: https://github.com/PracticalXR/minigpu/tree/main/gpu_ml
+repository: https://github.com/PracticalXR/minigpu/tree/master/gpu_ml
 
 environment:
   sdk: ^3.11.4
