@@ -1,0 +1,20 @@
+name: gpu_pipeline
+description: A GPU-accelerated streaming pipeline for Dart and Flutter. Chain WGSL compute shaders, tensor ops and Dart functions into stages, and run them over media streams.
+version: 1.9.3
+repository: https://github.com/PracticalXR/minigpu/tree/master/gpu_pipeline
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  gpu_tensor: ^1.9.0
+  meta: ^1.15.0
+  minigpu: ^1.9.0
+  minigpu_web: ^1.9.0
+  web: ^1.1.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.29.0
+  build_runner: ^2.7.2
+  build_web_compilers: ^4.2.3

@@ -74,12 +74,6 @@ jobs:
             gpu_tensor \
             gpu_pipeline \
             gpu_ml; do
-            # gpu_pipeline is a gitlink with no .gitmodules entry, so the
-            # checkout leaves its directory empty: there is nothing to analyze.
-            if [ ! -f "$pkg/pubspec.yaml" ]; then
-              echo "::warning::$pkg has no pubspec.yaml in this checkout; skipped"
-              continue
-            fi
             echo "::group::analyze $pkg"
             (
               cd "$pkg"
