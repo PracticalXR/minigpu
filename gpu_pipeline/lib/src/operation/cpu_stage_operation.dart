@@ -53,18 +53,6 @@ class CPUStageOperation extends StageOperation {
     super.namedArguments,
   }) : _explicitExecutor = executor;
 
-  List<dynamic>? _resolvedPositional;
-  Map<String, dynamic>? _resolvedNamed;
-
-  @override
-  void applyResolvedArguments(
-    List<dynamic> positional,
-    Map<String, dynamic> named,
-  ) {
-    _resolvedPositional = positional;
-    _resolvedNamed = named;
-  }
-
   @override
   Future<Map<String, Tensor>> execute(
     Map<String, Tensor> inputs,
@@ -86,9 +74,6 @@ class CPUStageOperation extends StageOperation {
     ResourceCache cache,
   ) async {
     validateInputs(inputs);
-    // Currently not used, but kept for parity & future processors
-    final positional = _resolvedPositional;
-    final named = _resolvedNamed;
 
     // Step 1: Extract raw data and ranks from GPU tensors.
     // Reuse the per-key scratch buffer when possible so the hot path does not
@@ -436,7 +421,6 @@ class DynamicCPUOperation extends CPUStageOperation {
     List<String>? outputKeys,
   }) : super(
          processor: (rawInputs, ranks, runtimeParams) async {
-           final self = (rawInputs, ranks); // just to capture closure
            final merged = {...initialParameters, ...runtimeParams};
            return await _executeDynamicRaw(dartCode, rawInputs, ranks, merged);
          },

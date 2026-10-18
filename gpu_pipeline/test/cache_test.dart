@@ -492,16 +492,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       stage.setResourceCache(cache);
 
       print('  💥 Initializing stage with invalid shader...');
+      Object? error;
       try {
         await stage.initializeStage();
 
         final inputs = {'input': inputTensor};
         final outputs = await stage.process(inputs);
-        print('  ⚠️  Invalid shader executed successfully (unexpected)');
         outputs['input']?.destroy();
       } catch (e) {
+        error = e;
         print('  ❌ Expected shader compilation error: $e');
       }
+      // On native, minigpu fails the dispatch of a kernel that did not build
+      // with a StateError. That error must reach the caller as itself; the
+      // stage used to swallow it and call a method no shader has.
+      expect('$error', contains('Bad state'));
+      expect('$error', isNot(contains('NoSuchMethodError')));
 
       inputTensor.destroy();
       await stage.dispose();

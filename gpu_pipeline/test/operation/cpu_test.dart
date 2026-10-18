@@ -1,11 +1,9 @@
 import 'dart:typed_data';
-import 'dart:math' as math;
 import 'package:test/test.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
 import 'package:gpu_pipeline/src/operation/cpu_stage_operation.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_pipeline/src/pipeline_stage_builder.dart';
-import 'package:gpu_pipeline/src/pipeline.dart';
 
 void main() {
   group('CPU Operations', () {
@@ -346,7 +344,6 @@ void main() {
           analysisBuilder.withDynamicOutput('analyzed');
           analysisBuilder.executeCPU((inputs, ranks, params) async {
             final data = inputs['input']! as Float32List;
-            final shape = ranks['input']!;
 
             // Calculate statistics on CPU
             double sum = 0.0;

@@ -63,7 +63,7 @@ Future<void> testBasicTensorOperations() async {
     // Clean up
     testTensor.destroy();
     result.destroy();
-  } catch (e, stackTrace) {
+  } catch (e) {
     print('❌ Basic tensor test failed: $e');
     rethrow;
   }
@@ -119,8 +119,8 @@ Future<void> runSafeTensorExample() async {
 
     // Check outputs
     final output = pipeline.getStageOutput('safe_operations', 'test_stream');
-    if (output != null && output.containsKey('input')) {
-      print('📊 Final output shape: ${output['input']!.shape}');
+    if (output != null && output.containsKey('output')) {
+      print('📊 Final output shape: ${output['output']!.shape}');
     }
   } catch (e, stackTrace) {
     print('❌ Safe pipeline failed: $e');
@@ -507,12 +507,7 @@ Future<void> runMultiStreamMergingExample() async {
     debugEnabled: true,
   );
 
-  // Stage 1: Individual stream normalization (per-stream processing)
-  final normalizeStage = StageBuilder('normalize')
-      .op('divideScalar', arguments: [32768.0]) // Normalize 16-bit audio
-      .build();
-
-  // Stage 2: Stream merging using weighted sum
+  // Stage 1: Stream merging using weighted sum
   final mixerStage = StageBuilder('audio_mixer').executeShader('''
 @group(0) @binding(0) var<storage, read_write> input_0: array<f32>;
 @group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
@@ -525,7 +520,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 ''').build();
 
-  // Stage 3: Post-processing (processes merged stream)
+  // Stage 2: Post-processing (processes merged stream)
   final limiterStage = StageBuilder('limiter')
       .executeShaderFunction(
         '''
@@ -547,7 +542,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       .build();
 
   // Add stages with different processing modes
-  // pipeline.addStage(normalizeStage); // Per-stream processing
 
   // Merge streams with weighted sum
   pipeline.addMergeStage(mixerStage);
@@ -620,7 +614,7 @@ Future<void> validateOutput(
   String stageId, [
   String? streamId,
 ]) async {
-  final output = pipeline.getStageOutput(stageId, streamId!);
+  final output = pipeline.getStageOutput(stageId, streamId);
   if (output == null) {
     print(
       '❌ No output found for stage: $stageId${streamId != null ? ' (stream: $streamId)' : ''}',

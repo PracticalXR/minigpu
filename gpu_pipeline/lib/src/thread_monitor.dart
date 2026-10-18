@@ -25,14 +25,9 @@ class MainThreadMonitor {
   bool _isMonitoring = false;
   double _currentLoad = 0.0;
   Timer? _monitorTimer;
-  Timer? _microtaskTimer;
-  Timer? _memoryTimer;
-  Timer? _cpuTimer;
 
   // Event loop timing measurements
   final List<Duration> _eventLoopTimes = [];
-  final List<Duration> _microtaskDelays = [];
-  final List<Duration> _cpuSamples = [];
   DateTime? _lastMeasurement;
   bool _microtaskQueuePressured = false;
   bool _memoryPressure = false;
@@ -59,9 +54,6 @@ class MainThreadMonitor {
 
     _isMonitoring = true;
     _startEventLoopMonitoring();
-    //_startMicrotaskMonitoring();
-    //_startMemoryMonitoring();
-    //_startCpuMonitoring();
 
     print('📊 MainThreadMonitor singleton started');
   }
@@ -76,18 +68,8 @@ class MainThreadMonitor {
     _isMonitoring = false;
 
     _monitorTimer?.cancel();
-    _microtaskTimer?.cancel();
-    _memoryTimer?.cancel();
-    _cpuTimer?.cancel();
-
     _monitorTimer = null;
-    _microtaskTimer = null;
-    _memoryTimer = null;
-    _cpuTimer = null;
-
     _eventLoopTimes.clear();
-    _microtaskDelays.clear();
-    _cpuSamples.clear();
 
     _currentLoad = 0.0;
     _microtaskQueuePressured = false;
@@ -115,84 +97,6 @@ class MainThreadMonitor {
         _calculateLoad();
         _lastMeasurement = end;
       });
-    });
-  }
-
-  void _startMicrotaskMonitoring() {
-    _microtaskTimer = Timer.periodic(Duration(milliseconds: 10), (timer) {
-      final start = DateTime.now();
-
-      scheduleMicrotask(() {
-        final end = DateTime.now();
-        final delay = end.difference(start);
-
-        _microtaskDelays.add(delay);
-        if (_microtaskDelays.length > 10) {
-          _microtaskDelays.removeAt(0);
-        }
-
-        final avgDelay =
-            _microtaskDelays
-                .fold<Duration>(Duration.zero, (p, e) => p + e)
-                .inMicroseconds /
-            _microtaskDelays.length;
-
-        _microtaskQueuePressured = avgDelay > 2000; // 2ms
-      });
-    });
-  }
-
-  void _startMemoryMonitoring() {
-    _memoryTimer = Timer.periodic(Duration(seconds: 2), (timer) {
-      final start = DateTime.now();
-
-      // Small allocation test
-      final temp = <String>[];
-      for (int i = 0; i < 100; i++) {
-        temp.add('test_$i');
-      }
-      temp.clear();
-
-      final end = DateTime.now();
-      final gcTime = end.difference(start);
-
-      _memoryPressure = gcTime.inMilliseconds > 5;
-
-      if (_memoryPressure) {
-        print(
-          '⚠️ Memory pressure detected (GC time: ${gcTime.inMilliseconds}ms)',
-        );
-      }
-    });
-  }
-
-  void _startCpuMonitoring() {
-    _cpuTimer = Timer.periodic(Duration(milliseconds: 100), (timer) {
-      final start = DateTime.now();
-
-      // CPU work sample
-      var sum = 0;
-      for (int i = 0; i < 10000; i++) {
-        sum += i;
-      }
-
-      final end = DateTime.now();
-      final cpuTime = end.difference(start);
-
-      _cpuSamples.add(cpuTime);
-      if (_cpuSamples.length > 10) {
-        _cpuSamples.removeAt(0);
-      }
-
-      if (_cpuSamples.isNotEmpty) {
-        final avgCpuTime =
-            _cpuSamples
-                .fold<Duration>(Duration.zero, (p, e) => p + e)
-                .inMicroseconds /
-            _cpuSamples.length;
-
-        _highCpuUsage = avgCpuTime > 1000; // 1ms
-      }
     });
   }
 

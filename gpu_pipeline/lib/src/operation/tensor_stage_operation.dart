@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
-import 'package:gpu_pipeline/src/operation/operation_helpers.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
 import 'stage_operation.dart';
@@ -365,9 +363,6 @@ class TensorOperationRegistry {
 
   /// Clear all custom operations (keep built-in ones)
   static void clearCustomOperations() {
-    // Store built-in operations
-    final builtinOps = Map<String, TensorOperationInfo>.from(_operations);
-
     // Clear all operations
     _operations.clear();
 

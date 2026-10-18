@@ -223,19 +223,21 @@ class Pipeline {
       maxEvents: maxEvents,
     );
 
-    _threadMonitor.startMonitoring();
     _assetManager.setCacheLimit(maxMemoryMB * 1024 * 1024);
   }
 
   // Getters
   bool get isRunning => _isRunning;
   bool get isProcessing => _isProcessing;
+
+  /// The process-wide event-loop monitor. The pipeline does not start it:
+  /// call `startMonitoring()` to sample event-loop delay, and
+  /// `stopMonitoring()` when done, since it runs a 5 ms timer while on.
   MainThreadMonitor get threadMonitor => _threadMonitor;
   PipelineEventNotifier get eventNotifier => _eventNotifier;
   ResourceCache get resourceCache => _resourceCache;
   AssetManager get assetManager => _assetManager;
   ResourceGovernor get resourceGovernor => _resourceGovernor;
-  bool _stagesInitialized = false;
 
   // Message is a CLOSURE: Dart evaluates argument expressions eagerly, so a
   // plain String parameter paid for every hot-path interpolation (shapes,
@@ -596,11 +598,9 @@ class Pipeline {
       await _startAllStreams();
 
       _isRunning = true;
-      _stagesInitialized = true;
 
       _debugLog(() => '✅ Pipeline started successfully');
     } catch (e, stackTrace) {
-      _stagesInitialized = false;
       _eventNotifier.emit(
         PipelineErrorEvent(
           pipelineId: id,
@@ -1212,7 +1212,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         };
         final ptResult = await _executeDynamicStageWithPT(
           stage,
-          ptBuffer!,
+          ptBuffer,
           currentFormat,
           streamId,
           stageTimings,
@@ -1228,7 +1228,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       // Non-DynamicStage: flush any deferred PipelineTensor buffer to GPU first.
       if (ptBuffer != null) {
-        currentTensors = await _flushPipelineTensors(ptBuffer!);
+        currentTensors = await _flushPipelineTensors(ptBuffer);
         ptBuffer = null;
         if (lastPtStageId != null) {
           _stageOutputs['${lastPtStageId}_$streamId'] = currentTensors;
@@ -1258,7 +1258,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Flush any remaining PipelineTensor buffer to GPU tensors.
     if (ptBuffer != null) {
-      currentTensors = await _flushPipelineTensors(ptBuffer!);
+      currentTensors = await _flushPipelineTensors(ptBuffer);
       ptBuffer = null;
       if (lastPtStageId != null) {
         _stageOutputs['${lastPtStageId}_$streamId'] = currentTensors;
@@ -1488,8 +1488,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // If we ended in GPU mode (tensors available), publish per-stream finals.
     // Merging mode stores a private snapshot (stage output buffers are
     // shared across streams — see _storeMergeSnapshot).
-    if (currentTensors != null && currentTensors!.isNotEmpty) {
-      _stageOutputs['final_$streamId'] = currentTensors!;
+    if (currentTensors != null && currentTensors.isNotEmpty) {
+      _stageOutputs['final_$streamId'] = currentTensors;
       if (_needsMerging()) {
         final primary = _primaryTensorOf(currentTensors);
         if (primary != null && _isValidTensor(primary)) {
@@ -1704,6 +1704,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   Map<String, Tensor>? getStageOutputMerged(String stageId) {
     return _stageOutputs['${stageId}_merged'];
   }
+
+  /// Connections of the serialized config this pipeline was built from;
+  /// empty for a pipeline assembled in code.
+  List<ConnectionConfig> get serializedConnections => _connections;
 
   void setSerializedConnections(List<ConnectionConfig> connections) {
     _connections = connections;
@@ -2147,7 +2151,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
       // Mark as stopped
       _isRunning = false;
-      _stagesInitialized = false;
 
       final runtime = _startTime != null
           ? DateTime.now().difference(_startTime!)
@@ -2421,12 +2424,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         _debugLog(() => '❌ Error disposing resource cache: $e');
       }
 
-      try {
-        // TODO: Uncomment when AssetManager has a dispose method
-        // _assetManager.dispose();
-      } catch (e) {
-        _debugLog(() => '❌ Error disposing asset manager: $e');
-      }
+      // The asset manager is not disposed here: it may be one the caller
+      // passed in, or one PatchExecutor reuses across a rebuild. It holds
+      // only references, so when nothing else uses it, it is collected
+      // with the pipeline.
 
       try {
         _resourceGovernor.dispose();

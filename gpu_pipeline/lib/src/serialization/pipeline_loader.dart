@@ -24,7 +24,6 @@ class PipelineLoadResult {
 
 class PipelineLoader {
   final PipelineSerializer _serializer = PipelineSerializer();
-  final PipelineValidator _validator = PipelineValidator();
 
   PipelineLoadResult loadFromJson(String jsonStr) {
     final parsed = _serializer.parse(jsonStr);

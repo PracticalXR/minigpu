@@ -60,7 +60,7 @@ class OperationFactory {
           dartCode: normalized,
           inputKeys: c.inputKeys,
           outputKeys: c.outputKeys,
-          initialParameters: c.namedArguments ?? const {},
+          initialParameters: c.namedArguments,
         );
       case 'shader':
         return ShaderStageOperation(

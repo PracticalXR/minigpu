@@ -1,7 +1,6 @@
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
-import 'package:minigpu/minigpu.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_pipeline/src/pipeline_ports.dart';
 import 'package:gpu_pipeline/src/operation/shader_stage_operation.dart';

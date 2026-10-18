@@ -51,7 +51,6 @@ class ShapeExprEvaluator {
       default:
         _error('SHAPE_OP_UNKNOWN', 'Unknown op $op', path);
     }
-    return const [];
   }
 
   int _asDim(dynamic v, ShapeEvalContext ctx, String path) {
@@ -63,7 +62,6 @@ class ShapeExprEvaluator {
       _error('SHAPE_PARAM_MISSING', 'Param $name not int', path);
     }
     _error('SHAPE_INVALID_DIM', 'Invalid dim $v', path);
-    return -1;
   }
 
   List<int> _concatAlong(

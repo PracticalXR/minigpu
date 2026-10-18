@@ -1,21 +1,21 @@
 # gpu_pipeline
 
-A GPU-accelerated streaming pipeline for Dart and Flutter. Define directed graphs of processing stages that route [`Tensor`](https://pub.dev/packages/gpu_tensor) and host typed-data through WGSL compute shaders via [minigpu](https://pub.dev/packages/minigpu), with typed I/O ports, resource management, and real-time constraints.
+A GPU-accelerated streaming pipeline for Dart and Flutter. A stage chains WGSL compute shaders, built-in tensor ops and Dart functions; a pipeline runs its stages on every frame a media stream emits. Data moves as [`Tensor`](https://pub.dev/packages/gpu_tensor)s on [minigpu](https://pub.dev/packages/minigpu), or as host typed data between CPU steps.
 
 Part of the [minigpu](https://github.com/PracticalXR/minigpu) package family.
 
 ## Features
 
-- **Directed stage graph** — connect `PipelineStage` nodes via typed `InputPort`/`OutputPort` pairs; the pipeline routes data automatically
-- **GPU + CPU stages** — `ShaderStageOperation` runs WGSL compute shaders on `Tensor` data; `CPUStageOperation` processes host `TypedData`; mix freely in the same graph
-- **Pluggable CPU executors** — CPU stages delegate to a `StageExecutor`: `InlineExecutor` (default, always correct for stateful stages) or `PersistentIsolateExecutor` (long-lived worker isolate for stateless/heavy compute; GPU submission overlaps CPU work automatically)
-- **Stage concurrency hints** — each stage carries a `StageConcurrency` flag (`ordered` / `asyncSafe`) so the scheduler knows whether frames must execute strictly in order or may overlap
-- **Zero-allocation readback / upload** — `Tensor.getData({into:})` lets callers supply a pre-allocated `TypedData` buffer to avoid per-frame heap churn; the FFI layer pools its native scratch buffer and `NativeCallable` across calls
-- **Multi-stream routing** — each stage declares a `StageStreamConfig` to receive all streams, a merged view, or only selected stream IDs
-- **Resource-aware scheduling** — `ResourceRequirements`, `MemoryStrategy`, and `RealTimeConstraints` let stages express their resource needs; the pipeline honours them during execution
-- **Dynamic stages** — `PipelineDynamicStage` can modify the graph topology at runtime
-- **Asset management** — stages declare `StaticAsset` requirements; the built-in `AssetManager` loads and caches them before first execution
-- **Event bus** — `PipelineEventNotifier` delivers lifecycle and error events to any observer
+- **GPU and CPU steps in one stage**: `StageBuilder` chains built-in tensor ops (`op('multiplyScalar', ...)`), WGSL compute shaders (`executeShader`, `executeShaderFunction`) and Dart functions over host `TypedData` (`executeCPU`) into one `DynamicStage`.
+- **Data stays where it was written**: inside a stage, a value written by a CPU step stays on the host until a GPU step reads it, and the reverse, so back-to-back CPU steps never round-trip through the GPU.
+- **Streaming**: a `Pipeline` runs its stages, in the order they were added, on every frame a `MediaStream` emits, either a GPU `Tensor` or a host `Float32List`. `QueueConfig` sets how frames queue per stream.
+- **Multi-stream routing**: `StageStreamConfig` decides whether a stage runs once per stream, on all streams merged (`addMergeStage`), or only on selected streams (`addSelectiveStage`).
+- **Pluggable CPU executors**: a `CPUStageOperation` runs its function through a `StageExecutor`. `InlineExecutor` is the default, and the only choice for a function that keeps state between frames. `PersistentIsolateExecutor` runs a stateless top-level function on a long-lived worker isolate, off the isolate that submits GPU work. It is native-only and throws on the web.
+- **Assets and parameters**: stages declare `StaticAsset`s (weights, textures, lookup tables), which the pipeline's `AssetManager` preloads and caches at `start()`, and typed, range-checked `Parameter`s.
+- **Serialization**: `PipelineLoader().loadFromJson(...)` builds the pipelines a JSON network config describes, and `PipelineSerializer` validates and re-encodes one.
+- **Events**: `addEventListener` delivers stage, operation, stream and pipeline events, including errors.
+
+`ResourceRequirements`, `MemoryStrategy`, `RealTimeConstraints` and `PipelineStage.stageConcurrency` can be set on a stage, but the pipeline does not schedule by them yet. The device list that `ResourceRequirements` is checked against is a placeholder.
 
 ## Getting started
 
@@ -23,95 +23,134 @@ Add to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  gpu_pipeline: ^1.0.0
-  gpu_tensor: ^1.3.0
-  minigpu: ^1.3.0
+  gpu_pipeline: ^1.9.2
+  gpu_tensor: ^1.9.0
+  minigpu: ^1.9.0
 ```
 
-Initialise minigpu once before creating pipelines:
+The first tensor you create initializes the default minigpu context. To choose when that happens, initialize it yourself:
 
 ```dart
 import 'package:minigpu/minigpu.dart';
 
-await Minigpu.initialize();
+await Minigpu().init();
 ```
 
 ## Usage
 
-### Define a stage
+### Build and run a stage
+
+Each step reads the key named by `inputKey` and writes the key named by `outputKey`; leave them out and each step reads the previous step's result. `process` returns the last step's result under `'output'`.
 
 ```dart
+import 'dart:typed_data';
+
 import 'package:gpu_pipeline/gpu_pipeline.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
 
-class NormalizeStage extends PipelineStage {
-  NormalizeStage() : super(stageId: 'normalize') {
-    addInputPort(InputPort('input', formats: ['tensor']));
-    addOutputPort(OutputPort('output', format: 'tensor'));
+// Double every value on the GPU, then clip to [-1, 1] on the CPU.
+final stage = StageBuilder('gain_and_clip')
+    .op('multiplyScalar', arguments: [2.0], inputKey: 'input', outputKey: 'gained')
+    .executeCPU(
+      (inputs, shapes, params) async {
+        final data = inputs['gained']! as Float32List;
+        return {
+          'clipped': Float32List.fromList([for (final v in data) v.clamp(-1.0, 1.0)]),
+        };
+      },
+      inputKey: 'gained',
+      outputKey: 'clipped',
+    )
+    .build();
+
+final input = await Tensor.zeros([4]);
+await input.write(Float32List.fromList([0.25, 0.375, -0.75, 0.625]));
+
+final out = await stage.process({'input': input});
+print(await out['output']!.getData()); // [0.5, 0.75, -1.0, 1.0]
+```
+
+### Run stages over a stream
+
+A `MediaStream` subclass emits frames with `notifyTensorUpdate` (a GPU tensor) or `notifyHostData` (host samples and a shape). Override `start` and `stop` with your capture logic.
+
+```dart
+class SampleStream extends MediaStream {
+  SampleStream()
+      : super(
+          id: 'samples',
+          deviceId: 'generated',
+          name: 'Samples',
+          color: 0xFF2196F3,
+          type: MediaStreamType.audio,
+          context: null,
+        );
+
+  bool _active = false;
+
+  @override
+  bool get isActive => _active;
+
+  @override
+  Future<void> start() async {
+    _active = true;
   }
 
   @override
-  Future<PipelineEvent> process(Map<String, dynamic> inputs) async {
-    final tensor = inputs['input'] as Tensor;
-    // run a WGSL shader or transform tensors here
-    return PipelineEvent.data({'output': tensor});
+  Future<void> stop() async {
+    _active = false;
   }
+
+  void push(Float32List samples) => notifyHostData(samples, [samples.length]);
 }
-```
 
-### Build and run a pipeline
-
-```dart
-final pipeline = Pipeline();
-pipeline.addStage(NormalizeStage());
-pipeline.addStage(MyOutputStage());
-pipeline.connect('normalize.output', 'output.input');
-
-await pipeline.initialize();
-
-final result = await pipeline.process({'normalize.input': myTensor});
-```
-
-### Shader stage
-
-Use `ShaderStageOperation` to dispatch a WGSL compute shader directly:
-
-```dart
-final op = ShaderStageOperation(
-  shader: myWgslSource,
-  workgroupSize: (8, 8, 1),
-  bindingLayout: [...],
+final pipeline = Pipeline(id: 'gain');
+pipeline.addStage(
+  StageBuilder('half').op('multiplyScalar', arguments: [0.5]).build(),
 );
+final stream = SampleStream();
+pipeline.addStream(stream);
+
+pipeline.addEventListener(PipelineEventType.stageError, (event) {
+  print('stage failed: ${(event as StageErrorEvent).error}');
+});
+
+await pipeline.start();
+stream.push(Float32List(480));
+
+// Later, for example once per rendered frame: the latest result the stage
+// produced for this stream.
+final latest = pipeline.getStageOutput('half', stream.id)?['output'];
+
+await pipeline.stop();
+await pipeline.dispose();
 ```
+
+### Shader steps
+
+`executeShaderFunction` wraps a WGSL function body in a compute shader that runs once per element. The body sees `index: u32` and `input_val: f32` and returns the element's new value; each entry of `functionParameters` becomes an `f32` constant:
+
+```dart
+final stage = StageBuilder('scaled_square')
+    .executeShaderFunction(
+      'return gain * input_val * input_val;',
+      functionParameters: {'gain': 0.5},
+    )
+    .build();
+```
+
+For a full shader with several bindings, use `executeShader`.
 
 ## Architecture
 
-```
-MediaStream  ──►  Stage A  ──►  Stage B  ──►  Stage C  ──►  output
-                  (WGSL)        (CPU)          (WGSL)
-```
-
-Each stage receives a `Map<String, Tensor>` of named inputs and returns a `Map<String, Tensor>` of outputs. The `Pipeline` scheduler resolves the connection graph, dispatches stages in dependency order, and propagates errors via the event bus.
-
-### CPU↔GPU boundary
-
-CPU stages (`CPUStageOperation`) read `TypedData` from GPU tensors, run Dart logic, then upload results back. The boundary has three performance layers:
-
-1. **FFI scratch pooling** — `FfiBuffer` reuses its native scratch memory and `NativeCallable` across `read`/`write` calls, eliminating per-frame `malloc` and callback registration overhead.
-2. **Buffer reuse** — `Tensor.getData({T? into})` accepts a caller-supplied `TypedData` to avoid allocating a new buffer every frame.
-3. **Isolate offload** — stateless CPU work can run on a `PersistentIsolateExecutor`, freeing the GPU-submission isolate to queue the next frame while the previous frame's CPU work is still in flight.
-
-### Concurrency model
-
-```dart
-// Stateful stage: must observe frame order (closed-loop encoder, etc.)
-myStage.stageConcurrency = StageConcurrency.ordered;   // default
-
-// Stateless stage: frames may overlap
-myStage.stageConcurrency = StageConcurrency.asyncSafe;
+```text
+MediaStream  ──►  Stage 1  ──►  Stage 2  ──►  Stage 3  ──►  getStageOutput()
+                  (GPU ops)     (CPU)         (WGSL)
 ```
 
-`ordered` is the safe default. Only mark a stage `asyncSafe` if its processor holds no cross-frame state.
+A pipeline runs its stages in the order they were added. Each stage receives the previous stage's outputs as a `Map<String, Tensor>` and returns its own. Errors are reported through `addEventListener`.
+
+Inside a stage, each value is a `PipelineTensor` holding a host copy, a GPU copy, or both. A CPU step reads and writes host data, a GPU step reads and writes GPU tensors, and data crosses between them only when the next step needs the other side. For readbacks in your own code, `Tensor.getData(into:)` from gpu_tensor fills a buffer you already own instead of allocating one per frame.
 
 ## Platform support
 

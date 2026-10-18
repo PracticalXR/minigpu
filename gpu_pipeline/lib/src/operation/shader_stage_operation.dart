@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
-import 'package:gpu_pipeline/src/operation/operation_helpers.dart';
 import 'package:gpu_pipeline/src/pipeline_ports.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
@@ -546,13 +544,7 @@ mixin ShaderExecutionMixin on StageOperation {
     final (gx, gy) = _fold2D(disp.xGroups);
 
     // Dispatch (backends that only support 1D see gy==1 here); ignore Y/Z.
-    try {
-      await shader.dispatch(gx, gy, 1);
-    } catch (e) {
-      // Fallback: some backends name it dispatchWorkgroups
-      final dyn = shader as dynamic;
-      dyn.dispatchWorkgroups?.call(gx, gy, 1);
-    }
+    await shader.dispatch(gx, gy, 1);
   }
 
   /// Fold a 1D workgroup count into a 2D (x,y) grid so neither dimension
@@ -574,8 +566,6 @@ class ShaderStageOperation extends StageOperation
         ArgumentResolvable,
         ShaderGenerationMixin,
         ShaderExecutionMixin {
-  List<dynamic>? _resolvedPositional;
-  Map<String, dynamic>? _resolvedNamed;
   @override
   final String shaderTemplate;
   final Map<String, OutputPort> outputPorts;
@@ -605,15 +595,6 @@ class ShaderStageOperation extends StageOperation
   void resetCacheStats() {
     _cacheHits = 0;
     _cacheMisses = 0;
-  }
-
-  @override
-  void applyResolvedArguments(
-    List<dynamic> positional,
-    Map<String, dynamic> named,
-  ) {
-    _resolvedPositional = positional;
-    _resolvedNamed = named;
   }
 
   ShaderStageOperation({
@@ -670,10 +651,6 @@ class ShaderStageOperation extends StageOperation
     ResourceCache cache,
   ) async {
     try {
-      // Access if ever needed inside shader template (currently unused)
-      final positional =
-          _resolvedPositional ?? (arguments['args'] as List? ?? const []);
-      final named = _resolvedNamed ?? namedArguments;
       if (inputs.isEmpty) {
         throw Exception('No inputs provided to shader operation $operationId');
       }
@@ -714,15 +691,10 @@ class ShaderStageOperation extends StageOperation
       );
 
       // Ensure fresh tag order so binding indices match @binding order for this run
-      (shader as dynamic).resetTagOrder?.call();
+      shader.resetTagOrder();
 
-      // Bind buffers
-      await _bindRespectingExplicitBindings(
-        shader,
-        completeShader,
-        inputs,
-        outputs,
-      );
+      // Bind by slot order; the backend binds by index.
+      await bindTensors(shader, inputs, outputs);
 
       // Dispatch using tensor lengths (key-agnostic)
       await executeShader(shader, inputs, outputs: outputs);
@@ -733,54 +705,6 @@ class ShaderStageOperation extends StageOperation
         'Shader execution failed for operation $operationId: $e\nStack trace: $stackTrace',
       );
     }
-  }
-
-  Future<void> _bindRespectingExplicitBindings(
-    ComputeShader shader,
-    String shaderCode,
-    Map<String, Tensor> inputs,
-    Map<String, Tensor> outputs,
-  ) async {
-    // If no explicit bindings, just bind in canonical order.
-    if (!shaderCode.contains('@binding(')) {
-      await bindTensors(shader, inputs, outputs);
-      return;
-    }
-
-    // Parse explicit bindings for debug visibility
-    final rx = RegExp(
-      r'@group\(\s*(\d+)\s*\)\s*'
-      r'@binding\(\s*(\d+)\s*\)\s*'
-      r'var<[^>]+>\s*([A-Za-z_]\w*)\s*:',
-      multiLine: true,
-    );
-    final matches = rx.allMatches(shaderCode).toList();
-    final byIndex = <int, String>{};
-    for (final m in matches) {
-      final grp = int.tryParse(m.group(1) ?? '');
-      if (grp != 0) continue;
-      final idx = int.tryParse(m.group(2) ?? '');
-      final name = m.group(3);
-      if (idx != null && name != null) {
-        byIndex[idx] = name;
-      }
-    }
-
-    const debugExplicitBinding = false;
-    if (debugExplicitBinding) {
-      final sorted = byIndex.keys.toList()..sort();
-      final entries = sorted
-          .map((k) => '@binding($k)->${byIndex[k]}')
-          .join(', ');
-      final totalSlots = inputKeys.length + outputKeys.length;
-      print(
-        '🔧 [$operationId] explicit bindings (group0): $entries (expected slots: $totalSlots)\n'
-        ' inputKeys: $inputs, outputKeys: $outputs',
-      );
-    }
-
-    // Bind strictly by slot order to canonical names; backend binds by index.
-    await bindTensors(shader, inputs, outputs);
   }
 
   /// Get or create shader with caching

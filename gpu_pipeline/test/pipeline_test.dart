@@ -199,11 +199,16 @@ void main() {
         [1.0],
         {},
       );
+      expect(
+        await result.getData(),
+        equals([for (int i = 0; i < 1024; i++) i + 1.0]),
+      );
 
       print('✅ Direct tensor operation completed');
       // TODO: DEBUGLOG print('🔧 Result shape: ${result.shape}');
 
       tensor.destroy();
+      result.destroy();
     });
 
     test('Pipeline with dynamic stage end-to-end', () async {

@@ -9,9 +9,9 @@ import 'pipeline_event.dart';
 import 'pipeline_stage.dart';
 import 'serialization/argument_resolution.dart';
 
-/// Unified tensor that can live on CPU and/or GPU with dirty tracking.
-/// Seamless CPU↔GPU switching: we only transfer when the next operation
-/// really needs the other side and only the dirty side is uploaded.
+/// Unified tensor that can live on CPU and/or GPU.
+/// Seamless CPU↔GPU switching: a copy is refreshed only when the next
+/// operation needs that side and the other side was written since.
 class PipelineTensor {
   Tensor? _gpu;
   TypedData? _host;
@@ -23,19 +23,20 @@ class PipelineTensor {
   BufferDataType _dtype;
   BufferDataType get dtype => _dtype;
 
-  bool _hostDirty; // host has newer contents than GPU
-  bool _gpuDirty; // GPU has newer contents than host
+  // At most one side is stale; the other holds the newest contents.
+  bool _hostStale; // GPU written since the host copy: asCPU reads back
+  bool _gpuStale; // host written since the GPU copy: asGPU uploads
 
   TensorLocation get tensorLocation =>
-      _gpu != null && !_gpuDirty ? TensorLocation.gpu : TensorLocation.cpu;
+      _gpu != null && !_gpuStale ? TensorLocation.gpu : TensorLocation.cpu;
 
   PipelineTensor._(
     this._gpu,
     this._host,
     this.shape,
     this._dtype,
-    this._hostDirty,
-    this._gpuDirty,
+    this._hostStale,
+    this._gpuStale,
   );
 
   factory PipelineTensor.gpu(Tensor t, List<int> shape) => PipelineTensor._(
@@ -53,8 +54,8 @@ class PipelineTensor {
         data,
         List<int>.from(shape),
         _inferDtype(data),
-        true,
         false,
+        true,
       );
 
   bool get hasGpu => _gpu != null;
@@ -66,8 +67,8 @@ class PipelineTensor {
     if (newShape != null) {
       shape = List<int>.from(newShape);
     }
-    _hostDirty = true;
-    _gpuDirty = true;
+    _hostStale = false;
+    _gpuStale = true;
   }
 
   /// Ensure GPU tensor is up to date and return it.
@@ -85,14 +86,14 @@ class PipelineTensor {
         }
       } catch (_) {}
       _gpu = await _allocZeros(shape, _dtype);
-      _gpuDirty = true;
+      _gpuStale = true;
     }
 
     // Upload from host if host is newer or we just (re)allocated
-    if ((_host != null && _gpuDirty) || needsAlloc) {
-      await _writeHost(_gpu!, _host!, _dtype);
-      _gpuDirty = false;
-      _hostDirty = false;
+    if ((_host != null && _gpuStale) || needsAlloc) {
+      await _writeHost(_gpu!, _host!);
+      _gpuStale = false;
+      _hostStale = false;
     }
 
     return _gpu!;
@@ -108,21 +109,21 @@ class PipelineTensor {
         _dtype = _gpu!.dataType;
         // Preserve the GPU tensor's shape (don't flatten)
         shape = List<int>.from(_gpu!.shape);
-        _gpuDirty = false;
-        _hostDirty = false;
+        _gpuStale = false;
+        _hostStale = false;
       } else {
         // Allocate fresh host buffer matching current shape & dtype
         final len = shape.fold<int>(1, (a, b) => a * b);
         _host = _allocHost(len, _dtype);
-        _hostDirty = true;
+        _gpuStale = true;
       }
-    } else if (_gpuDirty && _gpu != null) {
+    } else if (_hostStale && _gpu != null) {
       final td = await _gpu!.getData();
       _host = td;
       _dtype = _gpu!.dataType;
       shape = List<int>.from(_gpu!.shape);
-      _gpuDirty = false;
-      _hostDirty = false;
+      _gpuStale = false;
+      _hostStale = false;
     }
     return _host!;
   }
@@ -149,8 +150,8 @@ class PipelineTensor {
     _dtype = tensor.dataType;
     shape =
         newShape ?? List<int>.from(tensor.shape); // Use tensor's actual shape
-    _gpuDirty = false;
-    _hostDirty = true; // host view (if any) stale until re-fetched
+    _gpuStale = false;
+    _hostStale = true; // host view (if any) stale until re-fetched
   }
 }
 
@@ -225,42 +226,12 @@ Future<Tensor> _allocZeros(List<int> shape, BufferDataType dtype) async {
   }
 }
 
-Future<void> _writeHost(Tensor t, TypedData host, BufferDataType dtype) async {
-  // Tensor.write is generic on T; the Tensor was allocated with the matching
-  // T via _allocZeros, so passing the matching TypedData is safe.
-  switch (dtype) {
-    case BufferDataType.float32:
-      await (t as Tensor<Float32List>).write(host as Float32List);
-      return;
-    case BufferDataType.float64:
-      await (t as Tensor<Float64List>).write(host as Float64List);
-      return;
-    case BufferDataType.int8:
-      await (t as Tensor<Int8List>).write(host as Int8List);
-      return;
-    case BufferDataType.uint8:
-      await (t as Tensor<Uint8List>).write(host as Uint8List);
-      return;
-    case BufferDataType.int16:
-      await (t as Tensor<Int16List>).write(host as Int16List);
-      return;
-    case BufferDataType.uint16:
-    case BufferDataType.float16:
-      await (t as Tensor<Uint16List>).write(host as Uint16List);
-      return;
-    case BufferDataType.int32:
-      await (t as Tensor<Int32List>).write(host as Int32List);
-      return;
-    case BufferDataType.uint32:
-      await (t as Tensor<Uint32List>).write(host as Uint32List);
-      return;
-    case BufferDataType.int64:
-      await (t as Tensor<Int64List>).write(host as Int64List);
-      return;
-    case BufferDataType.uint64:
-      await (t as Tensor<Uint64List>).write(host as Uint64List);
-      return;
-  }
+Future<void> _writeHost(Tensor t, TypedData host) async {
+  // Called through the base type: the tensor may be one this class allocated
+  // (a Tensor<Float32List> from _allocZeros) or one it was handed, which can
+  // be a Tensor<TypedData>. Casting to the dtype's list type rejected the
+  // latter. asGPU reallocates on a dtype change, so host matches the buffer.
+  await t.write(host);
 }
 
 Float32List _toFloat32(TypedData td) {
@@ -458,7 +429,7 @@ class DynamicStage extends PipelineStage {
 
   /// Process CPU operation without forcing a GPU round-trip:
   /// - Pull host data from PipelineTensor (or download once if only GPU exists)
-  /// - Run the CPU processor directly
+  /// - Run the CPU processor through the operation's executor
   /// - Store outputs as host buffers (Float32List) in PipelineTensor
   /// - Only promote to GPU when a later GPU op needs it
   Future<Map<String, PipelineTensor>> _processCPUOperation(
@@ -488,8 +459,13 @@ class DynamicStage extends PipelineStage {
     // Gather stage parameters
     final parameters = currentParameterValues();
 
-    // Execute CPU processor directly
-    final rawOutputs = await operation.processor(hostInputs, ranks, parameters);
+    // Run through the operation's executor: inline by default, or the one
+    // the operation was built with (a worker isolate, say).
+    final rawOutputs = await operation.executor.run(
+      hostInputs,
+      ranks,
+      parameters,
+    );
 
     // Integrate outputs into PipelineTensor as HOST data with preserved/inferred shape
     for (final entry in rawOutputs.entries) {
@@ -583,76 +559,6 @@ class DynamicStage extends PipelineStage {
       if (a[i] != b[i]) return false;
     }
     return true;
-  }
-
-  /// Ensure a TypedData view becomes Float32List without copies when possible.
-  Float32List _ensureF32(TypedData data) {
-    if (data is Float32List) return data;
-    if (data is Float64List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = data[i].toDouble();
-      }
-      return out;
-    }
-    if (data is Int32List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = data[i].toDouble();
-      }
-      return out;
-    }
-    if (data is Uint32List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = data[i].toDouble();
-      }
-      return out;
-    }
-    if (data is Int16List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = data[i] / 32768.0;
-      }
-      return out;
-    }
-    if (data is Uint16List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = (data[i] - 32768) / 32768.0;
-      }
-      return out;
-    }
-    if (data is Int8List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = data[i] / 128.0;
-      }
-      return out;
-    }
-    if (data is Uint8List) {
-      final out = Float32List(data.length);
-      for (var i = 0; i < out.length; i++) {
-        out[i] = (data[i] - 128) / 128.0;
-      }
-      return out;
-    }
-    // Fallback: try reinterpret if 4-byte aligned, else copy bytes to floats
-    final bytes = data.buffer.asUint8List(
-      data.offsetInBytes,
-      data.lengthInBytes,
-    );
-    if (bytes.lengthInBytes % 4 == 0) {
-      return bytes.buffer.asFloat32List(
-        bytes.offsetInBytes,
-        bytes.lengthInBytes ~/ 4,
-      );
-    }
-    final out = Float32List(bytes.length);
-    for (var i = 0; i < bytes.length; i++) {
-      out[i] = bytes[i].toDouble();
-    }
-    return out;
   }
 
   /// Process GPU operation with lazy promotion from CPU where needed.

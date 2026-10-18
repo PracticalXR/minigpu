@@ -1,3 +1,29 @@
+## 1.9.2
+
+- Fix `DynamicStage` returning stale data when a step writes a key in place
+  (`outputKey` equal to the key it read). A host write followed by a host read
+  returned the old GPU contents, and a GPU write followed by a host read
+  returned the old host copy; each step's result now reaches the next.
+- Fix a GPU step that reads a CPU step's in-place write throwing a type error:
+  the upload cast the stage's input tensor to `Tensor<Float32List>`.
+- `DynamicStage` now runs a CPU step through the step's `StageExecutor`. It
+  used to call the function itself, so `PersistentIsolateExecutor` and
+  `isolateEnabled: true` had no effect inside a stage.
+- A `Pipeline` no longer starts the process-wide `MainThreadMonitor` when it is
+  constructed. The pipeline never read it, and its 5 ms timer ran for the life
+  of the process, which kept a command-line program from exiting. Call
+  `pipeline.threadMonitor.startMonitoring()` to use it.
+- A shader step that fails to dispatch now reports why. The stage caught the
+  error and called a `dispatchWorkgroups` method that no shader has, so a
+  kernel that did not build surfaced as a `NoSuchMethodError`.
+- Add `Pipeline.serializedConnections`, the connections of the config a
+  pipeline was loaded from.
+- The package no longer ships a 4.5 MB copy of an old minigpu web build under
+  `web/packages/`.
+- Rewrite the README against the current API; its examples now run as tests.
+- Remove dead code and the unused `directed_graph` dependency, and fix every
+  analyzer warning.
+
 ## 1.9.1
 
 - Version bump for the minigpu 1.9.1 family. No functional change in this
