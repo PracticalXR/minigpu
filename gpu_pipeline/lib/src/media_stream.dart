@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:gpu_tensor/gpu_tensor.dart';
+import 'package:meta/meta.dart';
 
 enum MediaStreamType { audio, video, screen }
 
@@ -68,17 +69,19 @@ abstract class MediaStream {
     required this.context,
   });
 
-  /// Start the stream
+  /// Starts the stream: calls [startCapture], then sets [isActive]. Does
+  /// nothing while the stream is already active.
   Future<void> start() async {
     if (_isActive) return;
-    await _startCapture();
+    await startCapture();
     _isActive = true;
   }
 
-  /// Stop the stream
+  /// Stops the stream: calls [stopCapture], then clears [isActive]. Does
+  /// nothing while the stream is not active.
   Future<void> stop() async {
     if (!_isActive) return;
-    await _stopCapture();
+    await stopCapture();
     _isActive = false;
   }
 
@@ -126,9 +129,15 @@ abstract class MediaStream {
 
   bool get isActive => _isActive;
 
-  /// Override to implement specific capture logic
-  Future<void> _startCapture();
-  Future<void> _stopCapture();
+  /// Opens the capture source. Override this, not [start], which calls it
+  /// once and tracks [isActive]. Does nothing by default, for a stream that
+  /// only pushes frames.
+  @protected
+  Future<void> startCapture() async {}
+
+  /// Closes the capture source. Override this, not [stop].
+  @protected
+  Future<void> stopCapture() async {}
 
   void dispose() {
     stop();

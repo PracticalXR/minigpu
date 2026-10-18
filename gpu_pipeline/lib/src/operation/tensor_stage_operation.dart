@@ -321,10 +321,6 @@ class TensorOperationRegistry {
       final normalized = await centered.divide(std);
       return normalized;
     }, preservesShape: true);
-
-    print(
-      '✅ Tensor operation registry initialized with ${_operations.length} operations',
-    );
   }
 
   static void _register(

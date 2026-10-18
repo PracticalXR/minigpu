@@ -50,9 +50,11 @@ Future<void> main() async {
     height: height,
   );
   final loader = PipelineLoader();
-  final load = loader.loadFromJson(net.encode());
-  if (!load.validation.ok) {
-    logEl.text = 'Validation failed: ${load.validation.errors}';
+  final PipelineLoadResult load;
+  try {
+    load = loader.loadFromJson(net.encode());
+  } on PipelineValidationException catch (e) {
+    logEl.textContent = '$e';
     return;
   }
   final pipeline = load.runtime.pipelines.first;
@@ -71,7 +73,7 @@ Future<void> main() async {
   // Simple stats
   final minV = packetData.reduce(math.min);
   final maxV = packetData.reduce(math.max);
-  logEl.text = [
+  logEl.textContent = [
     'Encoded ${rgbaF32.length} floats -> ${packetData.length} floats',
     'Time: ${(t1 - t0).toStringAsFixed(2)} ms',
     'Packet range: [$minV, $maxV]',

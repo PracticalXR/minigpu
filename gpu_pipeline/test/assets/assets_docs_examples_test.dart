@@ -24,7 +24,7 @@ void main() {
         name: 'lut_bin',
         source: {
           'type': 'embedded',
-          'data': base64.encode([1, 2, 3, 4]),
+          'bytes': base64.encode([1, 2, 3, 4]),
         },
       ),
     ]);

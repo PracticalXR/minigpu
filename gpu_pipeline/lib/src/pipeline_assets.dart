@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'dart:collection';
 
 import 'package:gpu_tensor/gpu_tensor.dart';
+import 'asset_source_web.dart' if (dart.library.io) 'asset_source_io.dart';
 import 'serialization/pipeline_models.dart';
 
 /// Types of assets that can be loaded
@@ -53,7 +53,8 @@ class StaticAsset {
   // Optional metadata
   final Map<String, dynamic>? metadata;
 
-  // Requiredness hint
+  /// Whether a pipeline fails to start when this asset fails to load. A
+  /// stage asset that is not required is skipped instead.
   final bool isRequired;
 
   StaticAsset({
@@ -120,6 +121,11 @@ class StaticAsset {
     isRequired: isRequired,
   );
 
+  /// An asset a generator would make. Nothing generates assets, so loading
+  /// one fails with an [UnsupportedError].
+  @Deprecated(
+    'Nothing generates assets, so loading one always fails. Removed in 2.0.',
+  )
   factory StaticAsset.generated({
     required String name,
     required AssetType type,
@@ -177,59 +183,63 @@ class StaticAsset {
 
 class _Entry {
   StaticAsset asset;
-  int refCount;
-  final bool persistent;
-  _Entry({required this.asset, this.refCount = 1, this.persistent = true});
+
+  /// The bytes [asset] counts for against the cache limit.
+  int size;
+
+  /// How many holders the asset has: loads, preloads and per-call tokens
+  /// that have not released it.
+  int refCount = 1;
+
+  /// Whether the asset stays cached when nothing holds it.
+  bool persistent;
+
+  _Entry(this.asset, this.size, {required this.persistent});
 }
 
-AssetSourceType _parseSourceType(String? s) {
-  switch (s) {
-    case 'file':
-      return AssetSourceType.file;
-    case 'url':
-      return AssetSourceType.url;
-    case 'embedded':
-      return AssetSourceType.embedded;
-    case 'generated':
-      return AssetSourceType.generated;
-    case 'preloaded':
-      return AssetSourceType.preloaded;
+AssetSourceType? _parseSourceType(Object? s) => switch (s) {
+  null || 'embedded' => AssetSourceType.embedded,
+  'file' => AssetSourceType.file,
+  'url' => AssetSourceType.url,
+  'generated' => AssetSourceType.generated,
+  'preloaded' => AssetSourceType.preloaded,
+  _ => null,
+};
+
+AssetType? _hintType(String? hint) {
+  switch (hint?.toLowerCase()) {
+    case 'json':
+      return AssetType.json;
+    case 'text':
+      return AssetType.text;
+    case 'binary':
+    case 'bin':
+      return AssetType.binary;
+    case 'weights':
+      return AssetType.weights;
+    case 'texture':
+      return AssetType.texture;
+    case 'tensor':
+      return AssetType.tensor;
+    case 'lut':
+    case 'lookuptable':
+      return AssetType.lookupTable;
+    case 'shader':
+    case 'wgsl':
+    case 'glsl':
+      return AssetType.text; // treat as text for tests
     default:
-      return AssetSourceType.embedded;
+      return null;
   }
 }
 
 AssetType _inferType(String? hint, Map<String, dynamic> source) {
-  if (hint != null) {
-    switch (hint.toLowerCase()) {
-      case 'json':
-        return AssetType.json;
-      case 'text':
-        return AssetType.text;
-      case 'binary':
-      case 'bin':
-        return AssetType.binary;
-      case 'weights':
-        return AssetType.weights;
-      case 'texture':
-        return AssetType.texture;
-      case 'tensor':
-        return AssetType.tensor;
-      case 'lut':
-      case 'lookuptable':
-        return AssetType.lookupTable;
-      case 'shader':
-      case 'wgsl':
-      case 'glsl':
-        return AssetType.text; // treat as text for tests
-      default:
-        break;
-    }
-  }
+  final hinted = _hintType(hint);
+  if (hinted != null) return hinted;
 
   // Infer from file extension
-  final path = source['path'] as String?;
-  if (path != null) {
+  final path = source['path'];
+  if (path is String) {
     final p = path.toLowerCase();
     if (p.endsWith('.json')) return AssetType.json;
     if (p.endsWith('.txt')) return AssetType.text;
@@ -243,47 +253,100 @@ AssetType _inferType(String? hint, Map<String, dynamic> source) {
     }
   }
 
-  // Embedded heuristic: default to binary unless clearly text
-  final data = source['data'];
-  if (data is String) {
-    // If it's valid JSON, mark as json, else text
-    try {
-      json.decode(data);
-      return AssetType.json;
-    } catch (_) {
-      return AssetType.text;
-    }
-  }
-
   return AssetType.unknown;
 }
 
-// Add simple detectors for JSON and base64-like strings.
-bool _looksLikeJsonString(String s) {
-  final t = s.trimLeft();
-  return t.startsWith('{') || t.startsWith('[');
-}
+/// Whether embedded `data` written as a string holds base64 bytes for an
+/// asset of [type], rather than text.
+bool _holdsBytes(AssetType? type) => switch (type) {
+  AssetType.binary ||
+  AssetType.weights ||
+  AssetType.texture ||
+  AssetType.lookupTable ||
+  AssetType.tensor => true,
+  _ => false,
+};
 
-bool _looksLikeBase64(String s) {
-  final t = s.trim();
-  if (t.isEmpty || t.length % 4 != 0) return false;
-  final base64Regex = RegExp(r'^[A-Za-z0-9+/]+={0,2}$');
-  return base64Regex.hasMatch(t);
-}
+final _whitespace = RegExp(r'\s');
 
-Uint8List _asBytes(dynamic data) {
-  if (data == null) return Uint8List(0);
-  if (data is Uint8List) return data;
-  if (data is List<int>) return Uint8List.fromList(data);
-  if (data is String) {
-    // Try base64 first, else treat as utf8
+Uint8List _bytesOf(String name, String key, Object? value) {
+  if (value is String) {
     try {
-      return base64.decode(data);
-    } catch (_) {
-      return Uint8List.fromList(utf8.encode(data));
+      return base64.decode(value.replaceAll(_whitespace, ''));
+    } on FormatException catch (e) {
+      throw FormatException(
+        'Asset "$name": "$key" is not valid base64 (${e.message})',
+      );
     }
   }
-  throw ArgumentError('Unsupported embedded data type: ${data.runtimeType}');
+  if (value is List && value.every((v) => v is int && v >= 0 && v < 256)) {
+    return Uint8List.fromList(value.cast<int>());
+  }
+  throw FormatException(
+    'Asset "$name": "$key" must be a list of byte values (0 to 255) or a '
+    'base64 string',
+  );
+}
+
+/// The data of the embedded asset source [source] of the asset [name]: a
+/// [String] for text, or a [Uint8List] for bytes.
+///
+/// `text` is a string. `bytes` is a list of byte values or a base64 string.
+/// `data` is a list of byte values, or a string: base64 when [typeHint] names
+/// a binary type (`binary`, `weights`, `texture`, `lut` or `tensor`), and
+/// text otherwise.
+///
+/// Throws a [FormatException] when the source has none of these keys, or a
+/// value of another form.
+Object readEmbeddedSource(
+  String name,
+  Map<String, dynamic> source,
+  String? typeHint,
+) {
+  if (source.containsKey('text')) {
+    final text = source['text'];
+    if (text is String) return text;
+    throw FormatException('Asset "$name": "text" must be a string');
+  }
+  if (source.containsKey('bytes')) {
+    return _bytesOf(name, 'bytes', source['bytes']);
+  }
+  if (!source.containsKey('data')) {
+    throw FormatException(
+      'Asset "$name": an embedded source needs "text", "bytes" or "data"',
+    );
+  }
+  final data = source['data'];
+  if (data is String && !_holdsBytes(_hintType(typeHint))) return data;
+  return _bytesOf(name, 'data', data);
+}
+
+/// Why the source of [config] cannot load, or null when it may. Only the
+/// form of the source is checked: a file or url can still fail to read.
+String? assetSourceProblem(AssetConfig config) {
+  final src = config.source;
+  final name = config.name;
+  switch (_parseSourceType(src['type'])) {
+    case AssetSourceType.file:
+      if (src['path'] is String) return null;
+      return 'Asset "$name": a file source needs a "path"';
+    case AssetSourceType.url:
+      if (src['url'] is String) return null;
+      return 'Asset "$name": a url source needs a "url"';
+    case AssetSourceType.embedded:
+      try {
+        readEmbeddedSource(name, src, config.typeHint);
+        return null;
+      } on FormatException catch (e) {
+        return e.message;
+      }
+    case AssetSourceType.generated:
+      return 'Asset "$name": generated sources are not implemented';
+    case AssetSourceType.preloaded:
+      return null;
+    case null:
+      return 'Asset "$name": unknown source type "${src['type']}"';
+  }
 }
 
 class DisposableToken {
@@ -292,6 +355,13 @@ class DisposableToken {
   Future<void> dispose() => _dispose();
 }
 
+/// Loads, caches and counts the holders of the assets of one or more
+/// pipelines.
+///
+/// [load], [preload] and [registerPerCall] each take a reference to the
+/// asset they cache; [release] and disposing a per-call token drop one. An
+/// asset that nothing holds any more is removed, unless it is persistent:
+/// then it stays cached until the cache limit evicts it.
 class AssetManager {
   final LinkedHashMap<String, _Entry> _cache = LinkedHashMap<String, _Entry>();
   final StreamController<AssetEvent> _events =
@@ -312,6 +382,12 @@ class AssetManager {
     }
   }
 
+  /// The cache limit in bytes, or null when the cache is unlimited.
+  int? get cacheLimit => _maxBytes;
+
+  /// Sets the cache limit to [maxBytes]; 0 or less removes it. While the
+  /// cache is over its limit, the least recently used assets that nothing
+  /// holds are evicted.
   Future<void> setCacheLimit(int maxBytes) async {
     if (maxBytes <= 0) {
       _maxBytes = null; // disable limit
@@ -321,11 +397,11 @@ class AssetManager {
     _evictIfNeeded();
   }
 
-  // Compute approx size contribution of an asset.
-  int _assetSize(StaticAsset a) {
+  // The bytes an asset counts for: its bytes, or its text as UTF-8. A tensor
+  // lives on the GPU and counts for nothing.
+  static int _assetSize(StaticAsset a) {
     if (a.bytes != null) return a.bytes!.lengthInBytes;
     if (a.text != null) return utf8.encode(a.text!).length;
-    // Tensor size is unknown without dtype/shape; treat as 0 for now.
     return 0;
   }
 
@@ -334,32 +410,57 @@ class AssetManager {
     if (e != null) _cache[name] = e;
   }
 
-  void _evictIfNeeded() {
-    if (_maxBytes == null) return;
-    if (_currentBytes <= _maxBytes!) return;
-    // Evict from oldest to newest, only non-persistent with refCount == 0.
-    final toRemove = <String>[];
-    for (final entry in _cache.entries) {
-      if (_currentBytes <= _maxBytes!) break;
-      final name = entry.key;
-      final e = entry.value;
-      if (!e.persistent && e.refCount == 0) {
-        _currentBytes -= _assetSize(e.asset);
-        toRemove.add(name);
-      }
+  _Entry _put(String name, StaticAsset asset, {required bool persistent}) {
+    final entry = _Entry(asset, _assetSize(asset), persistent: persistent);
+    _cache[name] = entry;
+    _currentBytes += entry.size;
+    return entry;
+  }
+
+  _Entry? _remove(String name) {
+    final entry = _cache.remove(name);
+    if (entry != null) _currentBytes -= entry.size;
+    return entry;
+  }
+
+  // Adds a holder to [entry], cached as [name]. It becomes persistent if the
+  // new holder asks for that.
+  StaticAsset _acquire(String name, _Entry entry, {required bool persistent}) {
+    entry.refCount++;
+    entry.persistent = entry.persistent || persistent;
+    _touch(name);
+    return entry.asset;
+  }
+
+  // Drops a holder of [entry], cached as [name].
+  void _drop(String name, _Entry entry) {
+    if (entry.refCount > 0) entry.refCount--;
+    if (entry.refCount == 0 && !entry.persistent) {
+      _remove(name);
+      _safeEmit('evicted', name);
+    } else {
+      _safeEmit('released', name);
+      _evictIfNeeded();
     }
-    for (final n in toRemove) {
-      _cache.remove(n);
-      _safeEmit('evicted', n);
+  }
+
+  void _evictIfNeeded() {
+    final limit = _maxBytes;
+    if (limit == null || _currentBytes <= limit) return;
+    // Oldest use first; an asset something holds is never evicted.
+    final unheld = [
+      for (final e in _cache.entries)
+        if (e.value.refCount == 0) e.key,
+    ];
+    for (final name in unheld) {
+      if (_currentBytes <= limit) break;
+      _remove(name);
+      _safeEmit('evicted', name);
     }
   }
 
   void clearAsset(String name) {
-    final removed = _cache.remove(name);
-    if (removed != null) {
-      _currentBytes -= _assetSize(removed.asset);
-      _safeEmit('evicted', name);
-    }
+    if (_remove(name) != null) _safeEmit('evicted', name);
   }
 
   void clearCache() {
@@ -377,46 +478,81 @@ class AssetManager {
     await _events.close();
   }
 
-  // Stage-provided single asset preload
+  /// Caches [asset] and takes a reference to it, first reading its data if
+  /// it only names a source. A cached asset of the same name gains the
+  /// reference and takes the new data. A preloaded asset is persistent.
+  ///
+  /// When reading the data fails, emits a `failed` event and rethrows.
   Future<void> preload(StaticAsset asset) async {
-    final mat = await _materializeIfNeeded(asset);
+    final StaticAsset mat;
+    try {
+      mat = await _materializeIfNeeded(asset);
+    } catch (e) {
+      _safeEmit('failed', asset.name, message: '$e');
+      rethrow;
+    }
     final existing = _cache[mat.name];
     if (existing != null) {
-      _currentBytes -= _assetSize(existing.asset);
-      existing.asset = mat;
-      existing.refCount++;
+      final size = _assetSize(mat);
+      _currentBytes += size - existing.size;
+      existing
+        ..asset = mat
+        ..size = size;
+      _acquire(mat.name, existing, persistent: true);
     } else {
-      _cache[mat.name] = _Entry(asset: mat, refCount: 1, persistent: true);
+      _put(mat.name, mat, persistent: true);
     }
-    _currentBytes += _assetSize(mat);
     _evictIfNeeded();
     _safeEmit('loaded', mat.name);
   }
 
-  /// Preload a batch: supports List<StaticAsset> and List<AssetConfig>
+  /// Loads each of [items]: a [StaticAsset] with [preload], an [AssetConfig]
+  /// with [load].
+  ///
+  /// An item that is not required and fails to load is skipped; its `failed`
+  /// event reports it. When a required one fails, the references this call
+  /// took are released and the error is rethrown.
   Future<void> preloadBatch(List<dynamic> items) async {
-    if (items.isEmpty) return;
-    final first = items.first;
-    if (first is StaticAsset) {
-      for (final a in items.cast<StaticAsset>()) {
-        await preload(a);
+    for (final item in items) {
+      if (item is! StaticAsset && item is! AssetConfig) {
+        throw ArgumentError(
+          'Unsupported preloadBatch item type: ${item.runtimeType}',
+        );
       }
-      return;
     }
-    if (first is AssetConfig) {
-      for (final ref in items.cast<AssetConfig>()) {
-        try {
-          await load(ref);
-        } catch (e) {
-          _safeEmit('failed', ref.name, message: '$e');
-          if (ref.required == true) rethrow;
+    final taken = <String>[];
+    try {
+      for (final item in items) {
+        if (item is StaticAsset) {
+          if (await _loadOrSkip(() => preload(item), item.isRequired)) {
+            taken.add(item.name);
+          }
+        } else if (item is AssetConfig) {
+          if (await _loadOrSkip(() => load(item), item.required)) {
+            taken.add(item.name);
+          }
         }
       }
-      return;
+    } catch (_) {
+      for (final name in taken) {
+        await release(name);
+      }
+      rethrow;
     }
-    throw ArgumentError(
-      'Unsupported preloadBatch item type: ${first.runtimeType}',
-    );
+  }
+
+  // Whether [load] succeeded; a failure rethrows only when [required].
+  static Future<bool> _loadOrSkip(
+    Future<void> Function() load,
+    bool required,
+  ) async {
+    try {
+      await load();
+      return true;
+    } catch (_) {
+      if (required) rethrow;
+      return false;
+    }
   }
 
   /// Get a cached asset by name.
@@ -459,295 +595,178 @@ class AssetManager {
     return null;
   }
 
-  Tensor? getPreloadedTensor(String name) => _cache[name]?.asset.tensor;
+  Tensor? getPreloadedTensor(String name) {
+    if (_cache.containsKey(name)) _touch(name);
+    return _cache[name]?.asset.tensor;
+  }
 
-  /// Load an asset from AssetConfig and cache it (persistent).
+  /// Loads the asset [ref] describes, caches it and takes a reference to it.
+  ///
+  /// A cached asset of the same name is not read again; it gains the
+  /// reference. When reading fails, emits a `failed` event and rethrows.
+  /// The asset is persistent when [AssetConfig.cache] is true.
   Future<StaticAsset> load(AssetConfig ref) async {
-    final existing = _cache[ref.name]?.asset;
-    if (existing != null) {
-      _cache[ref.name]!.refCount++;
-      return existing;
+    final cached = _cache[ref.name];
+    if (cached != null) {
+      return _acquire(ref.name, cached, persistent: ref.cache);
     }
 
-    final src = ref.source;
-    final st = _parseSourceType(src['type'] as String?);
-    StaticAsset asset;
-
-    switch (st) {
-      case AssetSourceType.file:
-        final path = src['path'] as String?;
-        if (path == null) {
-          throw ArgumentError('Asset "${ref.name}" missing file path');
-        }
-        final bytes = await File(path).readAsBytes();
-        final type = _inferType(ref.typeHint, src);
-        asset = StaticAsset.bytes(
-          name: ref.name,
-          type: type,
-          data: bytes,
-          isRequired: ref.required,
-        );
-        break;
-      case AssetSourceType.url:
-        final url = src['url'] as String?;
-        if (url == null) {
-          throw ArgumentError('Asset "${ref.name}" missing url');
-        }
-        final client = HttpClient();
-        try {
-          final req = await client.getUrl(Uri.parse(url));
-          final resp = await req.close();
-          if (resp.statusCode != 200) {
-            throw HttpException('HTTP ${resp.statusCode} for $url');
-          }
-          final bytes = await consolidateHttpClientResponseBytes(resp);
-          final type = _inferType(ref.typeHint, src);
-          asset = StaticAsset.bytes(
-            name: ref.name,
-            type: type,
-            data: bytes,
-            isRequired: ref.required,
-          );
-        } finally {
-          client.close(force: true);
-        }
-        break;
-      case AssetSourceType.embedded:
-        final srcMap = src;
-        // Support explicit 'text' or 'bytes' keys, else fallback to 'data'.
-        if (srcMap.containsKey('text')) {
-          final text = srcMap['text'] as String? ?? '';
-          asset = StaticAsset.text(
-            name: ref.name,
-            data: text,
-            isRequired: ref.required,
-          );
-        } else if (srcMap.containsKey('bytes')) {
-          final raw = srcMap['bytes'];
-          final bytes = raw is String ? _asBytes(raw) : _asBytes(raw);
-          asset = StaticAsset.bytes(
-            name: ref.name,
-            type: AssetType.binary,
-            data: bytes,
-            isRequired: ref.required,
-          );
-        } else {
-          final data = srcMap['data'];
-          if (data == null) {
-            throw ArgumentError('Asset "${ref.name}" missing embedded data');
-          }
-          final hint = ref.typeHint;
-          if (data is Uint8List || data is List<int>) {
-            final bytes = _asBytes(data);
-            asset = StaticAsset.bytes(
-              name: ref.name,
-              type: AssetType.binary,
-              data: bytes,
-              isRequired: ref.required,
-            );
-          } else if (data is String) {
-            // Decide text vs bytes using hint, JSON, base64 heuristics.
-            if (hint != null &&
-                (hint.toLowerCase() == 'text' ||
-                    hint.toLowerCase() == 'json')) {
-              asset = StaticAsset.text(
-                name: ref.name,
-                data: data,
-                isRequired: ref.required,
-              );
-            } else if (hint != null && hint.toLowerCase() == 'binary') {
-              asset = StaticAsset.bytes(
-                name: ref.name,
-                type: AssetType.binary,
-                data: _asBytes(data),
-                isRequired: ref.required,
-              );
-            } else if (_looksLikeJsonString(data)) {
-              asset = StaticAsset.text(
-                name: ref.name,
-                data: data,
-                isRequired: ref.required,
-              );
-            } else if (_looksLikeBase64(data)) {
-              asset = StaticAsset.bytes(
-                name: ref.name,
-                type: AssetType.binary,
-                data: _asBytes(data),
-                isRequired: ref.required,
-              );
-            } else {
-              // Default to text for plain strings.
-              asset = StaticAsset.text(
-                name: ref.name,
-                data: data,
-                isRequired: ref.required,
-              );
-            }
-          } else {
-            // Fallback: serialize to bytes if possible.
-            final bytes = _asBytes(data);
-            asset = StaticAsset.bytes(
-              name: ref.name,
-              type: AssetType.binary,
-              data: bytes,
-              isRequired: ref.required,
-            );
-          }
-        }
-        break;
-      case AssetSourceType.generated:
-        // Tests expect not implemented
-        throw UnsupportedError(
-          'generated source not implemented for "${ref.name}"',
-        );
-      case AssetSourceType.preloaded:
-        final cached = _cache[ref.name]?.asset;
-        if (cached == null) {
-          throw StateError('preloaded asset "${ref.name}" not found');
-        }
-        asset = cached;
-        break;
+    final StaticAsset asset;
+    try {
+      asset = await _read(ref);
+    } catch (e) {
+      _safeEmit('failed', ref.name, message: '$e');
+      rethrow;
     }
 
-    // Always cache loaded assets for tests
-    _cache[ref.name] = _Entry(asset: asset, refCount: 1, persistent: true);
-    _currentBytes += _assetSize(asset);
+    // Another load of this name may have finished while this one read.
+    final raced = _cache[ref.name];
+    if (raced != null) {
+      return _acquire(ref.name, raced, persistent: ref.cache);
+    }
+    _put(ref.name, asset, persistent: ref.cache);
     _evictIfNeeded();
     _safeEmit('loaded', ref.name);
     return asset;
   }
 
-  /// Release decreases refcount; evict if zero and not persistent.
-  Future<void> release(String name) async {
-    final entry = _cache[name];
-    if (entry == null) return;
-    entry.refCount = (entry.refCount - 1).clamp(0, 1 << 30);
-    if (entry.refCount == 0 && !entry.persistent) {
-      final removed = _cache.remove(name);
-      if (removed != null) {
-        _currentBytes -= _assetSize(removed.asset);
-      }
-      _safeEmit('evicted', name);
-    } else {
-      _safeEmit('released', name);
+  Future<StaticAsset> _read(AssetConfig ref) async {
+    final src = ref.source;
+    switch (_parseSourceType(src['type'])) {
+      case AssetSourceType.file:
+        final path = src['path'];
+        if (path is! String) {
+          throw ArgumentError('Asset "${ref.name}" has no file path');
+        }
+        return StaticAsset.bytes(
+          name: ref.name,
+          type: _inferType(ref.typeHint, src),
+          data: await readFileSource(path),
+          isRequired: ref.required,
+        );
+      case AssetSourceType.url:
+        final url = src['url'];
+        if (url is! String) {
+          throw ArgumentError('Asset "${ref.name}" has no url');
+        }
+        return StaticAsset.bytes(
+          name: ref.name,
+          type: _inferType(ref.typeHint, src),
+          data: await readUrlSource(url),
+          isRequired: ref.required,
+        );
+      case AssetSourceType.embedded:
+        final data = readEmbeddedSource(ref.name, src, ref.typeHint);
+        return data is String
+            ? StaticAsset.text(
+                name: ref.name,
+                data: data,
+                isRequired: ref.required,
+              )
+            : StaticAsset.bytes(
+                name: ref.name,
+                type: AssetType.binary,
+                data: data as Uint8List,
+                isRequired: ref.required,
+              );
+      case AssetSourceType.generated:
+        throw UnsupportedError(
+          'Asset "${ref.name}": generated sources are not implemented',
+        );
+      case AssetSourceType.preloaded:
+        throw StateError('preloaded asset "${ref.name}" not found');
+      case null:
+        throw ArgumentError(
+          'Asset "${ref.name}" has an unknown source type "${src['type']}"',
+        );
     }
   }
 
+  /// Drops one holder of the asset [name]. When nothing holds it any more,
+  /// a persistent asset stays cached (emitting `released`) until the cache
+  /// limit evicts it, and any other is removed (emitting `evicted`).
+  Future<void> release(String name) async {
+    final entry = _cache[name];
+    if (entry != null) _drop(name, entry);
+  }
+
+  /// Caches [assets] under their keys for a short time, such as one frame,
+  /// and returns a token whose disposal drops them again.
+  ///
+  /// Throws a [StateError], and caches nothing, when a key names a cached
+  /// asset that something holds. A cached asset that nothing holds is
+  /// replaced. With [promoteToCache] the assets are persistent, so they stay
+  /// cached after the token is disposed.
   DisposableToken registerPerCall(
     Map<String, StaticAsset> assets, {
     bool promoteToCache = false,
   }) {
-    final names = <String>[];
-    for (final e in assets.entries) {
-      _cache[e.key] = _Entry(
-        asset: e.value,
-        refCount: 1,
-        persistent: promoteToCache,
+    final inUse = [
+      for (final name in assets.keys)
+        if ((_cache[name]?.refCount ?? 0) > 0) name,
+    ];
+    if (inUse.isNotEmpty) {
+      throw StateError(
+        'Cannot register per-call assets $inUse: cached assets of those '
+        'names are in use',
       );
-      names.add(e.key);
+    }
+    final entries = <String, _Entry>{};
+    for (final e in assets.entries) {
+      if (_remove(e.key) != null) _safeEmit('evicted', e.key);
+      entries[e.key] = _put(e.key, e.value, persistent: promoteToCache);
       _safeEmit('loaded', e.key);
     }
     _evictIfNeeded();
+    var disposed = false;
     return DisposableToken(() async {
-      for (final name in names) {
-        final entry = _cache[name];
-        if (entry == null) continue;
-        entry.refCount = (entry.refCount - 1).clamp(0, 1 << 30);
-        if (entry.refCount == 0 && !entry.persistent) {
-          final removed = _cache.remove(name);
-          if (removed != null) {
-            _currentBytes -= _assetSize(removed.asset);
-          }
-          _safeEmit('evicted', name);
-        } else {
-          _safeEmit('released', name);
-        }
+      if (disposed) return;
+      disposed = true;
+      for (final e in entries.entries) {
+        // Only the entry this call cached: the name may have been cleared
+        // and loaded again since.
+        if (identical(_cache[e.key], e.value)) _drop(e.key, e.value);
       }
     });
   }
 
-  // Materialize stage-provided asset if it references a source.
+  // Reads the data of a stage-provided asset that only names its source.
   Future<StaticAsset> _materializeIfNeeded(StaticAsset a) async {
     if (a.bytes != null || a.text != null || a.tensor != null) return a;
     final src = a.source;
     if (src == null) return a;
 
-    final st = _parseSourceType(src['type'] as String?);
-    switch (st) {
+    switch (_parseSourceType(src['type'])) {
       case AssetSourceType.file:
-        final path = src['path'] as String?;
-        if (path == null) return a;
-        final bytes = await File(path).readAsBytes();
-        a.bytes = bytes;
-        return a;
+        final path = src['path'];
+        if (path is! String) {
+          throw ArgumentError('Asset "${a.name}" has no file path');
+        }
+        a.bytes = await readFileSource(path);
       case AssetSourceType.url:
-        final url = src['url'] as String?;
-        if (url == null) return a;
-        final client = HttpClient();
-        try {
-          final req = await client.getUrl(Uri.parse(url));
-          final resp = await req.close();
-          if (resp.statusCode != 200) return a;
-          final bytes = await consolidateHttpClientResponseBytes(resp);
-          a.bytes = bytes;
-        } finally {
-          client.close(force: true);
+        final url = src['url'];
+        if (url is! String) {
+          throw ArgumentError('Asset "${a.name}" has no url');
         }
-        return a;
+        a.bytes = await readUrlSource(url);
       case AssetSourceType.embedded:
-        // Support explicit 'text' or 'bytes' keys, else fallback to 'data'.
-        if (src.containsKey('text')) {
-          final text = src['text'] as String? ?? '';
-          a.text = text;
-          return a;
-        }
-        if (src.containsKey('bytes')) {
-          final raw = src['bytes'];
-          a.bytes = raw is String ? _asBytes(raw) : _asBytes(raw);
-          return a;
-        }
-        final data = src['data'];
-        if (data == null) return a;
-        if (data is Uint8List || data is List<int>) {
-          a.bytes = _asBytes(data);
-          return a;
-        }
+        final data = readEmbeddedSource(a.name, src, a.type.name);
         if (data is String) {
-          if (_looksLikeJsonString(data)) {
-            a.text = data;
-          } else if (_looksLikeBase64(data)) {
-            a.bytes = _asBytes(data);
-          } else {
-            a.text = data;
-          }
-          return a;
+          a.text = data;
+        } else {
+          a.bytes = data as Uint8List;
         }
-        a.bytes = _asBytes(data);
-        return a;
       case AssetSourceType.generated:
-        // Keep unimplemented to align with tests elsewhere
-        throw UnsupportedError('generated materialization not implemented');
+        throw UnsupportedError(
+          'Asset "${a.name}": generated sources are not implemented',
+        );
       case AssetSourceType.preloaded:
-        return a;
+        break;
+      case null:
+        throw ArgumentError(
+          'Asset "${a.name}" has an unknown source type "${src['type']}"',
+        );
     }
+    return a;
   }
-}
-
-/// Helper to read all bytes from HttpClientResponse
-Future<Uint8List> consolidateHttpClientResponseBytes(
-  HttpClientResponse response,
-) async {
-  final chunks = <List<int>>[];
-  int contentLength = 0;
-  await for (final data in response) {
-    chunks.add(data);
-    contentLength += data.length;
-  }
-  final bytes = Uint8List(contentLength);
-  int offset = 0;
-  for (final chunk in chunks) {
-    bytes.setRange(offset, offset + chunk.length, chunk);
-    offset += chunk.length;
-  }
-  return bytes;
 }

@@ -16,19 +16,14 @@ class SampleStream extends MediaStream {
         context: null,
       );
 
-  bool _active = false;
-
   @override
-  bool get isActive => _active;
-
-  @override
-  Future<void> start() async {
-    _active = true;
+  Future<void> startCapture() async {
+    // Open the device here.
   }
 
   @override
-  Future<void> stop() async {
-    _active = false;
+  Future<void> stopCapture() async {
+    // Close it here.
   }
 
   void push(Float32List samples) => notifyHostData(samples, [samples.length]);
@@ -91,6 +86,7 @@ void main() {
     pipeline.addStream(stream);
 
     await pipeline.start();
+    expect(stream.isActive, isTrue);
     stream.push(Float32List.fromList([2, 4, 6, 8]));
 
     Tensor? latest;
@@ -102,6 +98,7 @@ void main() {
     expect(await latest!.getData(), equals([1.0, 2.0, 3.0, 4.0]));
 
     await pipeline.stop();
+    expect(stream.isActive, isFalse);
     await pipeline.dispose();
   });
 }

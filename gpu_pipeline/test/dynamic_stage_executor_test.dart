@@ -62,4 +62,33 @@ void main() {
     expect(executor.runs, 1);
     await stage.dispose();
   });
+
+  test('StageBuilder.executeCPU runs its step through the executor', () async {
+    final executor = _CountingExecutor(
+      (inputs, ranks, parameters) async => {
+        'output': Float32List.fromList([
+          for (final v in inputs['input']! as Float32List) v + 1,
+        ]),
+      },
+    );
+    final pipeline = Pipeline(id: 'builder_executor')
+      ..addStage(
+        StageBuilder('plus_one')
+            .executeCPU(
+              executor.processor,
+              inputKey: 'input',
+              outputKey: 'output',
+              executor: executor,
+            )
+            .build(),
+      );
+
+    final input = await Tensor.zeros([2]);
+    await input.write(Float32List.fromList([1, 2]));
+    final out = await pipeline.runOnce({'input': input});
+
+    expect(await out['output']!.getData(), equals([2, 3]));
+    expect(executor.runs, 1);
+    await pipeline.dispose();
+  });
 }

@@ -323,18 +323,22 @@ class AssetConfig {
   /// Examples:
   /// { "type": "file", "path": "models/mobilenet_v2.bin" }
   /// { "type": "url", "url": "https://..." }
-  /// { "type": "embedded", "data": "<base64 or small literal>" }
+  /// { "type": "embedded", "text": "..." }
+  /// { "type": "embedded", "bytes": "<base64>" }
   /// { "type": "preloaded" }
   final Map<String, dynamic> source;
 
-  /// If true, pipeline start should fail if this asset is unavailable.
+  /// If true, a pipeline fails to start when this asset fails to load.
+  /// Otherwise the pipeline skips it.
   final bool required;
 
-  /// "preload" | "lazy" | "per_call" | "stream"
+  /// When the asset loads: "preload" when a pipeline starts. Pipelines do
+  /// not load "lazy", "per_call" or "stream" assets; load those with
+  /// `AssetManager.load`.
   final String strategy;
 
-  /// Whether AssetManager should keep this asset after first load.
-  /// Defaults to true for preload, false for per_call.
+  /// Whether the asset stays cached when nothing holds it, until the cache
+  /// limit evicts it. Defaults to true for "preload" and false otherwise.
   final bool cache;
 
   /// Optional UI/validation hint: "weights" | "shader" | "texture" | "lut" | ...

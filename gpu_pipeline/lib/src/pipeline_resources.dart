@@ -1,5 +1,10 @@
 import 'dart:async';
 
+/// Deprecation message for the resource and scheduling hints that the
+/// pipeline stores but never reads.
+const String unusedResourceHint =
+    'Has no effect: the pipeline does not read it. Will be removed in 2.0.';
+
 /// Compute capability levels for GPU hardware
 enum ComputeCapability {
   basic, // Basic compute shaders
@@ -528,7 +533,9 @@ class PerformanceProfile {
   }
 }
 
-/// Resource governor for managing GPU resources
+/// A placeholder for GPU resource management. [initialize] reports two
+/// invented devices rather than the real adapter, and the metrics are
+/// synthetic. The pipeline does not use it.
 class ResourceGovernor {
   final List<GPUInfo> _availableGPUs = [];
   final Map<String, ResourceAllocation> _activeAllocations = {};

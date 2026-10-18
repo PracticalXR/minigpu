@@ -733,8 +733,6 @@ class ShaderStageOperation extends StageOperation
 
       return shader;
     } catch (e) {
-      print('❌ Shader compilation failed: $e');
-
       // Re-throw with more context for the test to catch
       throw Exception(
         'Failed to compile shader for operation $operationId: $e\n\nShader code:\n$shaderCode',
@@ -776,7 +774,8 @@ class ShaderStageOperation extends StageOperation
     return outputs;
   }
 
-  /// Calculate output shape for a specific output (can be overridden)
+  /// Calculate output shape for a specific output (can be overridden).
+  /// Throws a [StateError] when the output port cannot compute it.
   List<int> _calculateOutputShape(
     String outputKey,
     Map<String, Tensor> inputs,
@@ -790,7 +789,10 @@ class ShaderStageOperation extends StageOperation
           return shape;
         }
       } catch (e) {
-        print('⚠️ OutputPort shape calculation failed for $outputKey: $e');
+        throw StateError(
+          'Operation $operationId cannot compute the shape of output '
+          '"$outputKey": $e',
+        );
       }
     }
     // Fallback: output shape matches first input shape
@@ -1008,9 +1010,6 @@ class ShaderFunctionOperation extends StageOperation with CacheAwareOperation {
           inputs[outputKey]!.shape.first > inputTensor.shape.first) {
         // Use the larger pre-allocated output tensor (from TextureOutputPort)
         outputTensor = inputs[outputKey]!;
-        print(
-          '🎯 Using pre-allocated output tensor "$outputKey" with shape: ${outputTensor.shape}',
-        );
       } else {
         // Check cache before allocating to avoid per-frame VRAM growth.
         final outputCacheKey = cache.createTensorKey(
@@ -1072,9 +1071,6 @@ class ShaderFunctionOperation extends StageOperation with CacheAwareOperation {
           for (final contextEntry in contextParams.entries) {
             if (contextEntry.key.toLowerCase() == lowerParamName) {
               resolvedValue = contextEntry.value;
-              print(
-                '🔧 Found case-insensitive match: ${contextEntry.key} -> $resolvedValue',
-              );
               break;
             }
           }
@@ -1091,9 +1087,6 @@ class ShaderFunctionOperation extends StageOperation with CacheAwareOperation {
         final runtimeOverride = contextParams[paramKey];
         if (runtimeOverride != null) {
           resolved[paramKey] = runtimeOverride;
-          print(
-            '🔧 Runtime override for $paramKey: $paramValue -> $runtimeOverride',
-          );
         } else {
           // Use the original value
           resolved[paramKey] = paramValue;

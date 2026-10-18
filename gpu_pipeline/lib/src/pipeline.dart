@@ -1,12 +1,14 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:gpu_pipeline/gpu_pipeline.dart';
+import 'package:gpu_pipeline/src/pipeline_ports.dart' show ValidationResult;
+import 'package:gpu_pipeline/src/serialization/connection_graph.dart'
+    show defaultConnectionInput, defaultConnectionOutput;
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
-import 'package:gpu_pipeline/src/pipeline_assets.dart';
 import 'package:gpu_pipeline/src/pipeline_resources.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
 import 'package:minigpu/minigpu.dart' show ComputeShader;
-import 'serialization/pipeline_models.dart';
 
 /// Stream routing strategies
 enum StreamRouting {
@@ -124,7 +126,7 @@ class Pipeline {
   // Enhanced subsystems
   final ResourceCache _resourceCache;
   final AssetManager _assetManager;
-  final ResourceGovernor _resourceGovernor;
+  ResourceGovernor? _resourceGovernor;
   final MainThreadMonitor _threadMonitor = MainThreadMonitor();
 
   final QueueConfig _queueConfig;
@@ -189,10 +191,14 @@ class Pipeline {
   final Map<String, Duration> _stageTimings = {};
   final Map<String, int> _stageExecutionCounts = {};
 
-  // Connections for serialized pipelines
+  // Connections for serialized pipelines, and the ones into each stage
   List<ConnectionConfig> _connections = const [];
+  Map<String, List<ConnectionConfig>> _incoming = const {};
 
   List<AssetConfig> _serializedAssets = const [];
+
+  /// The network assets this pipeline holds, from [start] until [stop].
+  final List<String> _heldAssets = [];
 
   // External inputs cache (for inter-pipeline links) and latest outputs
   final Map<String, Tensor> _externalInputs = <String, Tensor>{};
@@ -204,6 +210,14 @@ class Pipeline {
   final Map<Tensor, String> _ingestOwner = {};
   // Batched queue flush timer
   Timer? _batchFlushTimer;
+
+  /// Creates a pipeline.
+  ///
+  /// [maxCachedShaders] and [maxCachedTensors] bound [resourceCache].
+  /// [maxMemoryMB] is the [assetManager]'s cache limit. A manager the
+  /// pipeline creates gets 4096 MB by default; a manager passed in may be
+  /// shared with other pipelines, so it keeps its own limit unless
+  /// [maxMemoryMB] is given.
   Pipeline({
     required this.id,
     QueueConfig? queueConfig,
@@ -212,18 +226,23 @@ class Pipeline {
     this.debugEnabled = false,
     int maxCachedShaders = 100,
     int maxCachedTensors = 200,
-    int maxMemoryMB = 4096,
-    AssetManager? assetManager, // allow external manager
-  }) : _resourceCache = ResourceCache.forPipeline(id),
+    int? maxMemoryMB,
+    AssetManager? assetManager,
+  }) : _resourceCache = ResourceCache.forPipeline(
+         id,
+         maxShaders: maxCachedShaders,
+         maxTensors: maxCachedTensors,
+       ),
        _assetManager = assetManager ?? AssetManager(),
-       _resourceGovernor = ResourceGovernor(),
        _queueConfig = queueConfig ?? const QueueConfig() {
     _eventNotifier = PipelineEventNotifier(
       enableBenchmarking: enableBenchmarking,
       maxEvents: maxEvents,
     );
 
-    _assetManager.setCacheLimit(maxMemoryMB * 1024 * 1024);
+    if (assetManager == null || maxMemoryMB != null) {
+      _assetManager.setCacheLimit((maxMemoryMB ?? 4096) * 1024 * 1024);
+    }
   }
 
   // Getters
@@ -237,7 +256,15 @@ class Pipeline {
   PipelineEventNotifier get eventNotifier => _eventNotifier;
   ResourceCache get resourceCache => _resourceCache;
   AssetManager get assetManager => _assetManager;
-  ResourceGovernor get resourceGovernor => _resourceGovernor;
+
+  /// A standalone placeholder: the pipeline neither initializes nor
+  /// consults it.
+  @Deprecated(
+    'The pipeline does not use it, and its device list and metrics are '
+    'invented. Will be removed in 2.0.',
+  )
+  ResourceGovernor get resourceGovernor =>
+      _resourceGovernor ??= ResourceGovernor();
 
   // Message is a CLOSURE: Dart evaluates argument expressions eagerly, so a
   // plain String parameter paid for every hot-path interpolation (shapes,
@@ -263,8 +290,15 @@ class Pipeline {
     _eventNotifier.removeEventListener(type, listener);
   }
 
-  /// Add stage with configuration
+  /// Adds [stage], run for the streams [streamConfig] selects.
+  ///
+  /// Throws a [StateError] for a merge stage in a pipeline with serialized
+  /// connections, since merged streams cannot be routed.
   void addStage(PipelineStage stage, [StageStreamConfig? streamConfig]) {
+    if (streamConfig?.routing == StreamRouting.merged &&
+        _connections.isNotEmpty) {
+      throw StateError(_mergeWithConnections);
+    }
     stage.setEventNotifier(_eventNotifier);
 
     if (stage is DynamicStage) {
@@ -308,7 +342,7 @@ class Pipeline {
         if (!_isRunning || _isShuttingDown) return;
         if (!_streams.contains(stream)) return;
 
-        // Chain ingestion work per-stream to prevent concurrent _materializeHostFrame
+        // Chain ingestion work per-stream to prevent concurrent host uploads
         final prev = _ingestSerializers[stream.id] ?? Future.value();
         final next = prev
             .then((_) async {
@@ -418,64 +452,76 @@ class Pipeline {
     }
   }
 
-  /// Upload (or reuse + update) a host frame into a GPU tensor.
-  Future<Tensor> _materializeHostFrame(
+  /// Uploads [data], a host buffer of [streamId], into a pooled GPU tensor
+  /// of the same element type. [shape] is flattened when its element count
+  /// does not match the data's.
+  Future<Tensor> _uploadHostData(
     String streamId,
     TypedData data,
-    BufferDataType dataType,
     List<int> shape,
   ) async {
-    final rawByteLen = data.lengthInBytes;
-    final shapeProd0 = shape.fold<int>(1, (a, b) => a * b);
-    if (debugEnabled) {
-      _debugLog(
-        () =>
-            '[INGEST] host frame start stream=$streamId type=$dataType '
-            'shape=${shape.join("x")} prod=$shapeProd0 bytes=$rawByteLen',
-      );
-    }
+    // Bytes without an element type upload as uint8.
+    final TypedData values = data is ByteData || data is Uint8ClampedList
+        ? Uint8List.view(data.buffer, data.offsetInBytes, data.lengthInBytes)
+        : data;
+    final dataType = _hostDataType(values);
+    final fixedShape = _fixShape(shape, _elementCountOf(values));
 
-    // Compute element count implied by shape and by datatype
-    final expectedLen = shape.fold<int>(1, (a, b) => a * b);
-    final elementCount = _elementCountFor(dataType, data.lengthInBytes);
+    final tensor = await _acquireIngestTensor(streamId, fixedShape, dataType);
+    await tensor.write(values);
 
-    // Fix shape if it doesn't match data
-    if (expectedLen != elementCount) {
-      if (debugEnabled) {
-        _debugLog(
-          () =>
-              '⚠️ Host frame shape mismatch stream=$streamId '
-              'shape=${shape.join("x")} prod=$expectedLen dataElems=$elementCount -> flatten',
-        );
-      }
-      shape = [elementCount];
-    }
-
-    // Normalize to Float32List
-    final Float32List f32 = _convertToFloat32(data, dataType, elementCount);
-
-    if (debugEnabled) {
-      final preview = f32.length > 8 ? f32.sublist(0, 8) : f32;
-      _debugLog(
-        () =>
-            '[INGEST] normalized -> shape=${shape.join("x")} '
-            'len=${f32.length} first=$preview',
-      );
-    }
-
-    // Acquire a tensor from per-stream pool that is not currently in use
-    final gpuTensor = await _acquireIngestTensor(streamId, shape);
-    await gpuTensor.write(f32);
-
-    if (debugEnabled) {
-      _debugLog(
-        () =>
-            '[INGEST] tensor gpu buffer shape=${gpuTensor.shape} '
-            'elements=${gpuTensor.shape.fold(1, (a, b) => a * b)}',
-      );
-    }
-    return gpuTensor;
+    _debugLog(
+      () =>
+          '[INGEST] uploaded stream=$streamId type=$dataType '
+          'shape=${fixedShape.join("x")}',
+    );
+    return tensor;
   }
+
+  /// The GPU element type for host buffer [data]: float32 for a list type
+  /// without its own.
+  static BufferDataType _hostDataType(TypedData data) => switch (data) {
+    Float64List() => BufferDataType.float64,
+    Int8List() => BufferDataType.int8,
+    Uint8List() => BufferDataType.uint8,
+    Int16List() => BufferDataType.int16,
+    Uint16List() => BufferDataType.uint16,
+    Int32List() => BufferDataType.int32,
+    Uint32List() => BufferDataType.uint32,
+    Int64List() => BufferDataType.int64,
+    Uint64List() => BufferDataType.uint64,
+    _ => BufferDataType.float32,
+  };
+
+  /// A zeroed tensor of [dataType] whose data reads back as that type's
+  /// list.
+  static Future<Tensor> _zeros(
+    List<int> shape,
+    BufferDataType dataType,
+  ) => switch (dataType) {
+    BufferDataType.float32 => Tensor.zeros<Float32List>(shape),
+    BufferDataType.float64 => Tensor.zeros<Float64List>(
+      shape,
+      dataType: dataType,
+    ),
+    BufferDataType.int8 => Tensor.zeros<Int8List>(shape, dataType: dataType),
+    BufferDataType.uint8 => Tensor.zeros<Uint8List>(shape, dataType: dataType),
+    BufferDataType.int16 => Tensor.zeros<Int16List>(shape, dataType: dataType),
+    BufferDataType.uint16 || BufferDataType.float16 => Tensor.zeros<Uint16List>(
+      shape,
+      dataType: dataType,
+    ),
+    BufferDataType.int32 => Tensor.zeros<Int32List>(shape, dataType: dataType),
+    BufferDataType.uint32 => Tensor.zeros<Uint32List>(
+      shape,
+      dataType: dataType,
+    ),
+    BufferDataType.int64 => Tensor.zeros<Int64List>(shape, dataType: dataType),
+    BufferDataType.uint64 => Tensor.zeros<Uint64List>(
+      shape,
+      dataType: dataType,
+    ),
+  };
 
   int _elementCountFor(BufferDataType dataType, int byteLength) {
     switch (dataType) {
@@ -550,19 +596,52 @@ class Pipeline {
       for (var i = 0; i < elementCount; i++) {
         f32[i] = view[i].toDouble();
       }
+    } else if (dataType == BufferDataType.float64) {
+      final view = data is Float64List
+          ? data
+          : Float64List.view(data.buffer, data.offsetInBytes, elementCount);
+      for (var i = 0; i < elementCount; i++) {
+        f32[i] = view[i];
+      }
+    } else if (dataType == BufferDataType.float16) {
+      final view = data is Uint16List
+          ? data
+          : Uint16List.view(data.buffer, data.offsetInBytes, elementCount);
+      for (var i = 0; i < elementCount; i++) {
+        f32[i] = _halfToDouble(view[i]);
+      }
     } else {
-      // Fallback reinterpret
-      final view = Float32List.view(
+      // int64 and uint64, read as two 32-bit halves: the web has no 64-bit
+      // integer lists.
+      final bytes = ByteData.view(
         data.buffer,
         data.offsetInBytes,
-        (data.buffer.lengthInBytes - data.offsetInBytes) ~/ 4,
+        elementCount * 8,
       );
-      final copyLen = view.length < elementCount ? view.length : elementCount;
-      for (var i = 0; i < copyLen; i++) {
-        f32[i] = view[i];
+      final signed = dataType == BufferDataType.int64;
+      final lowFirst = Endian.host == Endian.little;
+      for (var i = 0; i < elementCount; i++) {
+        final low = bytes.getUint32(i * 8 + (lowFirst ? 0 : 4), Endian.host);
+        final highAt = i * 8 + (lowFirst ? 4 : 0);
+        final high = signed
+            ? bytes.getInt32(highAt, Endian.host)
+            : bytes.getUint32(highAt, Endian.host);
+        f32[i] = high * 4294967296.0 + low;
       }
     }
     return f32;
+  }
+
+  /// The value of the IEEE 754 half-precision number with these [bits].
+  static double _halfToDouble(int bits) {
+    final sign = (bits & 0x8000) != 0 ? -1.0 : 1.0;
+    final exponent = (bits >> 10) & 0x1f;
+    final fraction = bits & 0x3ff;
+    if (exponent == 0x1f) {
+      return fraction == 0 ? sign * double.infinity : double.nan;
+    }
+    if (exponent == 0) return sign * fraction / 16777216;
+    return sign * (1024 + fraction) * math.pow(2, exponent - 25);
   }
 
   /// Start pipeline
@@ -581,12 +660,7 @@ class Pipeline {
     );
 
     try {
-      // Initialize resource governor
-      await _resourceGovernor.initialize();
-
-      if (_serializedAssets.isNotEmpty) {
-        await _assetManager.preloadBatch(_serializedAssets);
-      }
+      await _loadNetworkAssets();
 
       // Preload all stage assets
       await _preloadAllAssets();
@@ -608,6 +682,7 @@ class Pipeline {
           stackTrace: stackTrace,
         ),
       );
+      await _releaseAssets();
       rethrow;
     }
   }
@@ -617,19 +692,37 @@ class Pipeline {
     _serializedAssets = List<AssetConfig>.unmodifiable(assets);
   }
 
-  /// Preload assets for all stages
+  /// Loads the network assets whose strategy is `preload`, and holds each
+  /// until [stop]. An optional one that fails to load is skipped; the asset
+  /// manager reports it with a `failed` event.
+  Future<void> _loadNetworkAssets() async {
+    for (final ref in _serializedAssets) {
+      if (ref.strategy != 'preload') continue;
+      try {
+        await _assetManager.load(ref);
+      } catch (_) {
+        if (ref.required) rethrow;
+        continue;
+      }
+      _heldAssets.add(ref.name);
+    }
+  }
+
+  /// Drops the references to network and stage assets that [start] took.
+  Future<void> _releaseAssets() async {
+    final held = List.of(_heldAssets);
+    _heldAssets.clear();
+    for (final name in held) {
+      await _assetManager.release(name);
+    }
+    for (final stage in _stages) {
+      await stage.releaseAssets();
+    }
+  }
+
+  /// Preloads each stage's assets into the asset manager, once.
   Future<void> _preloadAllAssets() async {
     _debugLog(() => '📦 Preloading assets for ${_stages.length} stages...');
-
-    final allAssets = <StaticAsset>[];
-    for (final stage in _stages) {
-      allAssets.addAll(stage.requiredAssets);
-    }
-
-    if (allAssets.isNotEmpty) {
-      await _assetManager.preloadBatch(allAssets);
-      _debugLog(() => '✅ Preloaded ${allAssets.length} assets');
-    }
 
     for (final stage in _stages) {
       await stage.preloadAssets(_assetManager);
@@ -643,13 +736,6 @@ class Pipeline {
     for (final stage in _stages) {
       try {
         _debugLog(() => '🔧 Initializing stage: ${stage.stageId}');
-
-        if (stage.resourceRequirements != null) {
-          await _resourceGovernor.allocateResources(
-            stage.resourceRequirements!,
-          );
-        }
-
         await stage.initializeStage();
         _debugLog(() => '✅ Stage ${stage.stageId} initialized successfully');
       } catch (e, stackTrace) {
@@ -994,10 +1080,23 @@ class Pipeline {
 
     if (item.isHost) {
       // CPU-first path with CPU↔GPU toggling.
-      // _processStreamIndividuallyHost may call _materializeHostFrame which
-      // acquires tensors from the ingest pool — release any tensors marked
-      // in-use for this stream after processing so the pool can reuse them.
+      // Host buffers are uploaded into tensors from the ingest pool —
+      // release any tensors marked in-use for this stream after processing
+      // so the pool can reuse them.
       try {
+        if (_connections.isNotEmpty) {
+          final shapes = item.hostShapes ?? const <String, List<int>>{};
+          final frame = <String, Tensor>{
+            for (final entry in item.host!.entries)
+              entry.key: await _uploadHostData(
+                item.streamId,
+                entry.value,
+                shapes[entry.key] ?? [_elementCountOf(entry.value)],
+              ),
+          };
+          await _processStreamRouted(frame, item.format, item.streamId);
+          return;
+        }
         await _processStreamIndividuallyHost(
           item.host!,
           item.hostShapes ?? const {},
@@ -1018,6 +1117,12 @@ class Pipeline {
     }
 
     // GPU path:
+
+    if (_connections.isNotEmpty) {
+      await _processStreamRouted(item.tensors!, item.format, item.streamId);
+      _releaseIngestTensorsForItem(item.streamId, item.tensors!);
+      return;
+    }
 
     // Store for merging.  In merging mode the entry is replaced with a
     // SNAPSHOT after per-stream processing — raw ingest tensors are pooled
@@ -1237,7 +1342,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
 
       // Prepare inputs based on what the stage expects
-      final stageInputs = _prepareStageInputs(stage, currentTensors, i);
+      final stageInputs = _prepareStageInputs(stage, currentTensors);
 
       final result = await _executeStage(
         stage,
@@ -1373,10 +1478,23 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             () => '⚙️ [CPU-only] ${stage.stageId} for stream $streamId',
           );
           try {
-            final hostOut = await stage.processCPUOnly(
-              currentHost,
-              currentShapes,
-            );
+            var host = currentHost;
+            var shapes = currentShapes;
+            if (!stage.inputPortCollection.isEmpty) {
+              final sources = _inputSources(stage, currentHost);
+              host = _mapInputs(sources, currentHost);
+              shapes = {
+                for (final entry in host.entries)
+                  entry.key:
+                      currentShapes[sources[entry.key]] ??
+                      [_elementCountOf(entry.value)],
+              };
+              _requireValidInputs(
+                stage,
+                stage.inputPortCollection.validateShapes(shapes),
+              );
+            }
+            final hostOut = await stage.processCPUOnly(host, shapes);
             currentHost = hostOut.data;
             currentShapes = hostOut.shapes;
             stagesProcessed++;
@@ -1426,48 +1544,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             ? stage.inputPorts.map((p) => p.name).toList()
             : <String>['input'];
 
+        final uploaded = <String, Tensor>{};
         for (final key in requiredKeys) {
-          final td =
-              currentHost[key] ??
-              currentHost['output'] ??
-              (currentHost.isNotEmpty ? currentHost.values.first : null);
-          if (td == null) continue;
+          final source = currentHost.containsKey(key)
+              ? key
+              : currentHost.containsKey('output')
+              ? 'output'
+              : (currentHost.isNotEmpty ? currentHost.keys.first : null);
+          if (source == null) continue;
 
-          final shape =
-              currentShapes[key] ??
-              currentShapes['output'] ??
-              <int>[td.lengthInBytes ~/ 4];
-
-          final t = await _materializeHostFrame(
+          final td = currentHost[source]!;
+          currentTensors[key] = uploaded[source] ??= await _uploadHostData(
             streamId,
             td,
-            BufferDataType.float32,
-            shape,
+            currentShapes[source] ?? [_elementCountOf(td)],
           );
-          currentTensors[key] = t;
-        }
-
-        if (currentTensors.isEmpty && currentHost.isNotEmpty) {
-          final firstKey = currentHost.keys.first;
-          final td = currentHost[firstKey]!;
-          final shape = currentShapes[firstKey] ?? <int>[td.lengthInBytes ~/ 4];
-          final t = await _materializeHostFrame(
-            streamId,
-            td,
-            BufferDataType.float32,
-            shape,
-          );
-          currentTensors['input'] = t;
         }
       }
 
       // GPU mode: execute stage normally
       _debugLog(() => '⚙️ [GPU] ${stage.stageId} for stream $streamId');
-      final stageInputs = _prepareStageInputs(
-        stage,
-        currentTensors,
-        i /* stage index */,
-      );
+      final stageInputs = _prepareStageInputs(stage, currentTensors);
 
       final result = await _executeStage(
         stage,
@@ -1541,9 +1638,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       t ??= tensors.isNotEmpty ? tensors.values.first : null;
       if (t == null) continue;
 
-      final data = await t.getData(); // expect Float32List
-      final f32 = data as Float32List;
-      host[key] = f32;
+      host[key] = await t.getData();
       shapes[key] = List<int>.from(t.shape);
     }
 
@@ -1573,6 +1668,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     Map<String, Duration> timings,
   ) async {
     try {
+      if (!stage.inputPortCollection.isEmpty) {
+        inputs = _mapInputs(_inputSources(stage, inputs), inputs);
+        _requireValidInputs(
+          stage,
+          stage.inputPortCollection.validateShapes({
+            for (final entry in inputs.entries) entry.key: entry.value.shape,
+          }),
+        );
+      }
       final firstShape = inputs.values.isNotEmpty
           ? inputs.values.first.shape
           : const <int>[];
@@ -1631,29 +1735,46 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  /// One-shot synchronous style execution for tests.
-  /// Feeds [initialInputs] into the first stage and returns the final stage outputs.
+  /// Runs every stage once on [initialInputs] and returns the final
+  /// stage's outputs. Inputs set with [setExternalInput] are available too;
+  /// [initialInputs] win over them.
+  ///
+  /// In a pipeline with serialized connections, each stage reads the
+  /// outputs its connections name, a port no connection feeds reads the
+  /// input of its own name, and the result is the outputs of the last
+  /// stage. Without connections, each stage reads the latest tensors by
+  /// name, and the result is the outputs of the last stage that produced
+  /// any.
+  ///
+  /// Throws an [ArgumentError] when a stage's inputs do not satisfy its
+  /// input ports, and a [StateError] when a connection names an output its
+  /// source stage did not produce.
   Future<Map<String, Tensor>> runOnce(Map<String, Tensor> initialInputs) async {
     final stages = _stages;
     if (stages.isEmpty) return {};
 
     final runStart = DateTime.now();
+    final routed = _connections.isNotEmpty;
 
-    // Merge external inputs first, then explicit inputs take precedence
-    final available = <String, Tensor>{}
-      ..addAll(_externalInputs)
-      ..addAll(initialInputs);
+    // External inputs first, then explicit inputs take precedence
+    final runInputs = <String, Tensor>{..._externalInputs, ...initialInputs};
+    final available = Map.of(runInputs);
+    final stageOutputs = <String, Map<String, Tensor>>{};
 
     Map<String, Tensor> lastOutputs = {};
     int stagesProcessed = 0;
     String finalFormat = '';
 
-    for (var i = 0; i < stages.length; i++) {
-      final stage = stages[i];
-      final inputs = _prepareStageInputs(stage, available, i);
+    for (final stage in stages) {
+      final inputs = routed
+          ? _routeStageInputs(stage, stageOutputs, runInputs)
+          : _prepareStageInputs(stage, available);
+      _requireValidInputs(stage, stage.inputPortCollection.validateAll(inputs));
       final outputs = await stage.process(inputs);
+      stageOutputs[stage.stageId] = outputs;
+      if (routed) lastOutputs = outputs;
       if (outputs.isNotEmpty) {
-        lastOutputs = outputs;
+        if (!routed) lastOutputs = outputs;
         available.addAll(outputs);
         stagesProcessed++;
         finalFormat = stage.outputFormat;
@@ -1709,15 +1830,192 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   /// empty for a pipeline assembled in code.
   List<ConnectionConfig> get serializedConnections => _connections;
 
+  /// Routes each stage's inputs along [connections], the connections of the
+  /// serialized config this pipeline was built from. Each stage must be
+  /// added after the stages it reads.
+  ///
+  /// Throws a [StateError] when the pipeline has a merge stage, since merged
+  /// streams cannot be routed.
   void setSerializedConnections(List<ConnectionConfig> connections) {
-    _connections = connections;
+    if (connections.isNotEmpty && _needsMerging()) {
+      throw StateError(_mergeWithConnections);
+    }
+    final incoming = <String, List<ConnectionConfig>>{};
+    for (final connection in connections) {
+      (incoming[connection.toStage] ??= []).add(connection);
+    }
+    _connections = List.unmodifiable(connections);
+    _incoming = incoming;
   }
 
-  /// Prepare inputs for a stage based on its requirements
+  String get _mergeWithConnections =>
+      'Pipeline $id routes its stages along serialized connections, so it '
+      'cannot merge streams';
+
+  /// The inputs [stage] reads in a pipeline with serialized connections:
+  /// for each connection into it, the output the connection names of a
+  /// stage in [stageOutputs], and for each port no connection feeds, the
+  /// run input of its name in [runInputs]. A stage without ports or
+  /// incoming connections gets all the run inputs.
+  ///
+  /// Throws a [StateError] when a connection's source stage has not run,
+  /// or the output or input it means cannot be told.
+  Map<String, Tensor> _routeStageInputs(
+    PipelineStage stage,
+    Map<String, Map<String, Tensor>> stageOutputs,
+    Map<String, Tensor> runInputs,
+  ) {
+    final incoming = _incoming[stage.stageId] ?? const <ConnectionConfig>[];
+    final ports = stage.inputPortCollection.names;
+    if (ports.isEmpty && incoming.isEmpty) return Map.of(runInputs);
+
+    final inputs = <String, Tensor>{};
+    for (final connection in incoming) {
+      final from = connection.fromStage;
+      final outputs = stageOutputs[from];
+      if (outputs == null) {
+        throw StateError(
+          'Stage ${stage.stageId} reads stage $from, which has not run '
+          'before it',
+        );
+      }
+      if (outputs.isEmpty) {
+        throw StateError(
+          'Stage ${stage.stageId} reads stage $from, which produced no '
+          'outputs',
+        );
+      }
+      final output =
+          connection.fromOutput ?? defaultConnectionOutput(outputs.keys);
+      if (output == null) {
+        throw StateError(
+          'The connection from $from to ${stage.stageId} needs a '
+          'from_output: $from produced ${outputs.keys.toList()}',
+        );
+      }
+      final tensor = outputs[output];
+      if (tensor == null) {
+        throw StateError(
+          'Stage ${stage.stageId} reads output $output of stage $from, which '
+          'produced ${outputs.keys.toList()}',
+        );
+      }
+      final input = connection.toInput ?? defaultConnectionInput(ports);
+      if (input == null) {
+        throw StateError(
+          'The connection from $from to ${stage.stageId} needs a to_input: '
+          'the stage has ports $ports',
+        );
+      }
+      inputs[input] = tensor;
+    }
+    for (final name in ports) {
+      if (!inputs.containsKey(name)) {
+        final tensor = runInputs[name];
+        if (tensor != null) inputs[name] = tensor;
+      }
+    }
+    return inputs;
+  }
+
+  /// Runs one frame of [streamId] through the stages along the serialized
+  /// connections. A stage is skipped when a stage it reads produced nothing
+  /// for this frame, because it was skipped for the stream, failed or
+  /// returned no outputs. The frame's outputs are the last stage's.
+  Future<void> _processStreamRouted(
+    Map<String, Tensor> frame,
+    String format,
+    String streamId,
+  ) async {
+    final runInputs = <String, Tensor>{..._externalInputs, ...frame};
+    final stageOutputs = <String, Map<String, Tensor>>{};
+    final formats = <String, String>{};
+    final stageTimings = <String, Duration>{};
+    int stagesProcessed = 0;
+    final runStart = DateTime.now();
+
+    for (final stage in _stages) {
+      if (!_isRunning) break;
+
+      final stageConfig =
+          _stageStreamConfigs[stage.stageId] ?? const StageStreamConfig();
+      if (!stageConfig.shouldProcessStream(streamId)) continue;
+
+      final incoming = _incoming[stage.stageId] ?? const <ConnectionConfig>[];
+      if (incoming.any((c) => !stageOutputs.containsKey(c.fromStage))) {
+        _debugLog(
+          () =>
+              '⏭️ Skipping stage ${stage.stageId} for stream $streamId: a '
+              'stage it reads produced nothing',
+        );
+        continue;
+      }
+
+      final Map<String, Tensor> inputs;
+      try {
+        inputs = _routeStageInputs(stage, stageOutputs, runInputs);
+      } catch (e, stackTrace) {
+        _eventNotifier.emit(
+          StageErrorEvent(
+            pipelineId: id,
+            stageId: stage.stageId,
+            error: e.toString(),
+            stackTrace: stackTrace,
+            metadata: {'stream_id': streamId},
+          ),
+        );
+        continue;
+      }
+
+      final result = await _executeStage(
+        stage,
+        inputs,
+        incoming.isEmpty ? format : formats[incoming.first.fromStage]!,
+        streamId,
+        stageTimings,
+      );
+      // Null when the stage failed or returned no outputs.
+      if (result == null) continue;
+
+      stageOutputs[stage.stageId] = result.$1;
+      formats[stage.stageId] = result.$2;
+      stagesProcessed++;
+      _stageOutputs['${stage.stageId}_$streamId'] = result.$1;
+    }
+
+    final last = _stages.isEmpty ? null : _stages.last.stageId;
+    final finalOutputs = stageOutputs[last] ?? const <String, Tensor>{};
+    if (finalOutputs.isNotEmpty) {
+      _stageOutputs['final_$streamId'] = finalOutputs;
+      _lastStreamTensors[streamId] = finalOutputs;
+    }
+
+    // Make latest outputs available to the router for link forwarding
+    _latestFinalOutputs = finalOutputs.isNotEmpty
+        ? Map<String, Tensor>.from(finalOutputs)
+        : null;
+
+    _eventNotifier.emit(
+      PipelineRunCompleteEvent(
+        pipelineId: id,
+        runDuration: DateTime.now().difference(runStart),
+        stagesProcessed: stagesProcessed,
+        finalFormat: formats[last] ?? format,
+        finalTensorShape: finalOutputs.isNotEmpty
+            ? finalOutputs.values.first.shape
+            : const <int>[],
+        stageTimings: stageTimings,
+        metadata: {'stream_id': streamId, 'processing_type': 'routed'},
+      ),
+    );
+  }
+
+  /// The inputs [stage] reads in a pipeline without connections: a stage
+  /// without ports gets one tensor, as `input`; otherwise see
+  /// [_inputSources].
   Map<String, Tensor> _prepareStageInputs(
     PipelineStage stage,
     Map<String, Tensor> availableTensors,
-    int stageIndex,
   ) {
     // DEBUG: show what we have before mapping
     if (debugEnabled) {
@@ -1729,72 +2027,19 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       );
     }
 
-    final inputs = <String, Tensor>{};
-
     // FAST PATH: no declared ports (legacy)
-    if (stage.inputPorts.isEmpty) {
+    if (stage.inputPortCollection.isEmpty) {
       final chosen =
           availableTensors['output'] ??
           availableTensors['input'] ??
           (availableTensors.isNotEmpty ? availableTensors.values.first : null);
-      if (chosen != null) {
-        inputs['input'] = chosen;
-      }
-      if (debugEnabled) {
-        _debugLog(
-          () =>
-              '🧩 (legacy) mapped single tensor -> input '
-              '${chosen?.shape}',
-        );
-      }
-      return inputs;
+      return {if (chosen != null) 'input': chosen};
     }
 
-    // Pass 1: direct name matches
-    for (final port in stage.inputPorts) {
-      if (availableTensors.containsKey(port.name)) {
-        inputs[port.name] = availableTensors[port.name]!;
-      }
-    }
-
-    // Pass 2: previous stage output port name match
-    if (stageIndex > 0) {
-      final previousStage = _stages[stageIndex - 1];
-      for (final port in stage.inputPorts) {
-        if (inputs.containsKey(port.name)) continue;
-        for (final prevOut in previousStage.outputPorts) {
-          if (prevOut.name == port.name &&
-              availableTensors.containsKey(prevOut.name)) {
-            inputs[port.name] = availableTensors[prevOut.name]!;
-            break;
-          }
-        }
-      }
-    }
-
-    // Pass 3: heuristic mapping (ONLY if still missing)
-    for (final port in stage.inputPorts) {
-      if (inputs.containsKey(port.name)) continue;
-
-      // Prefer canonical single-value outputs if present
-      if (availableTensors.containsKey('output')) {
-        inputs[port.name] = availableTensors['output']!;
-      } else if (availableTensors.containsKey('input')) {
-        inputs[port.name] = availableTensors['input']!;
-      } else if (availableTensors.isNotEmpty) {
-        // Last resort: pick first
-        final firstKey = availableTensors.keys.first;
-        inputs[port.name] = availableTensors[firstKey]!;
-        if (debugEnabled) {
-          _debugLog(() => '⚠️ Fallback mapping $firstKey -> ${port.name}');
-        }
-      }
-    }
-
-    // OPTIONAL: provide remaining tensors as auxiliary (non-destructive)
-    for (final entry in availableTensors.entries) {
-      inputs.putIfAbsent(entry.key, () => entry.value);
-    }
+    final inputs = _mapInputs(
+      _inputSources(stage, availableTensors),
+      availableTensors,
+    );
 
     if (debugEnabled) {
       _debugLog(
@@ -1807,15 +2052,67 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return inputs;
   }
 
-  /// Execute individual stage
+  /// Where each input of [stage] comes from in a pipeline without
+  /// connections, as input name to key of [available]: a port reads the
+  /// key of its own name, else `output`, else `input`, else the first key,
+  /// and every other key is passed on under its own name.
+  Map<String, String> _inputSources(
+    PipelineStage stage,
+    Map<String, Object?> available,
+  ) {
+    if (available.isEmpty) return const {};
+    final fallback = available.containsKey('output')
+        ? 'output'
+        : available.containsKey('input')
+        ? 'input'
+        : available.keys.first;
+    final sources = <String, String>{
+      for (final name in stage.inputPortCollection.names)
+        name: available.containsKey(name) ? name : fallback,
+    };
+    for (final key in available.keys) {
+      sources.putIfAbsent(key, () => key);
+    }
+    return sources;
+  }
+
+  /// [values] under the input names of [sources].
+  static Map<String, T> _mapInputs<T>(
+    Map<String, String> sources,
+    Map<String, T> values,
+  ) => {
+    for (final entry in sources.entries)
+      if (values[entry.value] case final value?) entry.key: value,
+  };
+
+  /// Throws an [ArgumentError] when [check] found inputs [stage] cannot
+  /// run on.
+  void _requireValidInputs(PipelineStage stage, ValidationResult check) {
+    if (!check.isValid) {
+      throw ArgumentError(
+        'Stage ${stage.stageId} cannot run: ${check.errors.join('; ')}',
+      );
+    }
+  }
+
+  /// Runs [stage] on [tensors], first checking them against its input
+  /// ports unless [checkInputs] is false. A failure is reported as a
+  /// [StageErrorEvent]; the result is then the stage's recovery, or null.
   Future<(Map<String, Tensor>, String)?> _executeStage(
     PipelineStage stage,
     Map<String, Tensor> tensors,
     String format,
     String streamId,
-    Map<String, Duration> timings,
-  ) async {
+    Map<String, Duration> timings, {
+    bool checkInputs = true,
+  }) async {
     try {
+      if (checkInputs && !stage.inputPortCollection.isEmpty) {
+        _requireValidInputs(
+          stage,
+          stage.inputPortCollection.validateAll(tensors),
+        );
+      }
       // Allocate the event only if someone is listening — these fire per
       // stage per frame.
       if (_eventNotifier.hasListeners(PipelineEventType.stageStart)) {
@@ -1990,12 +2287,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // Once we've found the first merge stage, process ALL remaining stages (merge or not)
       _debugLog(() => '⚙️ Executing post-merge stage ${stage.stageId}');
 
+      // Merged tensors are keyed by stream, not by port.
       final result = await _executeStage(
         stage,
         currentTensors,
         currentFormat,
         streamId,
         stageTimings,
+        checkInputs: false,
       );
 
       if (result != null) {
@@ -2149,6 +2448,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       _ingestInUse.clear();
       _ingestOwner.clear();
 
+      // Drop the asset references start() took
+      await _releaseAssets();
+
       // Mark as stopped
       _isRunning = false;
 
@@ -2213,11 +2515,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     stopwatch.stop();
   }
 
-  Future<Tensor> _acquireIngestTensor(String streamId, List<int> shape) async {
+  Future<Tensor> _acquireIngestTensor(
+    String streamId,
+    List<int> shape, [
+    BufferDataType dataType = BufferDataType.float32,
+  ]) async {
     final pool = _ingestPools.putIfAbsent(streamId, () => <Tensor>[]);
-    // Find a free tensor with matching shape
+    // Find a free tensor with matching shape and element type
     for (final t in pool) {
-      if (!_ingestInUse.contains(t) && _shapesMatch(t.shape, shape)) {
+      if (!_ingestInUse.contains(t) &&
+          t.dataType == dataType &&
+          _shapesMatch(t.shape, shape)) {
         _ingestInUse.add(t);
         _ingestOwner[t] = streamId;
         return t;
@@ -2247,7 +2555,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             'tensors — possible missing _releaseIngestTensors call.',
       );
     }
-    final Tensor t = await Tensor.zeros(shape);
+    final Tensor t = await _zeros(shape, dataType);
     pool.add(t);
     _ingestInUse.add(t);
     _ingestOwner[t] = streamId;
@@ -2269,8 +2577,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   /// Release every in-use ingest tensor currently owned by [streamId].
   ///
-  /// Used by the host path which materializes tensors via
-  /// [_materializeHostFrame] (calling [_acquireIngestTensor]) but does not
+  /// Used by the host path which uploads tensors via
+  /// [_uploadHostData] (calling [_acquireIngestTensor]) but does not
   /// know which specific tensors were used by the stages it ran. Per-stream
   /// ingestion serialization (see [_ingestSerializers]) guarantees no other
   /// host frame for the same stream is active, so all in-use tensors with
@@ -2386,8 +2694,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       for (final tensorEntry in tensors.entries) {
         print('      ${tensorEntry.key}: ${tensorEntry.value.shape}');
         if (getOutputs) {
-          final data = await tensorEntry.value.getData() as Float32List;
-          if (data.isNotEmpty) {
+          final Object data = await tensorEntry.value.getData();
+          if (data is List && data.isNotEmpty) {
             print('         Data: ${data.take(25).toString()}');
           } else {
             print('         Data: Invalid tensor buffer');
@@ -2397,8 +2705,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
   }
 
-  /// Enhanced disposal with proper cleanup order
-  Future<void> dispose() async {
+  Future<void>? _disposing;
+
+  /// Stops the pipeline and releases its stages and GPU resources.
+  ///
+  /// Calling it again returns the same future. The asset manager is not
+  /// disposed.
+  Future<void> dispose() => _disposing ??= _dispose();
+
+  Future<void> _dispose() async {
     _debugLog(() => '🗑️ Disposing pipeline...');
 
     // Stop pipeline first (waits for processing and ingestion chains)
@@ -2430,7 +2745,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // with the pipeline.
 
       try {
-        _resourceGovernor.dispose();
+        _resourceGovernor?.dispose();
       } catch (e) {
         _debugLog(() => '❌ Error disposing resource governor: $e');
       }
@@ -2494,6 +2809,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     return true;
   }
+
+  static int _elementCountOf(TypedData data) =>
+      data.lengthInBytes ~/ data.elementSizeInBytes;
 
   List<int> _fixShape(List<int> shape, int elementCount) {
     final expectedLen = shape.fold<int>(1, (a, b) => a * b);

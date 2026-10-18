@@ -49,7 +49,7 @@ void main() {
             ConnectionConfig(
               fromStage: 's1',
               toStage: 's2',
-              fromOutput: 's1_out',
+              fromOutput: 'output',
               toInput: 'mid',
             ),
           ],

@@ -1,27 +1,19 @@
-/// Pins the fail-gracefully contract of the retired `dynamic_cpu` opKind.
+/// Pins the contract of the deprecated `dynamic_cpu` opKind.
 ///
 /// Dart-source CPU stages (dart_eval) were removed because the analyzer /
-/// dart:io import graph cannot compile for the web.  Old serialized configs
-/// may still carry `opKind: 'dynamic_cpu'` — they must keep DESERIALIZING
-/// (construction succeeds) and fail at EXECUTION with an error that points
-/// at the replacement (ExpressionCPUOperation, opKind 'expression_cpu').
+/// dart:io import graph cannot compile for the web. A serialized network with
+/// a `dynamic_cpu` step fails validation, and the operation factory refuses
+/// to build one; both point at the replacement (opKind 'expression_cpu'). A
+/// `DynamicCPUOperation` built in Dart still constructs, and fails at
+/// EXECUTION with an error that points at `ExpressionCPUOperation`.
 library;
 
 import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:gpu_pipeline/gpu_pipeline.dart';
 import 'package:gpu_pipeline/src/serialization/operation_factory.dart';
-import 'package:gpu_pipeline/src/serialization/pipeline_models.dart';
 
-void main() {
-  test('dynamic_cpu configs still construct, and execution points to the '
-      'expression replacement', () async {
-    final op = OperationFactory.create(
-      OperationConfig(
-        opKind: 'dynamic_cpu',
-        inputKeys: ['input'],
-        outputKeys: ['out'],
-        dartCode: '''
+const _dartCode = '''
 Map<String, TypedData> main(
   Map<String, TypedData> inputs,
   Map<String, List<int>> ranks,
@@ -29,13 +21,72 @@ Map<String, TypedData> main(
 ) {
   return {'out': inputs['input'] as Float32List};
 }
-''',
+''';
+
+final _config = OperationConfig(
+  opKind: 'dynamic_cpu',
+  inputKeys: ['input'],
+  outputKeys: ['out'],
+  dartCode: _dartCode,
+);
+
+void main() {
+  test('a dynamic_cpu step fails validation', () {
+    final net = NetworkConfig(
+      schemaVersion: 1,
+      pipelines: [
+        PipelineConfig(
+          id: 'p',
+          queue: {'strategy': 'latest_only'},
+          stages: [
+            StageConfig(
+              stageId: 's',
+              stageKind: 'DynamicStage',
+              operations: [_config],
+            ),
+          ],
+          connections: [],
+        ),
+      ],
+    );
+
+    expect(
+      () => PipelineLoader().loadFromJson(net.encode()),
+      throwsA(
+        isA<PipelineValidationException>().having(
+          (e) => e.report.errors.map((issue) => issue.code),
+          'error codes',
+          contains('OP_KIND_UNSUPPORTED'),
+        ),
       ),
     );
-    expect(op, isA<DynamicCPUOperation>());
+  });
+
+  test('the operation factory refuses a dynamic_cpu config', () {
+    expect(
+      () => OperationFactory.create(_config),
+      throwsA(
+        isA<UnsupportedError>().having(
+          (e) => e.message,
+          'message',
+          contains('expression_cpu'),
+        ),
+      ),
+    );
+  });
+
+  test('a DynamicCPUOperation constructs, and execution points to the '
+      'expression replacement', () async {
+    // ignore: deprecated_member_use_from_same_package
+    final op = DynamicCPUOperation(
+      operationId: 'dynamic_cpu_smoke',
+      dartCode: _dartCode,
+      inputKeys: ['input'],
+      outputKeys: ['out'],
+    );
 
     await expectLater(
-      (op as DynamicCPUOperation).executor.run(
+      op.executor.run(
         {
           'input': Float32List.fromList([1, 2, 3]),
         },

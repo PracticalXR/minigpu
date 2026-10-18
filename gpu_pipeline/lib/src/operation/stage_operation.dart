@@ -24,7 +24,7 @@ abstract class StageOperation with CacheAwareOperation, ArgumentResolvable {
     this.outputKeys = const ['output'],
     this.arguments = const {},
     this.namedArguments = const {},
-    ResourceRequirements? resourceRequirements,
+    @Deprecated(unusedResourceHint) ResourceRequirements? resourceRequirements,
   }) : _resourceRequirements = resourceRequirements;
 
   /// Execute operation with multiple inputs and outputs
@@ -35,9 +35,11 @@ abstract class StageOperation with CacheAwareOperation, ArgumentResolvable {
   );
 
   /// Resource requirements for this operation
+  @Deprecated(unusedResourceHint)
   ResourceRequirements? get resourceRequirements => _resourceRequirements;
 
   /// Set resource requirements
+  @Deprecated(unusedResourceHint)
   void setResourceRequirements(ResourceRequirements requirements) {
     _resourceRequirements = requirements;
   }
@@ -70,6 +72,7 @@ abstract class StageOperation with CacheAwareOperation, ArgumentResolvable {
   }
 
   /// Check if operation can run with given resource constraints
+  @Deprecated(unusedResourceHint)
   bool canExecuteWithResources(ResourceAllocation allocation) {
     if (_resourceRequirements == null) return true;
 

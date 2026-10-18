@@ -8,27 +8,36 @@ import '../operation/stage_operation.dart';
 import 'pipeline_models.dart';
 
 class OperationFactory {
+  /// Builds the operation [c] describes.
+  ///
+  /// Throws an [ArgumentError] for a `tensor_op` or `cpu` operation without
+  /// an `operation` name, and an [UnsupportedError] for an op_kind that
+  /// cannot run: `dynamic_cpu`, `merge`, `split` or an unknown one.
   static StageOperation create(
     OperationConfig c, {
     Map<String, OutputPort>? outputPorts,
   }) {
     switch (c.opKind) {
       case 'tensor_op':
+        final operation = _operationName(c);
         return TensorOperation(
           operationId:
-              'tensor_${c.operation}_${DateTime.now().microsecondsSinceEpoch}',
-          operation: c.operation!,
-          inputKeys: c.inputKeys,
-          outputKeys: c.outputKeys,
+              'tensor_${operation}_${DateTime.now().microsecondsSinceEpoch}',
+          operation: operation,
+          // Omitted keys default to ['input'] and ['output'].
+          inputKeys: c.inputKeys.isEmpty ? null : c.inputKeys,
+          outputKeys: c.outputKeys.isEmpty ? null : c.outputKeys,
           arguments: c.arguments,
           namedArguments: c.namedArguments,
         );
       case 'cpu':
+        final operation = _operationName(c);
         return PrebuiltCPUOperation(
           operationId:
-              'cpu_${c.operation}_${DateTime.now().microsecondsSinceEpoch}',
-          operation: c.operation!,
+              'cpu_${operation}_${DateTime.now().microsecondsSinceEpoch}',
+          operation: operation,
           operationParameters: c.namedArguments,
+          arguments: c.arguments,
           inputKeys: c.inputKeys,
           outputKeys: c.outputKeys,
         );
@@ -46,22 +55,6 @@ class OperationFactory {
           inputKeys: c.inputKeys.isEmpty ? const ['input'] : c.inputKeys,
           outputKeys: c.outputKeys.isEmpty ? null : c.outputKeys,
         );
-      case 'dynamic_cpu':
-        var normalized = _normalizeDynamicCpuSource(c.dartCode ?? '');
-        // Ensure import
-        if (RegExp(
-              r'\b(TypedData|Float32List|Int32List)\b',
-            ).hasMatch(normalized) &&
-            !RegExp(r"import\s+'dart:typed_data'").hasMatch(normalized)) {
-          normalized = "import 'dart:typed_data';\n$normalized";
-        }
-        return DynamicCPUOperation(
-          operationId: 'dyn_cpu_${DateTime.now().microsecondsSinceEpoch}',
-          dartCode: normalized,
-          inputKeys: c.inputKeys,
-          outputKeys: c.outputKeys,
-          initialParameters: c.namedArguments,
-        );
       case 'shader':
         return ShaderStageOperation(
           operationId: 'shader_${DateTime.now().microsecondsSinceEpoch}',
@@ -74,66 +67,26 @@ class OperationFactory {
           namedArguments: c.namedArguments,
           outputPorts: outputPorts ?? const {},
         );
-      case 'merge':
-        return ShaderStageOperation(
-          operationId: 'merge_${DateTime.now().microsecondsSinceEpoch}',
-          shaderTemplate: '// TODO merge shader',
-          outputPorts: outputPorts ?? const {},
-          inputKeys: c.inputKeys,
-          outputKeys: c.outputKeys,
+      case 'dynamic_cpu':
+        throw UnsupportedError(
+          'dynamic_cpu operations cannot run, because Dart source is not '
+          'executed; use expression_cpu for per-element math',
         );
-      case 'split':
-        return ShaderStageOperation(
-          operationId: 'split_${DateTime.now().microsecondsSinceEpoch}',
-          shaderTemplate: '// TODO split shader',
-          outputPorts: outputPorts ?? const {},
-          inputKeys: c.inputKeys,
-          outputKeys: c.outputKeys,
+      case 'merge' || 'split':
+        throw UnsupportedError(
+          '${c.opKind} operations have no implementation; write the step as '
+          'a shader operation',
         );
       default:
         throw UnsupportedError('Unknown op_kind ${c.opKind}');
     }
   }
 
-  static String _normalizeDynamicCpuSource(String raw) {
-    var body = raw.trim();
-    if (body.isEmpty) {
-      return '''
-import 'dart:typed_data';
-
-Map<String, TypedData> main(
-  Map<String, TypedData> inputs,
-  Map<String, List<int>> ranks,
-  Map<String, dynamic> parameters
-) {
-  return <String, TypedData>{};
-}
-'''
-          .trim();
+  static String _operationName(OperationConfig c) {
+    final name = c.operation;
+    if (name == null || name.isEmpty) {
+      throw ArgumentError('A ${c.opKind} operation needs an operation name');
     }
-    final needsImport = RegExp(
-      r'\b(TypedData|Float32List|Int32List)\b',
-    ).hasMatch(body);
-    final hasImport = RegExp(r"import\s+'dart:typed_data'").hasMatch(body);
-    if (needsImport && !hasImport) {
-      body = "import 'dart:typed_data';\n$body";
-    }
-    final hasMainSig = RegExp(
-      r'Map<String,\s*TypedData>\s+main\s*\(\s*Map<String,\s*TypedData>\s*inputs,',
-    ).hasMatch(body);
-    if (hasMainSig) return body;
-    if (body.contains('main(')) return body;
-    return '''
-${hasImport ? '' : "import 'dart:typed_data';"}
-
-Map<String, TypedData> main(
-  Map<String, TypedData> inputs,
-  Map<String, List<int>> ranks,
-  Map<String, dynamic> parameters
-) {
-  $body
-}
-'''
-        .trim();
+    return name;
   }
 }

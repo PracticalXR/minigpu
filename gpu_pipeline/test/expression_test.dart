@@ -7,7 +7,6 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:gpu_pipeline/gpu_pipeline.dart';
 import 'package:gpu_pipeline/src/serialization/operation_factory.dart';
-import 'package:gpu_pipeline/src/serialization/pipeline_models.dart';
 
 double eval(
   String src, {

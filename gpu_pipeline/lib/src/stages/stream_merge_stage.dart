@@ -14,7 +14,14 @@ enum MergeStrategy {
   weightedAverage, // Weighted average
 }
 
-/// Stage for merging multiple input streams with parameter support
+/// Stage for merging multiple input streams with parameter support.
+///
+/// With `enable_shape_validation` (the default), streams whose shape
+/// differs from the first stream's are left out of the merge.
+/// [MergeStrategy.weightedAverage] falls back to the average when the
+/// weights are missing, do not match the number of streams, or sum to zero.
+/// When a merge fails, the pipeline reports a stage error and the stage
+/// passes the first stream on unmerged.
 class StreamMergeStage extends PipelineStage {
   final MergeStrategy _defaultStrategy;
   final Map<String, Tensor> _streamTensors = {};
@@ -74,128 +81,117 @@ class StreamMergeStage extends PipelineStage {
   }
 
   @override
-  Future<void> initializeStage() async {
-    print(
-      '🔀 StreamMergeStage ${stageId} initialized with strategy: ${_defaultStrategy}',
-    );
-    await super.initializeStage();
-  }
-
-  @override
   Future<Map<String, Tensor>> process(
     Map<String, Tensor> inputs, [
     Map<String, Tensor>? outputs,
   ]) async {
+    // Get current parameter values with safe defaults
+    final strategy =
+        getPropertyValue<MergeStrategy>('merge_strategy') ?? _defaultStrategy;
+
+    // Safe weights retrieval
+    List<double>? weights;
     try {
-      // Get current parameter values with safe defaults
-      final strategy =
-          getPropertyValue<MergeStrategy>('merge_strategy') ?? _defaultStrategy;
+      final weightsList = getPropertyValue<List<double>>('weights');
+      weights = (weightsList?.isNotEmpty == true) ? weightsList : null;
+    } catch (e) {
+      // Parameter doesn't exist or is wrong type, use null
+      weights = null;
+    }
 
-      // Safe weights retrieval
-      List<double>? weights;
-      try {
-        final weightsList = getPropertyValue<List<double>>('weights');
-        weights = (weightsList?.isNotEmpty == true) ? weightsList : null;
-      } catch (e) {
-        // Parameter doesn't exist or is wrong type, use null
-        weights = null;
-      }
+    final enableShapeValidation =
+        getPropertyValue<bool>('enable_shape_validation') ?? true;
 
-      final enableShapeValidation =
-          getPropertyValue<bool>('enable_shape_validation') ?? true;
+    // Store all input tensors
+    for (final entry in inputs.entries) {
+      _streamTensors[entry.key] = entry.value;
+    }
 
-      // Store all input tensors
-      for (final entry in inputs.entries) {
-        _streamTensors[entry.key] = entry.value;
-      }
+    // If we have expected streams, check if we have enough
+    if (_expectedStreams.isNotEmpty) {
+      final availableExpected = _expectedStreams
+          .where((streamId) => _streamTensors.containsKey(streamId))
+          .toList();
 
-      // If we have expected streams, check if we have enough
-      if (_expectedStreams.isNotEmpty) {
-        final availableExpected = _expectedStreams
-            .where((streamId) => _streamTensors.containsKey(streamId))
-            .toList();
-
-        if (availableExpected.length < _expectedStreams.length) {
-          // Return the current input as passthrough while waiting
-          if (inputs.containsKey('input')) {
-            return {'input': inputs['input']!, 'output': inputs['input']!};
-          }
-
-          // Return empty result to indicate we're waiting
-          return {};
-        }
-      }
-
-      // Collect tensors to merge
-      final tensorsToMerge = <Tensor>[];
-      final tensorKeys = <String>[];
-
-      // Priority order: stream_* tensors, then 'input', then any other tensors
-      for (final entry in _streamTensors.entries) {
-        if (entry.key.startsWith('stream_')) {
-          tensorsToMerge.add(entry.value);
-          tensorKeys.add(entry.key);
-        }
-      }
-
-      // If no stream tensors found, use 'input'
-      if (tensorsToMerge.isEmpty && _streamTensors.containsKey('input')) {
-        tensorsToMerge.add(_streamTensors['input']!);
-        tensorKeys.add('input');
-      }
-
-      // If still no tensors, use any available
-      if (tensorsToMerge.isEmpty) {
-        for (final entry in _streamTensors.entries) {
-          tensorsToMerge.add(entry.value);
-          tensorKeys.add(entry.key);
-        }
-      }
-
-      if (tensorsToMerge.isEmpty) {
-        // Final fallback - use direct input if available
+      if (availableExpected.length < _expectedStreams.length) {
+        // Return the current input as passthrough while waiting
         if (inputs.containsKey('input')) {
           return {'input': inputs['input']!, 'output': inputs['input']!};
         }
 
-        throw Exception('No tensors available for merging');
+        // Return empty result to indicate we're waiting
+        return {};
       }
+    }
 
-      // Merge the tensors
-      final mergedTensor = await _mergeStreamTensors(
-        tensorsToMerge,
-        strategy,
-        weights,
-        enableShapeValidation,
-      );
+    // Collect tensors to merge
+    final tensorsToMerge = <Tensor>[];
+    final tensorKeys = <String>[];
 
-      // Clear stored tensors after successful merge
-      _streamTensors.clear();
-
-      // Return merged result
-      return {
-        'input': mergedTensor,
-        'output': mergedTensor, // Provide both keys for compatibility
-      };
-    } catch (e, stackTrace) {
-      print('❌ StreamMergeStage error: $e');
-      print('   Stack trace: $stackTrace');
-
-      // Error recovery: try to return the first available tensor
-      if (_streamTensors.isNotEmpty) {
-        final fallbackTensor = _streamTensors.values.first;
-
-        _streamTensors.clear();
-        return {'input': fallbackTensor, 'output': fallbackTensor};
+    // Priority order: stream_* tensors, then 'input', then any other tensors
+    for (final entry in _streamTensors.entries) {
+      if (entry.key.startsWith('stream_')) {
+        tensorsToMerge.add(entry.value);
+        tensorKeys.add(entry.key);
       }
+    }
 
-      // Last resort: use direct input if available
+    // If no stream tensors found, use 'input'
+    if (tensorsToMerge.isEmpty && _streamTensors.containsKey('input')) {
+      tensorsToMerge.add(_streamTensors['input']!);
+      tensorKeys.add('input');
+    }
+
+    // If still no tensors, use any available
+    if (tensorsToMerge.isEmpty) {
+      for (final entry in _streamTensors.entries) {
+        tensorsToMerge.add(entry.value);
+        tensorKeys.add(entry.key);
+      }
+    }
+
+    if (tensorsToMerge.isEmpty) {
+      // Final fallback - use direct input if available
       if (inputs.containsKey('input')) {
         return {'input': inputs['input']!, 'output': inputs['input']!};
       }
 
-      rethrow;
+      throw Exception('No tensors available for merging');
     }
+
+    // Merge the tensors
+    final mergedTensor = await _mergeStreamTensors(
+      tensorsToMerge,
+      strategy,
+      weights,
+      enableShapeValidation,
+    );
+
+    // Clear stored tensors after successful merge
+    _streamTensors.clear();
+
+    // Return merged result
+    return {
+      'input': mergedTensor,
+      'output': mergedTensor, // Provide both keys for compatibility
+    };
+  }
+
+  /// Passes the first stored stream on, or else the `input` tensor, after a
+  /// merge fails. The pipeline reports the failure first.
+  @override
+  Future<Map<String, Tensor>> handleError(
+    Exception error,
+    Map<String, Tensor> inputs,
+  ) async {
+    if (_streamTensors.isNotEmpty) {
+      final fallback = _streamTensors.values.first;
+      _streamTensors.clear();
+      return {'input': fallback, 'output': fallback};
+    }
+    final input = inputs['input'];
+    if (input != null) return {'input': input, 'output': input};
+    throw error;
   }
 
   Future<Tensor> _mergeStreamTensors(
@@ -221,10 +217,6 @@ class StreamMergeStage extends PipelineStage {
         final tensor = tensors[i];
         if (_shapesEqual(tensor.shape, referenceShape)) {
           compatibleTensors.add(tensor);
-        } else {
-          print(
-            '⚠️ Skipping incompatible tensor $i: ${tensor.shape} vs ${referenceShape}',
-          );
         }
       }
 
@@ -233,9 +225,6 @@ class StreamMergeStage extends PipelineStage {
       }
 
       if (compatibleTensors.length < tensors.length) {
-        print(
-          '⚠️ Using ${compatibleTensors.length}/${tensors.length} compatible tensors',
-        );
         tensors = compatibleTensors;
       }
     }
@@ -260,8 +249,6 @@ class StreamMergeStage extends PipelineStage {
   }
 
   Future<Tensor> _averageTensors(List<Tensor> tensors) async {
-    print('   🧮 Computing average of ${tensors.length} tensors');
-
     var result = tensors.first;
     for (int i = 1; i < tensors.length; i++) {
       result = await result.add(tensors[i]);
@@ -272,8 +259,6 @@ class StreamMergeStage extends PipelineStage {
   }
 
   Future<Tensor> _sumTensors(List<Tensor> tensors) async {
-    print('   ➕ Computing sum of ${tensors.length} tensors');
-
     var result = tensors.first;
     for (int i = 1; i < tensors.length; i++) {
       result = await result.add(tensors[i]);
@@ -283,8 +268,6 @@ class StreamMergeStage extends PipelineStage {
   }
 
   Future<Tensor> _maximumTensors(List<Tensor> tensors) async {
-    print('   📈 Computing maximum of ${tensors.length} tensors');
-
     var result = tensors.first;
     for (int i = 1; i < tensors.length; i++) {
       result = await result.max(tensors[i]);
@@ -294,8 +277,6 @@ class StreamMergeStage extends PipelineStage {
   }
 
   Future<Tensor> _minimumTensors(List<Tensor> tensors) async {
-    print('   📉 Computing minimum of ${tensors.length} tensors');
-
     var result = tensors.first;
     for (int i = 1; i < tensors.length; i++) {
       result = await result.min(tensors[i]);
@@ -311,18 +292,12 @@ class StreamMergeStage extends PipelineStage {
     if (weights == null ||
         weights.isEmpty ||
         weights.length != tensors.length) {
-      print(
-        '⚠️ Weights not provided or length mismatch, falling back to average',
-      );
       return await _averageTensors(tensors);
     }
-
-    print('   ⚖️ Computing weighted average of ${tensors.length} tensors');
 
     // Normalize weights
     final weightSum = weights.reduce((a, b) => a + b);
     if (weightSum == 0) {
-      print('⚠️ Zero weight sum, falling back to average');
       return await _averageTensors(tensors);
     }
 
@@ -349,23 +324,10 @@ class StreamMergeStage extends PipelineStage {
   }
 
   @override
-  Future<void> onParameterChanged(
-    String name,
-    dynamic oldValue,
-    dynamic newValue,
-  ) async {
-    await super.onParameterChanged(name, oldValue, newValue);
-    print(
-      '🔀 StreamMergeStage parameter changed: $name = $newValue (was $oldValue)',
-    );
-  }
-
-  @override
   Future<void> dispose() async {
     _streamTensors.clear();
     _expectedStreams.clear();
     await super.dispose();
-    print('🗑️ StreamMergeStage ${stageId} disposed');
   }
 
   @override

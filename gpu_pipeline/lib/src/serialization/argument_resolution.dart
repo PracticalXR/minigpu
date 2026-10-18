@@ -12,60 +12,93 @@ class ResolvedArguments {
 class ArgumentResolver {
   const ArgumentResolver();
 
-  bool _isRef(String v) =>
-      v.startsWith('param:') ||
-      v.startsWith('tensor:') ||
-      v.startsWith('shape:') ||
-      v.startsWith('size:');
-
   dynamic _resolveOne(
     dynamic value, {
     required Map<String, dynamic> params,
     required Map<String, Tensor> tensors,
+    required Map<String, List<int>> shapes,
   }) {
-    if (value is String && _isRef(value)) {
-      if (value.startsWith('param:')) {
-        final k = value.substring(6);
-        return params[k];
+    if (value is! String) return value;
+    if (value.startsWith('param:')) {
+      final k = value.substring(6);
+      if (!params.containsKey(k)) {
+        throw ArgumentError('$value names no stage parameter');
       }
-      if (value.startsWith('tensor:')) {
-        final k = value.substring(7);
-        return tensors[k];
-      }
-      if (value.startsWith('shape:')) {
-        final k = value.substring(6);
-        return tensors[k]?.shape;
-      }
-      if (value.startsWith('size:')) {
-        final k = value.substring(5);
-        final t = tensors[k];
-        return t == null ? null : t.shape.fold<int>(1, (a, b) => a * b);
-      }
+      return params[k];
+    }
+    if (value.startsWith('tensor:')) {
+      final k = value.substring(7);
+      return tensors[k] ?? (throw ArgumentError('$value names no tensor'));
+    }
+    if (value.startsWith('shape:')) {
+      return _shape(value, value.substring(6), tensors, shapes);
+    }
+    if (value.startsWith('size:')) {
+      final shape = _shape(value, value.substring(5), tensors, shapes);
+      return shape.fold<int>(1, (a, b) => a * b);
     }
     return value;
   }
 
+  List<int> _shape(
+    String ref,
+    String name,
+    Map<String, Tensor> tensors,
+    Map<String, List<int>> shapes,
+  ) =>
+      shapes[name] ??
+      tensors[name]?.shape ??
+      (throw ArgumentError('$ref names no tensor'));
+
+  /// Resolves the references in [rawArgs] and [named]: `param:<name>` to the
+  /// value of that entry of [params], `tensor:<name>` to that entry of
+  /// [tensors], and `shape:<name>` and `size:<name>` to the shape and element
+  /// count of that tensor, from [shapes] or else [tensors].
+  ///
+  /// The positional arguments are the `args` list of [rawArgs]. The named
+  /// arguments are its other keys, then [named], whose keys win.
+  ///
+  /// Throws an [ArgumentError] for a reference to a parameter or tensor that
+  /// does not exist.
   ResolvedArguments resolve(
     Map<String, dynamic> rawArgs, {
+    Map<String, dynamic> named = const {},
     required Map<String, dynamic> params,
-    required Map<String, Tensor> tensors,
+    Map<String, Tensor> tensors = const {},
+    Map<String, List<int>> shapes = const {},
   }) {
-    final pos = <dynamic>[];
-    final named = <String, dynamic>{};
+    dynamic one(dynamic v) =>
+        _resolveOne(v, params: params, tensors: tensors, shapes: shapes);
 
-    // Convention: if rawArgs contains 'args' as List => positional list
+    final pos = <dynamic>[];
     final listPart = rawArgs['args'];
     if (listPart is List) {
       for (final v in listPart) {
-        pos.add(_resolveOne(v, params: params, tensors: tensors));
+        pos.add(one(v));
       }
     }
-    // Remaining keys (excluding 'args') are named
-    rawArgs.forEach((k, v) {
-      if (k == 'args') return;
-      named[k] = _resolveOne(v, params: params, tensors: tensors);
-    });
+    final resolvedNamed = <String, dynamic>{
+      for (final e in rawArgs.entries)
+        if (e.key != 'args') e.key: one(e.value),
+      for (final e in named.entries) e.key: one(e.value),
+    };
+    return ResolvedArguments(pos, resolvedNamed);
+  }
 
-    return ResolvedArguments(pos, named);
+  /// The names that `tensor:` references in [rawArgs] and [named] point to.
+  Set<String> tensorNames(
+    Map<String, dynamic> rawArgs, [
+    Map<String, dynamic> named = const {},
+  ]) {
+    final listPart = rawArgs['args'];
+    return {
+      for (final v in [
+        if (listPart is List) ...listPart,
+        for (final e in rawArgs.entries)
+          if (e.key != 'args') e.value,
+        ...named.values,
+      ])
+        if (v is String && v.startsWith('tensor:')) v.substring(7),
+    };
   }
 }

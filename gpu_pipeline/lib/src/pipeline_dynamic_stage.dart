@@ -4,6 +4,8 @@ import 'package:gpu_pipeline/src/operation/cpu_stage_operation.dart';
 import 'package:gpu_pipeline/src/operation/operation.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';
+import 'package:gpu_pipeline/src/pipeline_ports.dart'
+    show FixedOutputPort, OutputPort;
 import 'package:gpu_pipeline/src/pipeline_properties.dart';
 import 'pipeline_event.dart';
 import 'pipeline_stage.dart';
@@ -265,6 +267,14 @@ Float32List _toFloat32(TypedData td) {
     for (var i = 0; i < out.length; i++) {
       out[i] = td[i].toDouble();
     }
+  } else if (td is Int64List) {
+    for (var i = 0; i < out.length; i++) {
+      out[i] = td[i].toDouble();
+    }
+  } else if (td is Uint64List) {
+    for (var i = 0; i < out.length; i++) {
+      out[i] = td[i].toDouble();
+    }
   }
   return out;
 }
@@ -386,10 +396,7 @@ class DynamicStage extends PipelineStage {
       }
     } else {
       for (final port in outputPorts) {
-        final pt = _findBestOutputMatch(port.name, pipelineTensors);
-        if (pt != null) {
-          selected[port.name] = pt;
-        }
+        selected[port.name] = _outputFor(port, pipelineTensors);
       }
     }
 
@@ -402,21 +409,7 @@ class DynamicStage extends PipelineStage {
     Map<String, PipelineTensor> currentData,
   ) async {
     for (final operation in operations) {
-      // Resolve argument references (param:/tensor:/shape:/size:)
-      final tensorsForRefs = <String, Tensor>{};
-      for (final e in currentData.entries) {
-        if (e.value.tensorLocation == TensorLocation.gpu &&
-            e.value._gpu != null) {
-          tensorsForRefs[e.key] = e.value._gpu!;
-        }
-      }
-      final params = currentParameterValues();
-      final resolved = _argResolver.resolve(
-        operation.arguments,
-        params: params,
-        tensors: tensorsForRefs,
-      );
-      operation.applyResolvedArguments(resolved.positional, resolved.named);
+      await _applyArguments(operation, currentData);
 
       if (operation is CPUStageOperation) {
         currentData = await _processCPUOperation(operation, currentData);
@@ -425,6 +418,39 @@ class DynamicStage extends PipelineStage {
       }
     }
     return currentData;
+  }
+
+  /// Resolves the references (`param:`, `tensor:`, `shape:`, `size:`) in
+  /// [operation]'s arguments against the stage parameters and [tensors],
+  /// and hands it the result. Shader operations take their arguments as
+  /// they are.
+  Future<void> _applyArguments(
+    StageOperation operation,
+    Map<String, PipelineTensor> tensors,
+  ) async {
+    if (operation is ShaderStageOperation ||
+        operation is ShaderFunctionOperation) {
+      return;
+    }
+    if (operation.arguments.isEmpty && operation.namedArguments.isEmpty) {
+      return;
+    }
+    final referenced = <String, Tensor>{};
+    for (final name in _argResolver.tensorNames(
+      operation.arguments,
+      operation.namedArguments,
+    )) {
+      final pt = tensors[name];
+      if (pt != null) referenced[name] = await pt.asGPU();
+    }
+    final resolved = _argResolver.resolve(
+      operation.arguments,
+      named: operation.namedArguments,
+      params: currentParameterValues(),
+      tensors: referenced,
+      shapes: {for (final e in tensors.entries) e.key: e.value.shape},
+    );
+    operation.applyResolvedArguments(resolved.positional, resolved.named);
   }
 
   /// Process CPU operation without forcing a GPU round-trip:
@@ -456,15 +482,12 @@ class DynamicStage extends PipelineStage {
       ranks[key] = List<int>.from(pt.shape);
     }
 
-    // Gather stage parameters
-    final parameters = currentParameterValues();
-
     // Run through the operation's executor: inline by default, or the one
     // the operation was built with (a worker isolate, say).
     final rawOutputs = await operation.executor.run(
       hostInputs,
       ranks,
-      parameters,
+      operation.parametersFor(currentParameterValues()),
     );
 
     // Integrate outputs into PipelineTensor as HOST data with preserved/inferred shape
@@ -512,18 +535,20 @@ class DynamicStage extends PipelineStage {
     Map<String, List<int>> inputRanks,
     Map<String, TypedData> rawOutputs,
   ) {
-    final sidecar1 = '${outKey}_shape';
-    final sidecar2 = '${outKey}__shape';
-    if (rawOutputs.containsKey(sidecar1)) {
-      final ints = _typedDataToIntList(rawOutputs[sidecar1]!);
-      if (ints.isNotEmpty) return ints;
-    }
-    if (rawOutputs.containsKey(sidecar2)) {
-      final ints = _typedDataToIntList(rawOutputs[sidecar2]!);
-      if (ints.isNotEmpty) return ints;
+    final len = _typedLen(data);
+    for (final sidecar in ['${outKey}_shape', '${outKey}__shape']) {
+      final raw = rawOutputs[sidecar];
+      final ints = raw == null ? const <int>[] : _typedDataToIntList(raw);
+      if (ints.isEmpty) continue;
+      if (_prod(ints) != len) {
+        throw StateError(
+          'A CPU operation of stage $stageId returned $len elements for '
+          '$outKey, which do not fill the shape $ints in $sidecar',
+        );
+      }
+      return ints;
     }
 
-    final len = _typedLen(data);
     // Prefer 'input' then 'output' ranks if element count matches
     for (final k in const ['input', 'output']) {
       final s = inputRanks[k];
@@ -680,36 +705,39 @@ class DynamicStage extends PipelineStage {
     } else {
       // Map to explicit output ports
       for (final port in outputPorts) {
-        final pipelineTensor = _findBestOutputMatch(port.name, pipelineTensors);
-        if (pipelineTensor != null) {
-          result[port.name] = await pipelineTensor.asGPU();
-        }
+        result[port.name] = await _outputFor(port, pipelineTensors).asGPU();
       }
     }
 
     return result;
   }
 
-  /// Find the best output tensor match for a given port name
-  PipelineTensor? _findBestOutputMatch(
-    String portName,
+  /// The tensor [port] outputs: the one of the port's name, or, when it is
+  /// the stage's only output port, the final tensor (see
+  /// [_findFinalOutputTensor]).
+  ///
+  /// Throws a [StateError] when there is no such tensor, or when the tensor
+  /// of a [FixedOutputPort] does not have the port's element count.
+  PipelineTensor _outputFor(
+    OutputPort port,
     Map<String, PipelineTensor> tensors,
   ) {
-    // Strategy 1: Look for exact name match
-    if (tensors.containsKey(portName)) return tensors[portName];
-
-    // Strategy 2: Look for output from last operation
-    if (operations.isNotEmpty) {
-      final lastOp = operations.last;
-      for (final outputKey in lastOp.outputKeys) {
-        if (tensors.containsKey(outputKey)) {
-          return tensors[outputKey];
-        }
-      }
+    final tensor =
+        tensors[port.name] ??
+        (outputPorts.length == 1 ? _findFinalOutputTensor(tensors) : null);
+    if (tensor == null) {
+      throw StateError(
+        'Stage $stageId has no tensor for its output port ${port.name}; its '
+        'tensors are ${tensors.keys.toList()}',
+      );
     }
-
-    // Strategy 3: Fallback to any available tensor
-    return tensors.values.isNotEmpty ? tensors.values.first : null;
+    if (port is FixedOutputPort && _prod(port.shape) != _prod(tensor.shape)) {
+      throw StateError(
+        'Stage $stageId output ${port.name} has shape ${tensor.shape}, which '
+        'does not fit the port shape ${port.shape}',
+      );
+    }
+    return tensor;
   }
 
   /// Find the final output tensor from operation results
@@ -840,7 +868,7 @@ class DynamicStage extends PipelineStage {
     // Seed PipelineTensor set with HOST data
     var currentData = <String, PipelineTensor>{};
     hostInputs.forEach((k, v) {
-      final s = shapes[k] ?? [v.lengthInBytes ~/ 4];
+      final s = shapes[k] ?? [_typedLen(v)];
       currentData[k] = PipelineTensor.cpu(v, s);
     });
 
@@ -850,15 +878,7 @@ class DynamicStage extends PipelineStage {
         throw StateError('processCPUOnly called on a non-CPU stage "$stageId"');
       }
 
-      // Resolve arguments (uses params; no tensors required for CPU ops)
-      final params = currentParameterValues();
-      final resolved = _argResolver.resolve(
-        operation.arguments,
-        params: params,
-        tensors: const <String, Tensor>{},
-      );
-      operation.applyResolvedArguments(resolved.positional, resolved.named);
-
+      await _applyArguments(operation, currentData);
       currentData = await _processCPUOperation(operation, currentData);
     }
 
@@ -884,12 +904,9 @@ class DynamicStage extends PipelineStage {
     }
 
     for (final port in outputPorts) {
-      final pt = _findBestOutputMatch(port.name, pipelineTensors);
-      if (pt != null) {
-        final host = await pt.asCPU();
-        data[port.name] = host;
-        shapes[port.name] = List<int>.from(pt.shape);
-      }
+      final pt = _outputFor(port, pipelineTensors);
+      data[port.name] = await pt.asCPU();
+      shapes[port.name] = List<int>.from(pt.shape);
     }
 
     return (data, shapes);

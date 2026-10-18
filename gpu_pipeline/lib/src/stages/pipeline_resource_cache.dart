@@ -40,11 +40,15 @@ class ResourceCache {
   }
 
   // Factory constructors for different use cases
-  factory ResourceCache.forPipeline(String pipelineId) {
+  factory ResourceCache.forPipeline(
+    String pipelineId, {
+    int maxShaders = 100,
+    int maxTensors = 200,
+  }) {
     return ResourceCache(
       cacheId: 'pipeline_$pipelineId',
-      maxShaders: 100,
-      maxTensors: 200,
+      maxShaders: maxShaders,
+      maxTensors: maxTensors,
     );
   }
 
@@ -175,9 +179,8 @@ class ResourceCache {
           try {
             // Only destroy if shader is not currently in use
             shader.destroy();
-          } catch (e) {
-            // Log but don't crash - shader might be in use
-            print('⚠️ Warning: Could not destroy shader $key: $e');
+          } catch (_) {
+            // Don't crash - the shader might be in use or already destroyed
           }
         }
 
@@ -185,8 +188,7 @@ class ResourceCache {
         _shaderSources.remove(key);
         _shaderLastUsed.remove(key);
       }
-    } catch (e) {
-      print('⚠️ Warning: Shader cache cleanup failed: $e');
+    } catch (_) {
       // Don't crash - continue with full cache
     }
   }
@@ -209,17 +211,15 @@ class ResourceCache {
         if (tensor != null) {
           try {
             tensor.destroy();
-          } catch (e) {
-            // Log but don't crash - tensor might be in use
-            print('⚠️ Warning: Could not destroy tensor $key: $e');
+          } catch (_) {
+            // Don't crash - the tensor might be in use or already destroyed
           }
         }
 
         _tensorCache.remove(key);
         _tensorLastUsed.remove(key);
       }
-    } catch (e) {
-      print('⚠️ Warning: Tensor cache cleanup failed: $e');
+    } catch (_) {
       // Don't crash - continue with full cache
     }
   }
@@ -238,8 +238,8 @@ class ResourceCache {
     for (final shader in shaders) {
       try {
         shader.destroy();
-      } catch (e) {
-        print('⚠️ Warning: Could not destroy shader during clear: $e');
+      } catch (_) {
+        // Don't crash - the shader might already be destroyed
       }
     }
   }
@@ -253,8 +253,8 @@ class ResourceCache {
     for (final tensor in tensors) {
       try {
         tensor.destroy();
-      } catch (e) {
-        print('⚠️ Warning: Could not destroy tensor during clear: $e');
+      } catch (_) {
+        // Don't crash - the tensor might already be destroyed
       }
     }
   }
@@ -391,11 +391,8 @@ class ResourceCache {
   }
 
   void dispose() {
-    try {
-      clearAll();
-    } catch (e) {
-      print('⚠️ Warning: Cache disposal failed: $e');
-    }
+    // clearAll catches each failed destroy itself
+    clearAll();
     resetStats();
   }
 }

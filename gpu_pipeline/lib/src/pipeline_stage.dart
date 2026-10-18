@@ -7,17 +7,10 @@ import 'package:gpu_pipeline/src/pipeline_assets.dart';
 import 'package:gpu_pipeline/src/pipeline_resources.dart';
 import 'pipeline_event.dart';
 
-/// Declares whether a stage's per-frame work must observe strict submission
-/// order, or whether it may run concurrently with adjacent frames.
-///
-///   * [ordered]   — the default. Frame N must fully complete before frame
-///     N+1 starts. Required for data-parallel GPU render/compute stages whose
-///     output feeds the next frame, and for any **stateful** CPU stage (e.g. a
-///     closed-loop video encoder mutating reference / entropy state).
-///   * [asyncSafe] — the stage is a pure, per-frame function of its inputs and
-///     holds no cross-frame state, so the scheduler may overlap it with other
-///     frames (e.g. run it on a worker isolate while the GPU submits the next
-///     frame). Marking a stateful stage [asyncSafe] is undefined behaviour.
+/// A scheduling hint the pipeline never read: [asyncSafe] was meant to let
+/// a stateless stage overlap adjacent frames, but every stage runs the same
+/// way whichever value it holds.
+@Deprecated(unusedResourceHint)
 enum StageConcurrency { ordered, asyncSafe }
 
 /// Enhanced pipeline stage interface with I/O ports, parameters, and assets
@@ -25,8 +18,8 @@ abstract class PipelineStage with StageProperties {
   final String stageId;
   final bool isPersistent;
 
-  /// How the scheduler may treat this stage relative to adjacent frames.
-  /// Defaults to [StageConcurrency.ordered] (safe for every stage).
+  /// Unused by the pipeline; see [StageConcurrency].
+  @Deprecated(unusedResourceHint)
   StageConcurrency stageConcurrency = StageConcurrency.ordered;
 
   // I/O port collections
@@ -35,6 +28,9 @@ abstract class PipelineStage with StageProperties {
 
   // Asset requirements
   final List<StaticAsset> _requiredAssets = [];
+
+  // The assets preloadAssets took a reference to
+  final List<String> _heldAssets = [];
 
   // Resource requirements
   ResourceRequirements? _resourceRequirements;
@@ -52,9 +48,13 @@ abstract class PipelineStage with StageProperties {
   List<OutputPort> get outputPorts => _outputPorts.all;
   List<StaticAsset> get requiredAssets => List.unmodifiable(_requiredAssets);
 
-  // Resource Management
+  // Resource hints. The pipeline reads none of them: they are stored and
+  // returned as set.
+  @Deprecated(unusedResourceHint)
   ResourceRequirements? get resourceRequirements => _resourceRequirements;
+  @Deprecated(unusedResourceHint)
   MemoryStrategy? get memoryStrategy => _memoryStrategy;
+  @Deprecated(unusedResourceHint)
   RealTimeConstraints? get realTimeConstraints => _realTimeConstraints;
 
   // Legacy compatibility - deprecated
@@ -76,11 +76,34 @@ abstract class PipelineStage with StageProperties {
   Future<Map<String, Tensor>> process(Map<String, Tensor> inputs);
 
   // Asset Management
+
+  /// Loads this stage's assets into [assetManager], which the asset getters
+  /// then read, and holds each until [releaseAssets]. An asset whose
+  /// [StaticAsset.isRequired] is false and that fails to load is skipped;
+  /// the manager reports it with a `failed` event.
   Future<void> preloadAssets(AssetManager assetManager) async {
     _assetManager = assetManager;
 
     for (final asset in _requiredAssets) {
-      await assetManager.preload(asset);
+      try {
+        await assetManager.preload(asset);
+      } catch (_) {
+        if (asset.isRequired) rethrow;
+        continue;
+      }
+      _heldAssets.add(asset.name);
+    }
+  }
+
+  /// Drops the references [preloadAssets] took. The pipeline calls it when
+  /// it stops.
+  Future<void> releaseAssets() async {
+    final held = List.of(_heldAssets);
+    _heldAssets.clear();
+    final manager = _assetManager;
+    if (manager == null) return;
+    for (final name in held) {
+      await manager.release(name);
     }
   }
 
@@ -113,15 +136,17 @@ abstract class PipelineStage with StageProperties {
     throw error;
   }
 
-  // Resource Configuration (protected methods for subclasses)
+  @Deprecated(unusedResourceHint)
   void setResourceRequirements(ResourceRequirements requirements) {
     _resourceRequirements = requirements;
   }
 
+  @Deprecated(unusedResourceHint)
   void setMemoryStrategy(MemoryStrategy strategy) {
     _memoryStrategy = strategy;
   }
 
+  @Deprecated(unusedResourceHint)
   void setRealTimeConstraints(RealTimeConstraints constraints) {
     _realTimeConstraints = constraints;
   }

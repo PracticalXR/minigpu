@@ -1,8 +1,13 @@
+import 'dart:async';
+
+import 'pipeline_loader.dart';
 import 'pipeline_models.dart';
 import 'pipeline_patch.dart';
+import 'pipeline_validator.dart';
 import 'runtime_builder.dart';
 import '../pipeline.dart';
 import '../pipeline_assets.dart';
+import '../pipeline_stage.dart';
 
 /// Applies patches to live pipelines.
 /// Tip: Structural patches rebuild the entire runtime so inter-pipeline links keep working.
@@ -10,38 +15,44 @@ class RuntimePatchExecutor {
   final Map<String, Pipeline> livePipelines;
   RuntimePatchExecutor(this.livePipelines);
 
-  /// Fast param-only application in place. Returns true if applied fully.
+  /// Applies a patch of `set_param` ops to the live stages in place, and
+  /// returns whether it did.
+  ///
+  /// It changes nothing and returns false when the patch has a structural
+  /// op, which needs [applyAndRebuild], or when an op names a pipeline,
+  /// stage or parameter the pipelines do not have, or a value the parameter
+  /// rejects. [currentConfig] is not changed; apply the patch to it with
+  /// [PatchApplier] to keep it in step.
   bool apply(NetworkConfig currentConfig, PatchEnvelope env) {
     final pipeline = livePipelines[env.pipelineId];
     if (pipeline == null) return false;
 
-    final hasStructural = env.ops.any(
-      (o) => o is ReplaceStageOp || o is AddOperationOp,
-    );
-
-    if (!hasStructural) {
-      for (final op in env.ops) {
-        if (op is SetParamOp) {
-          final stage = pipeline.getStage(op.stageId);
-          if (stage == null) continue;
-          try {
-            stage.setPropertyValue(op.name, op.value);
-          } catch (_) {
-            return false;
-          }
-        } else {
-          return false;
-        }
+    final changes = <(PipelineStage, SetParamOp)>[];
+    for (final op in env.ops) {
+      if (op is! SetParamOp) return false;
+      final stage = pipeline.getStage(op.stageId);
+      if (stage == null ||
+          !stage.hasParameter(op.name) ||
+          !stage.isValidParameterValue(op.name, op.value)) {
+        return false;
       }
-      return true;
+      changes.add((stage, op));
     }
-
-    // Structural present: signal caller to use applyAndRebuild so router is refreshed.
-    return false;
+    for (final (stage, op) in changes) {
+      // The value is stored before setPropertyValue first awaits; the
+      // future carries only the change notification.
+      unawaited(stage.setPropertyValue(op.name, op.value));
+    }
+    return true;
   }
 
-  /// Structural rebuild that returns a new runtime and replaces livePipelines wholesale.
-  /// Caller should dispose the previous runtime/router.
+  /// Applies [env] to [currentConfig], validates and builds the result, and
+  /// replaces [livePipelines] with the new pipelines.
+  ///
+  /// Throws, leaving [livePipelines] as they were, if the patch names
+  /// something the network does not have ([ArgumentError]) or the patched
+  /// network has validation errors ([PipelineValidationException]). Dispose
+  /// the previous runtime once the new one is in use.
   RuntimePatchApplyResult applyAndRebuild(
     NetworkConfig currentConfig,
     PatchEnvelope env,
@@ -49,6 +60,8 @@ class RuntimePatchExecutor {
     // Apply patch to config JSON-wise
     final applier = PatchApplier();
     final newConfig = applier.apply(currentConfig, env);
+    final report = PipelineValidator().validate(newConfig);
+    if (!report.ok) throw PipelineValidationException(report);
 
     // Use the same shared AssetManager all pipelines were using (from any live pipeline)
     final AssetManager am = livePipelines.values.isNotEmpty

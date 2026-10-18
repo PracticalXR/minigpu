@@ -53,6 +53,24 @@ class CPUStageOperation extends StageOperation {
     super.namedArguments,
   }) : _explicitExecutor = executor;
 
+  Map<String, dynamic>? _resolvedNamed;
+
+  @override
+  void applyResolvedArguments(
+    List<dynamic> positional,
+    Map<String, dynamic> named,
+  ) {
+    _resolvedNamed = named;
+  }
+
+  /// The parameters the processor receives: the operation's named
+  /// arguments, with their references resolved, and over them the stage
+  /// [parameters].
+  Map<String, dynamic> parametersFor(Map<String, dynamic> parameters) {
+    final named = _resolvedNamed ?? namedArguments;
+    return named.isEmpty ? parameters : {...named, ...parameters};
+  }
+
   @override
   Future<Map<String, Tensor>> execute(
     Map<String, Tensor> inputs,
@@ -108,7 +126,11 @@ class CPUStageOperation extends StageOperation {
     }
 
     // Step 2: Execute CPU processing via the configured backend
-    final rawOutputs = await _executor.run(rawInputs, ranks, parameters);
+    final rawOutputs = await _executor.run(
+      rawInputs,
+      ranks,
+      parametersFor(parameters),
+    );
 
     // Step 3: Upload outputs (respect configured outputKeys or take all)
     final activeOutputKeys = outputKeys.isEmpty ? rawOutputs.keys : outputKeys;
@@ -222,27 +244,44 @@ class CPUStageOperation extends StageOperation {
     return const <int>[];
   }
 
-  /// Upload raw data back to GPU tensor
+  /// Uploads [rawData], the processor's output [outKey], into a GPU tensor
+  /// of [shape].
+  ///
+  /// Uint8, Int32 and Uint32 lists keep their type; other numeric lists are
+  /// converted by value to float32. Throws an [ArgumentError] for [ByteData]
+  /// or a list of another type, and a [StateError] when the data does not
+  /// fill [shape].
   Future<Tensor> _uploadRawData(
     TypedData rawData,
     List<int> shape,
     ResourceCache cache, {
     required String outKey,
   }) async {
+    if (rawData is Uint8ClampedList) {
+      rawData = Uint8List.view(
+        rawData.buffer,
+        rawData.offsetInBytes,
+        rawData.length,
+      );
+    }
+    if (!_isNumericList(rawData)) {
+      throw ArgumentError(
+        'CPU operation $operationId returned ${rawData.runtimeType} for '
+        '$outKey; return a numeric typed list such as Float32List',
+      );
+    }
+
     final dtype = _dtypeTag(rawData);
     final cacheKey =
         'cpu_output_${operationId}_${outKey}_${dtype}_${shape.join('x')}';
 
-    // Validate data length matches shape before creating/reusing tensor
     final expectedLength = shape.fold<int>(1, (a, b) => a * b);
     final actualLength = _getTypedDataLength(rawData);
-
     if (expectedLength != actualLength) {
-      print(
-        '⚠️ Shape/data mismatch: expected $expectedLength elements (shape $shape), got $actualLength',
+      throw StateError(
+        'CPU operation $operationId returned $actualLength elements for '
+        '$outKey, which do not fill its shape $shape',
       );
-      // Correct the shape to match actual data
-      shape = [actualLength];
     }
 
     final cached = cache.getCachedTensor(cacheKey);
@@ -302,31 +341,17 @@ class CPUStageOperation extends StageOperation {
 
     {
       // Float-family fallback: Float32List passes through; other numeric
-      // lists are widened/narrowed to Float32 (legacy ML behavior).
-      Float32List float32Data;
+      // lists are converted by value to Float32 (legacy ML behavior).
+      final Float32List float32Data;
       if (rawData is Float32List) {
         float32Data = rawData;
       } else if (rawData is Float64List) {
-        float32Data = Float32List.fromList(rawData.map((e) => e).toList());
+        float32Data = Float32List.fromList(rawData);
       } else {
-        // Fallback: interpret as bytes and convert to floats
-        final bytes = rawData.buffer.asUint8List(
-          rawData.offsetInBytes,
-          rawData.lengthInBytes,
-        );
-        if (bytes.lengthInBytes % 4 == 0) {
-          // Try to interpret as Float32
-          float32Data = bytes.buffer.asFloat32List(
-            rawData.offsetInBytes,
-            bytes.lengthInBytes ~/ 4,
-          );
-        } else {
-          // Convert bytes to individual float values
-          float32Data = Float32List.fromList(
-            bytes.map((e) => e.toDouble()).toList(),
-          );
-          shape = [bytes.length]; // Update shape to match byte array
-        }
+        // Int8, Int16, Uint16, Int64 and Uint64 lists.
+        float32Data = Float32List.fromList([
+          for (final value in rawData as List<int>) value.toDouble(),
+        ]);
       }
 
       if (cached is Tensor<Float32List> && _shapesMatch(cached.shape, shape)) {
@@ -344,6 +369,18 @@ class CPUStageOperation extends StageOperation {
       return gpuTensor;
     }
   }
+
+  static bool _isNumericList(TypedData data) =>
+      data is Float32List ||
+      data is Float64List ||
+      data is Int8List ||
+      data is Uint8List ||
+      data is Int16List ||
+      data is Uint16List ||
+      data is Int32List ||
+      data is Uint32List ||
+      data is Int64List ||
+      data is Uint64List;
 
   // Helper to get actual data length consistently
   int _getTypedDataLength(TypedData data) {
@@ -407,7 +444,12 @@ class CPUStageOperation extends StageOperation {
   }
 }
 
-/// Dynamic CPU operation with runtime Dart code evaluation
+/// A CPU operation that would run Dart source. Running it always throws,
+/// because the package does not execute Dart source.
+@Deprecated(
+  'Running it always throws; use ExpressionCPUOperation for per-element '
+  'math, or CPUStageOperation with a processor. Removed in 2.0.',
+)
 class DynamicCPUOperation extends CPUStageOperation {
   final String dartCode;
   final Map<String, dynamic> initialParameters;
@@ -462,31 +504,55 @@ Future<Map<String, TypedData>> _executeDynamicRaw(
 class PrebuiltCPUOperation extends CPUStageOperation {
   final String operation;
 
+  /// [operationParameters] are the operation's named arguments: the
+  /// processor receives them, and the keys of [arguments] other than `args`,
+  /// under the stage parameters, with references such as `param:` resolved.
   PrebuiltCPUOperation({
     required super.operationId,
     required this.operation,
     Map<String, dynamic> operationParameters = const {},
     super.inputKeys,
     super.outputKeys,
+    super.arguments,
   }) : super(
-         processor: (inputs, ranks, params) => CPUOperationRegistry.execute(
-           operation,
-           inputs,
-           ranks,
-           {...operationParameters, ...params},
-         ),
+         namedArguments: operationParameters,
+         processor: (inputs, ranks, params) =>
+             CPUOperationRegistry.execute(operation, inputs, ranks, params),
        );
 }
 
-/// Registry for built-in CPU utilities (optional convenience functions)
+/// The processors that `cpu` operations run, by name.
+///
+/// `passthrough` and `debug_info` are built in. [register] adds your own,
+/// which a JSON network then names in an operation's `operation`.
 class CPUOperationRegistry {
-  static final Map<String, CPUProcessor> _processors = {};
+  static final Map<String, CPUProcessor> _processors = {
+    'passthrough': _passthroughProcessor,
+    'debug_info': _debugInfoProcessor,
+  };
 
+  /// Restores any built-in processor that [unregister] removed. A processor
+  /// registered under a built-in's name is kept.
   static void registerBuiltInProcessors() {
-    _processors['passthrough'] = _passthroughProcessor;
-    _processors['debug_info'] = _debugInfoProcessor;
-    // Add more utility processors as needed
+    _processors.putIfAbsent('passthrough', () => _passthroughProcessor);
+    _processors.putIfAbsent('debug_info', () => _debugInfoProcessor);
   }
+
+  /// Registers [processor] under [name], replacing any processor already
+  /// registered under it.
+  static void register(String name, CPUProcessor processor) {
+    _processors[name] = processor;
+  }
+
+  /// Removes the processor registered under [name], and returns whether
+  /// there was one.
+  static bool unregister(String name) => _processors.remove(name) != null;
+
+  /// Whether a processor is registered under [name].
+  static bool has(String name) => _processors.containsKey(name);
+
+  /// The names of the registered processors.
+  static Set<String> get availableOperations => _processors.keys.toSet();
 
   static Future<Map<String, TypedData>> execute(
     String operation,

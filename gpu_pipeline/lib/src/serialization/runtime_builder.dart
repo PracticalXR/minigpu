@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:gpu_pipeline/src/pipeline_ports.dart';
 import 'package:gpu_pipeline/src/serialization/connection_graph.dart';
 import 'package:gpu_pipeline/src/serialization/operation_factory.dart';
+import 'package:gpu_pipeline/src/serialization/pipeline_validator.dart';
 import 'package:gpu_pipeline/src/serialization/shape_expr.dart';
 
 import '../pipeline.dart';
@@ -25,8 +26,13 @@ class RuntimeBuildResult {
     _InterPipelineRouter? router,
   }) : _router = router;
 
+  /// Stops the links between the pipelines, then disposes the pipelines.
+  /// The asset manager is not disposed.
   Future<void> dispose() async {
     await _router?.dispose();
+    for (final pipeline in pipelines) {
+      await pipeline.dispose();
+    }
   }
 }
 
@@ -62,10 +68,10 @@ class _InterPipelineRouter {
           final tgt = _byId[link.toPipeline];
           if (tgt == null) continue;
 
-          final tensor =
-              outputs[link.fromOutput] ??
-              outputs['output'] ??
-              outputs.values.first;
+          // Only the named output: the validator checked that the source's
+          // final stage has it, so a run that lacks it has nothing to pass.
+          final tensor = outputs[link.fromOutput];
+          if (tensor == null) continue;
           tgt.setExternalInput(link.toInput, tensor);
 
           if (link.mode == InterPipelineLinkMode.latestAutorun &&
@@ -77,12 +83,39 @@ class _InterPipelineRouter {
                   // Clear consumed inputs after autorun to avoid stale reuse
                   tgt.clearExternalInputs();
                 })
-                .catchError((_, __) {});
+                .catchError((Object error, StackTrace stackTrace) {
+                  _reportAutorunError(tgt, link, error, stackTrace);
+                });
           }
         }
       });
 
       _subs.add(sub);
+    }
+  }
+
+  /// Reports a failed autorun as a [PipelineErrorEvent] on the target, so
+  /// the next autorun still runs.
+  void _reportAutorunError(
+    Pipeline target,
+    InterPipelineLinkConfig link,
+    Object error,
+    StackTrace stackTrace,
+  ) {
+    try {
+      target.eventNotifier.emit(
+        PipelineErrorEvent(
+          error: '$error',
+          stackTrace: stackTrace,
+          pipelineId: target.id,
+          metadata: {
+            'source': 'inter_pipeline_link',
+            'from_pipeline': link.fromPipeline,
+          },
+        ),
+      );
+    } catch (_) {
+      // The target was disposed while the run was in flight.
     }
   }
 
@@ -152,59 +185,42 @@ class RuntimeBuilder {
       pipeline.addStage(stages[id]!);
     }
 
-    // Store raw connections for runtime routing (add a field or method in Pipeline)
+    // The pipeline routes each stage's inputs along these connections.
     pipeline.setSerializedConnections(pc.connections);
 
     return pipeline;
   }
 
+  /// Builds [sc] as a [DynamicStage] from its ports, parameters and
+  /// operations, whatever its stage_kind.
   PipelineStage _buildStage(StageConfig sc) {
-    // If stage_kind signals a dynamic composite stage:
-    if (sc.stageKind == 'DynamicStage' || sc.operations.isNotEmpty) {
-      final outputPortsMap = <String, OutputPort>{};
-      for (final portCfg in sc.outputs) {
-        final port = _makeOutputPort(portCfg);
-        outputPortsMap[portCfg.name] = port;
-      }
+    final outputPorts = <String, OutputPort>{
+      for (final portCfg in sc.outputs) portCfg.name: _makeOutputPort(portCfg),
+    };
 
-      final ops = <StageOperation>[];
-      for (final oc in sc.operations) {
-        ops.add(OperationFactory.create(oc, outputPorts: outputPortsMap));
-      }
-      final paramDefs = <String, Parameter>{};
-      for (final entry in sc.parameters.entries) {
-        // Minimal param metadata (could be enriched later)
-        paramDefs[entry.key] = Parameter(
+    final ops = <StageOperation>[
+      for (final oc in sc.operations)
+        OperationFactory.create(oc, outputPorts: outputPorts),
+    ];
+    final paramDefs = <String, Parameter>{
+      for (final entry in sc.parameters.entries)
+        entry.key: Parameter(
           name: entry.key,
           defaultValue: entry.value,
           description: '',
-        );
-      }
-      final dyn = DynamicStage(
-        stageId: sc.stageId,
-        operations: ops,
-        parameterDefinitions: paramDefs,
-      );
-      // Add input ports from config
-      for (final portCfg in sc.inputs) {
-        dyn.addInputPort(_makeInputPort(portCfg));
-      }
-      // Add output ports from config
-      for (final portCfg in sc.outputs) {
-        dyn.addOutputPort(_makeOutputPort(portCfg));
-      }
-      // Initialize parameter current values (defaults already set)
-      sc.parameters.forEach((k, v) => dyn.setPropertyValue(k, v));
-      return dyn;
-    }
-
-    // TODO: build specific concrete stage kinds (WindowStage, FFTStage, etc.)
-    // Placeholder: treat as empty dynamic stage so pipeline stays consistent.
-    return DynamicStage(
+        ),
+    };
+    // The constructor sets each parameter to its default value.
+    final stage = DynamicStage(
       stageId: sc.stageId,
-      operations: const [],
-      parameterDefinitions: {},
+      operations: ops,
+      parameterDefinitions: paramDefs,
     );
+    for (final portCfg in sc.inputs) {
+      stage.addInputPort(_makeInputPort(portCfg));
+    }
+    outputPorts.values.forEach(stage.addOutputPort);
+    return stage;
   }
 
   RuntimeBuildResult build(NetworkConfig net) {
@@ -213,12 +229,11 @@ class RuntimeBuilder {
     final built = <Pipeline>[];
     for (final p in net.pipelines) {
       final pipe = _buildPipeline(p);
-      // If you added setSerializedAssets earlier:
       pipe.setSerializedAssets(net.assets);
       built.add(pipe);
     }
 
-    // Wire inter-pipeline links (no-op today)
+    // Wire inter-pipeline links
     final byId = {for (final p in built) p.id: p};
     final router = _InterPipelineRouter(byId, net.interPipelineLinks);
     router.install();
@@ -228,19 +243,25 @@ class RuntimeBuilder {
 }
 
 InputPort _makeInputPort(PortConfig cfg) {
-  // Example: choose based on config
-  if (cfg.portType == 'flexible_input') {
-    return FlexibleInputPort(name: cfg.name);
+  switch (cfg.portType) {
+    case 'flexible_input':
+      return FlexibleInputPort(
+        name: cfg.name,
+        isRequired: cfg.required ?? true,
+        minDimensions: cfg.minDimensions,
+        maxDimensions: cfg.maxDimensions,
+      );
+    case 'exact_input':
+      final shape = exactPortShape(cfg);
+      if (shape == null) {
+        throw ArgumentError(
+          'exact_input port ${cfg.name} needs a shape_expr '
+          '{"op": "fixed", "shape": [...]} whose dims are positive integers',
+        );
+      }
+      return ExactInputPort(name: cfg.name, expectedShape: shape);
   }
-  if (cfg.portType == 'exact_input' &&
-      cfg.shapeExpr?.raw['shape'] is List<int>) {
-    return ExactInputPort(
-      name: cfg.name,
-      expectedShape: List<int>.from(cfg.shapeExpr!.raw['shape']),
-    );
-  }
-  // Add more cases as needed
-  throw Exception('Unknown input port type: ${cfg.portType}');
+  throw ArgumentError('Unknown input port type: ${cfg.portType}');
 }
 
 OutputPort _makeOutputPort(PortConfig cfg) {
@@ -272,6 +293,5 @@ OutputPort _makeOutputPort(PortConfig cfg) {
           inputs.isNotEmpty ? List<int>.from(inputs.values.first.shape) : [1],
     );
   }
-  // Add more cases as needed
-  throw Exception('Unknown output port type: ${cfg.portType}');
+  throw ArgumentError('Unknown output port type: ${cfg.portType}');
 }

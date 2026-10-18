@@ -1,5 +1,4 @@
 import 'package:gpu_pipeline/gpu_pipeline.dart';
-import 'package:gpu_pipeline/src/pipeline_assets.dart';
 import 'package:gpu_pipeline/src/pipeline_ports.dart';
 import 'package:gpu_pipeline/src/stages/pipeline_resource_cache.dart';
 import 'package:gpu_tensor/gpu_tensor.dart';

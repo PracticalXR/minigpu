@@ -15,7 +15,7 @@ Part of the [minigpu](https://github.com/PracticalXR/minigpu) package family.
 - **Serialization**: `PipelineLoader().loadFromJson(...)` builds the pipelines a JSON network config describes, and `PipelineSerializer` validates and re-encodes one.
 - **Events**: `addEventListener` delivers stage, operation, stream and pipeline events, including errors.
 
-`ResourceRequirements`, `MemoryStrategy`, `RealTimeConstraints` and `PipelineStage.stageConcurrency` can be set on a stage, but the pipeline does not schedule by them yet. The device list that `ResourceRequirements` is checked against is a placeholder.
+The resource and scheduling hints (`ResourceRequirements`, `MemoryStrategy`, `RealTimeConstraints` and `PipelineStage.stageConcurrency`) are deprecated: a stage stores them, but the pipeline reads none of them. So is `Pipeline.resourceGovernor`, a placeholder that reports invented devices. All of them will be removed in 2.0.
 
 ## Getting started
 
@@ -23,7 +23,7 @@ Add to `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  gpu_pipeline: ^1.9.2
+  gpu_pipeline: ^1.9.3
   gpu_tensor: ^1.9.0
   minigpu: ^1.9.0
 ```
@@ -72,7 +72,7 @@ print(await out['output']!.getData()); // [0.5, 0.75, -1.0, 1.0]
 
 ### Run stages over a stream
 
-A `MediaStream` subclass emits frames with `notifyTensorUpdate` (a GPU tensor) or `notifyHostData` (host samples and a shape). Override `start` and `stop` with your capture logic.
+A `MediaStream` subclass emits frames with `notifyTensorUpdate` (a GPU tensor) or `notifyHostData` (host samples and a shape). Put your capture logic in `startCapture` and `stopCapture`; `start` and `stop` call each once and keep `isActive` up to date.
 
 ```dart
 class SampleStream extends MediaStream {
@@ -86,19 +86,14 @@ class SampleStream extends MediaStream {
           context: null,
         );
 
-  bool _active = false;
-
   @override
-  bool get isActive => _active;
-
-  @override
-  Future<void> start() async {
-    _active = true;
+  Future<void> startCapture() async {
+    // Open the device here.
   }
 
   @override
-  Future<void> stop() async {
-    _active = false;
+  Future<void> stopCapture() async {
+    // Close it here.
   }
 
   void push(Float32List samples) => notifyHostData(samples, [samples.length]);
@@ -140,6 +135,14 @@ final stage = StageBuilder('scaled_square')
 ```
 
 For a full shader with several bindings, use `executeShader`.
+
+### Guides
+
+- [Pipelines from JSON](doc/serialization.md): the network format, operation kinds, how stages pass tensors, links between pipelines, validation and live patches.
+- [Assets](doc/assets.md): assets in a JSON network and in stages, reading them, per-call assets and lifetimes.
+- [CPU steps](doc/cpu_steps.md): Dart steps, worker isolates and expression steps.
+
+Every code example in the guides runs as a test in `test/doc_examples_test.dart`.
 
 ## Architecture
 

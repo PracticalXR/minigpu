@@ -7,7 +7,7 @@ import 'dart:async';
 import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'stage_executor.dart' show StageExecutor, StageProcessor;
+import 'stage_executor.dart' show InlineExecutor, StageExecutor, StageProcessor;
 
 /// Runs the processor on a single long-lived worker isolate, keeping heavy
 /// host-side compute (filtering, stateless encoding, etc.) off the isolate
@@ -15,12 +15,15 @@ import 'stage_executor.dart' show StageExecutor, StageProcessor;
 /// CPU work on the previous one.
 ///
 /// Constraints:
-///   * [processor] **must** be a top-level or static function. Closures that
-///     capture state are not sendable to another isolate and will throw at
-///     spawn time.
-///   * Inputs/outputs are copied across the isolate boundary (Dart's standard
-///     `TypedData` transfer). Zero-copy hand-off via `TransferableTypedData`
-///     is a future optimisation tracked separately.
+///   * [processor] is copied into the worker once, when the first [run]
+///     starts it. A closure works when everything it captures can be sent
+///     to another isolate (starting the worker throws otherwise), but the
+///     worker runs on copies: state the processor changes stays in the
+///     worker, and changes made later on the calling side never reach it.
+///     A processor that keeps state the caller reads needs
+///     [InlineExecutor].
+///   * Inputs, outputs and parameters are copied across the isolate
+///     boundary on every run (Dart's standard `TypedData` transfer).
 class PersistentIsolateExecutor extends StageExecutor {
   PersistentIsolateExecutor(this.processor);
 

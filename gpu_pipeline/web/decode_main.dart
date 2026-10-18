@@ -26,15 +26,17 @@ Future<void> main() async {
     height: height,
   );
   final loader = PipelineLoader();
-  final decLoad = loader.loadFromJson(decNet.encode());
-  if (!decLoad.validation.ok) {
-    logEl.text = 'Validation failed: ${decLoad.validation.errors}';
+  final PipelineLoadResult decLoad;
+  try {
+    decLoad = loader.loadFromJson(decNet.encode());
+  } on PipelineValidationException catch (e) {
+    logEl.textContent = '$e';
     return;
   }
   final decoder = decLoad.runtime.pipelines.first;
 
   Future<void> runDemo() async {
-    logEl.text = 'Running...';
+    logEl.textContent = 'Running...';
 
     // Synthesize a packet by encoding a test pattern locally
     final srcU8 = Uint8ClampedList(numPixels * 4);
@@ -82,7 +84,7 @@ Future<void> main() async {
     final img = web.ImageData(dst.toJS, width, height.toJS);
     ctx.putImageData(img, 0, 0);
 
-    logEl.text = 'Done.';
+    logEl.textContent = 'Done.';
   }
 
   // Use a JS-typed EventListener

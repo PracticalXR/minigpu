@@ -240,24 +240,9 @@ class SafeMockStream extends MediaStream {
   }
 
   @override
-  Future<void> start() async {
-    _isActive = true;
+  Future<void> startCapture() async {
     print('📐 Safe stream started');
   }
-
-  @override
-  Future<void> stop() async {
-    _isActive = false;
-  }
-
-  @override
-  void dispose() {
-    _isActive = false;
-  }
-
-  bool _isActive = false;
-  @override
-  bool get isActive => _isActive;
 }
 
 /// Safer coordinate stream with minimal operations
@@ -307,24 +292,9 @@ class SafeCoordinateStream extends MediaStream {
   }
 
   @override
-  Future<void> start() async {
-    _isActive = true;
+  Future<void> startCapture() async {
     print('📐 Safe coordinate stream started');
   }
-
-  @override
-  Future<void> stop() async {
-    _isActive = false;
-  }
-
-  @override
-  void dispose() {
-    _isActive = false;
-  }
-
-  bool _isActive = false;
-  @override
-  bool get isActive => _isActive;
 }
 
 /// Print benchmark results
@@ -685,25 +655,6 @@ class MockAudioStream extends MediaStream {
 
     notifyTensorUpdate(tensor);
   }
-
-  @override
-  Future<void> start() async {
-    _isActive = true;
-  }
-
-  @override
-  Future<void> stop() async {
-    _isActive = false;
-  }
-
-  @override
-  void dispose() {
-    _isActive = false;
-  }
-
-  bool _isActive = false;
-  @override
-  bool get isActive => _isActive;
 }
 
 /// Mock video stream
@@ -746,23 +697,4 @@ class MockVideoStream extends MediaStream {
 
     notifyTensorUpdate(tensor);
   }
-
-  @override
-  Future<void> start() async {
-    _isActive = true;
-  }
-
-  @override
-  Future<void> stop() async {
-    _isActive = false;
-  }
-
-  @override
-  void dispose() {
-    _isActive = false;
-  }
-
-  bool _isActive = false;
-  @override
-  bool get isActive => _isActive;
 }

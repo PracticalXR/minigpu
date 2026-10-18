@@ -34,7 +34,7 @@ void main() {
           ),
           AssetConfig(
             name: 'lut_bin',
-            source: {'type': 'embedded', 'data': 'AQIDBA=='},
+            source: {'type': 'embedded', 'bytes': 'AQIDBA=='},
             required: true,
           ),
         ],
@@ -53,7 +53,7 @@ void main() {
       final cfg = shared.getPreloadedConfig('cfg_json')!;
       final lut = shared.getPreloadedBinary('lut_bin')!;
       expect(cfg['ok'], isTrue);
-      expect(lut, isNotNull);
+      expect(lut, [1, 2, 3, 4]);
 
       await pipeline.stop();
       await shared.dispose();

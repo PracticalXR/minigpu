@@ -3,20 +3,13 @@ import 'dart:async';
 class MainThreadMonitor {
   // Singleton implementation
   static MainThreadMonitor? _instance;
-  static final Object _lock = Object();
 
   // Private constructor
   MainThreadMonitor._internal();
 
-  // Singleton getter with thread-safe lazy initialization
-  static MainThreadMonitor get instance {
-    if (_instance == null) {
-      synchronized(_lock, () {
-        _instance ??= MainThreadMonitor._internal();
-      });
-    }
-    return _instance!;
-  }
+  /// This isolate's monitor, created on first use.
+  static MainThreadMonitor get instance =>
+      _instance ??= MainThreadMonitor._internal();
 
   // Factory constructor
   factory MainThreadMonitor() => instance;
@@ -29,9 +22,6 @@ class MainThreadMonitor {
   // Event loop timing measurements
   final List<Duration> _eventLoopTimes = [];
   DateTime? _lastMeasurement;
-  bool _microtaskQueuePressured = false;
-  bool _memoryPressure = false;
-  bool _highCpuUsage = false;
 
   static const int _measurementWindow = 20;
   static const Duration _targetEventTime = Duration(milliseconds: 1);
@@ -41,30 +31,25 @@ class MainThreadMonitor {
   bool get isOverloaded => _currentLoad > 0.8;
   bool get isHeavyLoad => _currentLoad > 0.6;
   double get currentLoad => _currentLoad;
-  bool get hasMicrotaskPressure => _microtaskQueuePressured;
-  bool get hasMemoryPressure => _memoryPressure;
-  bool get hasCpuPressure => _highCpuUsage;
+
+  // Nothing measures these three.
+  @Deprecated('Always false: nothing measures it. Will be removed in 2.0.')
+  bool get hasMicrotaskPressure => false;
+  @Deprecated('Always false: nothing measures it. Will be removed in 2.0.')
+  bool get hasMemoryPressure => false;
+  @Deprecated('Always false: nothing measures it. Will be removed in 2.0.')
+  bool get hasCpuPressure => false;
 
   /// Start monitoring (idempotent - safe to call multiple times)
   void startMonitoring() {
-    if (_isMonitoring) {
-      print('📊 Thread monitor already running');
-      return;
-    }
-
+    if (_isMonitoring) return;
     _isMonitoring = true;
     _startEventLoopMonitoring();
-
-    print('📊 MainThreadMonitor singleton started');
   }
 
   /// Stop monitoring (idempotent - safe to call multiple times)
   void stopMonitoring() {
-    if (!_isMonitoring) {
-      print('📊 Thread monitor not running');
-      return;
-    }
-
+    if (!_isMonitoring) return;
     _isMonitoring = false;
 
     _monitorTimer?.cancel();
@@ -72,12 +57,7 @@ class MainThreadMonitor {
     _eventLoopTimes.clear();
 
     _currentLoad = 0.0;
-    _microtaskQueuePressured = false;
-    _memoryPressure = false;
-    _highCpuUsage = false;
     _lastMeasurement = null;
-
-    print('📊 MainThreadMonitor singleton stopped');
   }
 
   void _startEventLoopMonitoring() {
@@ -124,11 +104,7 @@ class MainThreadMonitor {
         _lastMeasurement == null ||
         now.difference(_lastMeasurement!) > Duration(milliseconds: 100);
 
-    return isOverloaded ||
-        staleData ||
-        _microtaskQueuePressured ||
-        _memoryPressure ||
-        _highCpuUsage;
+    return isOverloaded || staleData;
   }
 
   int getFrameSkipCount() {
@@ -138,13 +114,11 @@ class MainThreadMonitor {
     return 1;
   }
 
+  /// Prints the current measurements.
   void printStats() {
     print('📊 === MainThreadMonitor Stats ===');
     print('📊 Monitoring: $_isMonitoring');
     print('📊 Event Loop Load: ${(_currentLoad * 100).toStringAsFixed(1)}%');
-    print('📊 Microtask Queue Pressured: $_microtaskQueuePressured');
-    print('📊 Memory Pressure: $_memoryPressure');
-    print('📊 High CPU Usage: $_highCpuUsage');
     print('📊 Should Skip Frame: ${shouldSkipFrame()}');
 
     if (_eventLoopTimes.isNotEmpty) {
@@ -167,15 +141,14 @@ class MainThreadMonitor {
 
   /// Dispose singleton
   static void disposeSingleton() {
-    synchronized(_lock, () {
-      _instance?.stopMonitoring();
-      _instance = null;
-    });
-    print('📊 MainThreadMonitor singleton disposed');
+    _instance?.stopMonitoring();
+    _instance = null;
   }
 }
 
-// Helper function for thread-safe operations
+/// Runs [operation]. It never locked anything: an isolate runs one piece of
+/// Dart code at a time, so there was nothing to guard.
+@Deprecated('Runs operation directly; it never locked. Will be removed in 2.0.')
 void synchronized(Object lock, void Function() operation) {
   operation();
 }

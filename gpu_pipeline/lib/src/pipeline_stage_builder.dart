@@ -1,4 +1,5 @@
 import 'package:gpu_pipeline/src/operation/cpu_stage_operation.dart';
+import 'package:gpu_pipeline/src/operation/stage_executor.dart';
 import 'package:gpu_pipeline/src/operation/stage_operation.dart';
 import 'package:gpu_pipeline/src/operation/tensor_stage_operation.dart';
 import 'package:gpu_pipeline/src/operation/shader_stage_operation.dart';
@@ -149,7 +150,13 @@ class StageBuilder {
     return this;
   }
 
-  /// Add generated input (creates noise, patterns, etc.)
+  /// Adds an input port for generated data, and an asset to generate it.
+  /// Nothing generates either, and the asset makes the pipeline fail to
+  /// start.
+  @Deprecated(
+    'Nothing generates the input, and its generated asset makes start() '
+    'fail. Removed in 2.0.',
+  )
   StageBuilder withGeneratedInput(
     String name, {
     required List<int> shape,
@@ -158,6 +165,7 @@ class StageBuilder {
     Map<String, dynamic> generatorParams = const {},
   }) {
     // Create a generated asset that produces the input
+    // ignore: deprecated_member_use_from_same_package
     final asset = StaticAsset.generated(
       name: '${name}_generator',
       type: AssetType.binary,
@@ -339,7 +347,12 @@ class StageBuilder {
     return this;
   }
 
-  /// Add generated asset using StaticAsset.generated factory
+  /// Adds an asset a generator would make. Nothing generates assets, so
+  /// unless [isRequired] is false the pipeline fails to start.
+  @Deprecated(
+    'Nothing generates assets, so the pipeline fails to start. Removed in '
+    '2.0.',
+  )
   StageBuilder withGeneratedAsset(
     String name, {
     required AssetType type,
@@ -347,6 +360,7 @@ class StageBuilder {
     bool isRequired = true,
   }) {
     _assets.add(
+      // ignore: deprecated_member_use_from_same_package
       StaticAsset.generated(
         name: name,
         type: type,
@@ -364,8 +378,10 @@ class StageBuilder {
   }
 
   // ============ RESOURCE METHODS ============
+  // The stage stores these hints, but the pipeline reads none of them.
 
   /// Set resource requirements
+  @Deprecated(unusedResourceHint)
   StageBuilder withResourceRequirements({
     required ResourceRequirements requirements,
   }) {
@@ -374,12 +390,14 @@ class StageBuilder {
   }
 
   /// Set memory strategy
+  @Deprecated(unusedResourceHint)
   StageBuilder withMemoryStrategy({required MemoryStrategy strategy}) {
     _memoryStrategy = strategy;
     return this;
   }
 
   /// Set real-time constraints
+  @Deprecated(unusedResourceHint)
   StageBuilder withRealTimeConstraints({
     required RealTimeConstraints constraints,
   }) {
@@ -388,8 +406,8 @@ class StageBuilder {
   }
 
   /// Set GPU affinity - create ResourceRequirements if needed
+  @Deprecated(unusedResourceHint)
   StageBuilder withGPUAffinity({required List<int> gpuIds}) {
-    // This would need to match the actual ResourceRequirements constructor
     if (_resourceRequirements == null) {
       _resourceRequirements = ResourceRequirements(preferredGPUs: gpuIds);
     } else {
@@ -457,11 +475,16 @@ class StageBuilder {
     return this;
   }
 
-  /// Execute custom CPU processing function
+  /// Adds a step that runs [processor] on host copies of its input.
+  ///
+  /// The step runs on the calling isolate unless [executor] runs it
+  /// elsewhere, such as a [PersistentIsolateExecutor] built from the same
+  /// processor.
   StageBuilder executeCPU(
     CPUProcessor processor, {
     String? inputKey,
     String? outputKey,
+    StageExecutor? executor,
   }) {
     final opId = '${_stageId}_cpu_${_operations.length}';
 
@@ -489,6 +512,7 @@ class StageBuilder {
     final operation = CPUStageOperation(
       operationId: opId,
       processor: processor,
+      executor: executor,
       inputKeys: [resolvedInputKey],
       outputKeys: [resolvedOutputKey],
     );
@@ -497,7 +521,12 @@ class StageBuilder {
     return this;
   }
 
-  /// Execute dynamic CPU code (for future implementation)
+  /// Adds a step that would run [dartCode]. Running it always throws,
+  /// because the package does not execute Dart source.
+  @Deprecated(
+    'Running it always throws; use executeCPU with a processor function. '
+    'Removed in 2.0.',
+  )
   StageBuilder executeDynamicCPU(
     String dartCode, {
     bool isolateEnabled = false,
@@ -507,6 +536,7 @@ class StageBuilder {
     final actualInputKey = inputKey ?? _currentOutputKey;
     final actualOutputKey = outputKey ?? _getNextTensorKey();
 
+    // ignore: deprecated_member_use_from_same_package
     final dynamicCpuOp = DynamicCPUOperation(
       operationId: '${_stageId}_dynamic_cpu_${_operations.length}',
       dartCode: dartCode,
@@ -759,14 +789,18 @@ class StageBuilder {
       stage.addAsset(asset);
     }
 
-    // Configure resources
+    // Pass the deprecated resource hints on, so the stage's getters return
+    // what the builder was given.
     if (_resourceRequirements != null) {
+      // ignore: deprecated_member_use_from_same_package
       stage.setResourceRequirements(_resourceRequirements!);
     }
     if (_memoryStrategy != null) {
+      // ignore: deprecated_member_use_from_same_package
       stage.setMemoryStrategy(_memoryStrategy!);
     }
     if (_realTimeConstraints != null) {
+      // ignore: deprecated_member_use_from_same_package
       stage.setRealTimeConstraints(_realTimeConstraints!);
     }
 

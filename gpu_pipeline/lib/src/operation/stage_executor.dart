@@ -62,8 +62,8 @@ abstract class StageExecutor {
 ///
 /// This is the only correct choice for **stateful** processors — e.g. a
 /// closed-loop video encoder that mutates reference-frame / entropy state
-/// captured in its closure — because such state cannot be shipped to a
-/// worker isolate.
+/// captured in its closure — because a worker isolate would run on a copy
+/// of that state.
 class InlineExecutor extends StageExecutor {
   const InlineExecutor(this.processor);
 

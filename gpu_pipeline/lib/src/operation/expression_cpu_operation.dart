@@ -53,6 +53,9 @@ class ExpressionCPUOperation extends CPUStageOperation {
       processor: _makeProcessor(compiled, initialParameters),
       inputKeys: inputKeys,
       outputKeys: outputKeys ?? expressions.keys.toList(),
+      // Resolved by the stage before each run (`param:` references), and
+      // passed to the processor under the stage parameters.
+      arguments: initialParameters,
     );
   }
 
@@ -63,6 +66,7 @@ class ExpressionCPUOperation extends CPUStageOperation {
     required super.processor,
     required super.inputKeys,
     required super.outputKeys,
+    super.arguments,
   });
 
   /// The raw expression sources (for serialization).

@@ -220,7 +220,27 @@ abstract class InputPort extends Port {
     this.shapePolicy = InputShapePolicy.flexible,
   });
 
-  ValidationResult validateInput(Tensor? tensor);
+  /// Checks [tensor], the input this port receives, or null when it
+  /// receives none.
+  ///
+  /// The default checks the tensor's shape with [validateShape]. Override
+  /// it to check more than the shape.
+  ValidationResult validateInput(Tensor? tensor) =>
+      validateShape(tensor?.shape);
+
+  /// Checks an input of [shape], or a missing input when [shape] is null,
+  /// without reading its data. The pipeline calls this where a stage
+  /// receives host buffers or deferred tensors instead of [Tensor]s, so an
+  /// override of only [validateInput] is not checked there.
+  ///
+  /// The default rejects only a missing required input.
+  ValidationResult validateShape(List<int>? shape) {
+    if (shape == null && isRequired) {
+      return ValidationResult.invalid('Input $name is required');
+    }
+    return ValidationResult.valid();
+  }
+
   List<int>? get expectedShape => null;
 }
 
@@ -238,20 +258,20 @@ class FlexibleInputPort extends InputPort {
   });
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
-    if (tensor == null) {
+  ValidationResult validateShape(List<int>? shape) {
+    if (shape == null) {
       return isRequired
           ? ValidationResult.invalid('Input $name is required')
           : ValidationResult.valid();
     }
 
-    if (minDimensions != null && tensor.shape.length < minDimensions!) {
+    if (minDimensions != null && shape.length < minDimensions!) {
       return ValidationResult.invalid(
         'Input $name needs at least $minDimensions dimensions',
       );
     }
 
-    if (maxDimensions != null && tensor.shape.length > maxDimensions!) {
+    if (maxDimensions != null && shape.length > maxDimensions!) {
       return ValidationResult.invalid(
         'Input $name has too many dimensions (max $maxDimensions)',
       );
@@ -277,21 +297,19 @@ class AudioInputPort extends InputPort {
   });
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
-    if (tensor == null) {
+  ValidationResult validateShape(List<int>? shape) {
+    if (shape == null) {
       return isRequired
           ? ValidationResult.invalid('Audio input $name is required')
           : ValidationResult.valid();
     }
 
-    if (tensor.shape.length > 2) {
+    if (shape.isEmpty || shape.length > 2) {
       return ValidationResult.invalid('Audio must be 1D or 2D tensor');
     }
 
-    final samples = tensor.shape.length == 1
-        ? tensor.shape[0]
-        : tensor.shape[1];
-    final channels = tensor.shape.length == 1 ? 1 : tensor.shape[0];
+    final samples = shape.length == 1 ? shape[0] : shape[1];
+    final channels = shape.length == 1 ? 1 : shape[0];
 
     if (minSamples != null && samples < minSamples!) {
       return ValidationResult.invalid('Need at least $minSamples samples');
@@ -329,22 +347,22 @@ class VideoInputPort extends InputPort {
   });
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
-    if (tensor == null) {
+  ValidationResult validateShape(List<int>? shape) {
+    if (shape == null) {
       return isRequired
           ? ValidationResult.invalid('Video input $name is required')
           : ValidationResult.valid();
     }
 
-    if (tensor.shape.length != 3 && tensor.shape.length != 4) {
+    if (shape.length != 3 && shape.length != 4) {
       return ValidationResult.invalid(
         'Video must be 3D [H,W,C] or 4D [B,H,W,C]',
       );
     }
 
-    final isBatched = tensor.shape.length == 4;
-    final height = tensor.shape[isBatched ? 1 : 0];
-    final width = tensor.shape[isBatched ? 2 : 1];
+    final isBatched = shape.length == 4;
+    final height = shape[isBatched ? 1 : 0];
+    final width = shape[isBatched ? 2 : 1];
 
     if (minWidth != null && width < minWidth!) {
       return ValidationResult.invalid('Width too small (min $minWidth)');
@@ -375,15 +393,15 @@ class ExactInputPort extends InputPort {
   }) : super(shapePolicy: InputShapePolicy.exact);
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
-    if (tensor == null) {
+  ValidationResult validateShape(List<int>? shape) {
+    if (shape == null) {
       return ValidationResult.invalid('Input $name is required');
     }
 
-    if (tensor.shape.length != expectedShape.length ||
-        !_listsEqual(tensor.shape, expectedShape)) {
+    if (shape.length != expectedShape.length ||
+        !_listsEqual(shape, expectedShape)) {
       return ValidationResult.invalid(
-        'Shape ${tensor.shape} != expected $expectedShape',
+        'Input $name has shape $shape, not $expectedShape',
       );
     }
 
@@ -429,8 +447,8 @@ class StaticInputPort extends InputPort {
   });
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
-    return tensor == null
+  ValidationResult validateShape(List<int>? shape) {
+    return shape == null
         ? ValidationResult.invalid('Asset $name not loaded')
         : ValidationResult.valid();
   }
@@ -561,6 +579,25 @@ class InputPortCollection {
         : ValidationResult.invalidMultiple(errors);
   }
 
+  /// Checks inputs of these [shapes], by port name, with
+  /// [InputPort.validateShape].
+  ValidationResult validateShapes(Map<String, List<int>> shapes) {
+    final errors = <String>[];
+    final warnings = <String>[];
+
+    for (final port in _ports.values) {
+      final result = port.validateShape(shapes[port.name]);
+      if (!result.isValid) {
+        errors.addAll(result.errors);
+      }
+      warnings.addAll(result.warnings);
+    }
+
+    return errors.isEmpty
+        ? ValidationResult.valid(warnings: warnings)
+        : ValidationResult.invalidMultiple(errors);
+  }
+
   int get length => _ports.length;
   bool get isEmpty => _ports.isEmpty;
 }
@@ -610,7 +647,7 @@ class GeneratedInputPort extends InputPort {
   }) : super(format: 'generated');
 
   @override
-  ValidationResult validateInput(Tensor? tensor) {
+  ValidationResult validateShape(List<int>? shape) {
     // Generated inputs are always valid when created
     return ValidationResult.valid();
   }

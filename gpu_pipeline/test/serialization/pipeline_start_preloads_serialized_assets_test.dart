@@ -28,7 +28,7 @@ void main() {
           ),
           AssetConfig(
             name: 'lut_bin',
-            source: {'type': 'embedded', 'data': 'AQIDBA=='}, // base64
+            source: {'type': 'embedded', 'bytes': 'AQIDBA=='},
             required: true,
           ),
         ];
@@ -42,7 +42,7 @@ void main() {
         final cfg = assets.getPreloadedConfig('cfg_json')!;
         final lut = assets.getPreloadedBinary('lut_bin')!;
         expect(cfg['a'], 1);
-        expect(lut.length, 4);
+        expect(lut, [1, 2, 3, 4]);
 
         // Cleanup
         await pipe.stop();

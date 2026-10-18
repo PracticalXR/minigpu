@@ -80,6 +80,16 @@ class PatchEnvelope {
   final String pipelineId;
   final List<PatchOp> ops;
   PatchEnvelope({required this.pipelineId, required this.ops});
+
+  /// Reads the JSON that [toJson] writes.
+  factory PatchEnvelope.fromJson(Map<String, dynamic> j) => PatchEnvelope(
+    pipelineId: j['pipeline_id'] as String,
+    ops: [
+      for (final o in j['ops'] as List? ?? const <dynamic>[])
+        PatchOp.fromJson((o as Map).cast<String, dynamic>()),
+    ],
+  );
+
   Map<String, dynamic> toJson() => {
     'type': 'patch',
     'pipeline_id': pipelineId,
@@ -88,7 +98,18 @@ class PatchEnvelope {
 }
 
 class PatchApplier {
+  /// Returns a copy of [net] with [patch] applied; [net] is not changed.
+  ///
+  /// Throws an [ArgumentError], and applies nothing, if the patch names a
+  /// pipeline, stage or parameter that the network does not have, or if a
+  /// `replace_stage` gives the stage the id of another stage.
   NetworkConfig apply(NetworkConfig net, PatchEnvelope patch) {
+    if (!net.pipelines.any((p) => p.id == patch.pipelineId)) {
+      throw ArgumentError(
+        'The patch names pipeline ${patch.pipelineId}, which the network '
+        'does not have',
+      );
+    }
     final pipelines = <PipelineConfig>[];
 
     for (final p in net.pipelines) {
@@ -106,26 +127,46 @@ class PatchApplier {
           .cast<Map<String, dynamic>>()
           .toList();
 
+      int stageIndex(String stageId) {
+        final idx = stagesJ.indexWhere((s) => s['stage_id'] == stageId);
+        if (idx < 0) {
+          throw ArgumentError(
+            'The patch names stage $stageId, which pipeline ${p.id} does '
+            'not have',
+          );
+        }
+        return idx;
+      }
+
       for (final op in patch.ops) {
         if (op is SetParamOp) {
-          final idx = stagesJ.indexWhere((s) => s['stage_id'] == op.stageId);
-          if (idx < 0) continue;
+          final idx = stageIndex(op.stageId);
           final sj = Map<String, dynamic>.from(stagesJ[idx]);
           final params = Map<String, dynamic>.from(
             (sj['parameters'] as Map?) ?? const <String, dynamic>{},
           );
+          if (!params.containsKey(op.name)) {
+            throw ArgumentError(
+              'The patch sets parameter ${op.name}, which stage ${op.stageId} '
+              'does not have',
+            );
+          }
           params[op.name] = op.value;
           sj['parameters'] = params;
           stagesJ[idx] = sj;
         } else if (op is ReplaceStageOp) {
-          final idx = stagesJ.indexWhere(
-            (s) => s['stage_id'] == op.targetStageId,
-          );
-          if (idx < 0) continue;
+          final idx = stageIndex(op.targetStageId);
 
           final oldId = op.targetStageId;
           final newJ = op.stage.toJson();
           final newId = (newJ['stage_id'] as String?) ?? oldId;
+          if (newId != oldId &&
+              stagesJ.any((s) => s['stage_id'] == newId)) {
+            throw ArgumentError(
+              'The patch replaces stage $oldId with stage $newId, but '
+              'pipeline ${p.id} already has a stage $newId',
+            );
+          }
 
           // Replace stage JSON
           stagesJ[idx] = newJ;
@@ -140,8 +181,7 @@ class PatchApplier {
             }
           }
         } else if (op is AddOperationOp) {
-          final idx = stagesJ.indexWhere((s) => s['stage_id'] == op.stageId);
-          if (idx < 0) continue;
+          final idx = stageIndex(op.stageId);
           final sj = Map<String, dynamic>.from(stagesJ[idx]);
           final opsJ = (sj['operations'] as List? ?? const [])
               .map((e) => (e as Map).cast<String, dynamic>())

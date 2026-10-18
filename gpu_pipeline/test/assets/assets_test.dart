@@ -102,13 +102,12 @@ void main() {
       final binData = base64.encode([1, 2, 3, 4]);
       final binCfg = AssetConfig(
         name: 'bin',
-        source: {'type': 'embedded', 'data': binData},
-        // hint omitted; will infer binary from non-text
+        source: {'type': 'embedded', 'bytes': binData},
       );
       final binAsset = await manager.load(binCfg);
       expect(binAsset.bytes, isNotNull);
       expect(binAsset.bytes, Uint8List.fromList([1, 2, 3, 4]));
-      expect(binAsset.type, isIn([AssetType.binary, AssetType.unknown]));
+      expect(binAsset.type, AssetType.binary);
     });
 
     test('loads url asset via local HttpServer', () async {
@@ -278,6 +277,23 @@ void main() {
       expect(manager.get('temp_rel'), isNull);
     });
 
+    // Decoded JSON lists are List<dynamic>, and the loader used to accept
+    // only List<int>, so a byte list in a JSON document failed to load.
+    test('embedded byte lists from JSON load as bytes', () async {
+      Future<StaticAsset> fromJson(String json) => manager.load(
+        AssetConfig.fromJson(jsonDecode(json) as Map<String, dynamic>),
+      );
+
+      final data = await fromJson(
+        '{"name": "d", "source": {"type": "embedded", "data": [1, 2, 3]}}',
+      );
+      final bytes = await fromJson(
+        '{"name": "b", "source": {"type": "embedded", "bytes": [4, 5]}}',
+      );
+      expect(data.bytes, [1, 2, 3]);
+      expect(bytes.bytes, [4, 5]);
+    });
+
     test('typed getters return expected shapes', () async {
       // Embedded JSON -> getPreloadedConfig
       final cfgJson = AssetConfig(
@@ -295,7 +311,7 @@ void main() {
       final binData = base64.encode([10, 11, 12]);
       final cfgBin = AssetConfig(
         name: 'cfg_bin',
-        source: {'type': 'embedded', 'data': binData},
+        source: {'type': 'embedded', 'bytes': binData},
       );
       await manager.preloadBatch([cfgBin]);
       final bin = manager.getPreloadedBinary('cfg_bin');
