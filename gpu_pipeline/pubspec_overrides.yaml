@@ -1,0 +1,11 @@
+dependency_overrides:
+  gpu_tensor:
+    path: ../gpu_tensor
+  minigpu:
+    path: ../minigpu
+  minigpu_web:
+    path: ../minigpu_web
+  minigpu_ffi:
+    path: ../minigpu_ffi
+  minigpu_platform_interface:
+    path: ../minigpu_platform_interface

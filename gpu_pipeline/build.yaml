@@ -1,0 +1,21 @@
+targets:
+  $default:
+    builders:
+      build_web_compilers:entrypoint:
+        generate_for:
+          - web/**.dart
+          - lib/**.dart          
+        dev_options:
+          compilers:
+            dartdevc:
+        release_options:
+          compilers:
+            dart2js:
+              args:
+                - O2
+            dart2wasm:
+              args:
+                - O3
+      build_web_compilers:ddc_modules:
+        options:
+          strategy: fine  
