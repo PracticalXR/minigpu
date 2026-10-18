@@ -10,7 +10,9 @@
 # versions and resolve locally via the committed pubspec_overrides.yaml (path
 # deps; no melos / workspace). `flutter pub get --no-example` skips the nested
 # example demo packages during resolution — the analyze job only needs each
-# library's own graph.
+# library's own graph. A committed override must point inside this repo: CI
+# checks out minigpu alone, so a path into a sibling checkout (../../miniAV)
+# fails resolution. Packages from other repos resolve from pub.dev.
 #
 # The web C++ (emdawnwebgpu) and native builds live in web-build.yml /
 # native-build.yml; GPU unit tests need a Dawn adapter headless runners can't
@@ -72,6 +74,12 @@ jobs:
             gpu_tensor \
             gpu_pipeline \
             gpu_ml; do
+            # gpu_pipeline is a gitlink with no .gitmodules entry, so the
+            # checkout leaves its directory empty: there is nothing to analyze.
+            if [ ! -f "$pkg/pubspec.yaml" ]; then
+              echo "::warning::$pkg has no pubspec.yaml in this checkout; skipped"
+              continue
+            fi
             echo "::group::analyze $pkg"
             (
               cd "$pkg"

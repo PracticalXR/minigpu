@@ -7,11 +7,3 @@ dependency_overrides:
     path: ../minigpu_ffi
   minigpu_web:
     path: ../minigpu_web
-  miniav:
-    path: ../../miniAV/miniav
-  miniav_platform_interface:
-    path: ../../miniAV/miniav_platform_interface
-  miniav_ffi:
-    path: ../../miniAV/miniav_ffi
-  miniav_web:
-    path: ../../miniAV/miniav_web
