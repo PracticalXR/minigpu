@@ -1,5 +1,11 @@
 # minigpu
 
+## 1.9.1
+
+- Version bump for the minigpu 1.9.1 family. On the web, minigpu_web 1.9.1
+  ships an optimized release build of its wasm module: about 0.56 MB instead
+  of 13.1 MB.
+
 ## 1.9.0
 
 - `copyBuffer` copies exactly the requested elements. It no longer writes

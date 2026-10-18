@@ -1,5 +1,10 @@
 # gpu_tensor
 
+## 1.9.1
+
+- Version bump for the minigpu 1.9.1 family. No functional change in this
+  package.
+
 ## 1.9.0
 
 - Version alignment with the minigpu 1.9.0 family release.

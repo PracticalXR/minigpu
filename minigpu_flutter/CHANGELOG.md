@@ -1,3 +1,8 @@
+## 1.9.1
+
+- Version bump for the minigpu 1.9.1 family. No functional change in this
+  package.
+
 ## 1.9.0
 
 - Docs: a hot reload keeps every GPU object and does not re-run `gpu.init()`,

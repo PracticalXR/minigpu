@@ -1,5 +1,11 @@
 # minigpu_ffi CHANGELOG
 
+## 1.9.1
+
+- The web (Emscripten) build in `src/` is an optimized release build unless a
+  build type is given. Pass `-DCMAKE_BUILD_TYPE=Debug` for debug info. Native
+  builds are unchanged.
+
 ## 1.9.0
 
 - The shipped library is no longer tuned to the build machine's CPU

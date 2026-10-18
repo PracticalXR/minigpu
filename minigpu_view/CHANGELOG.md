@@ -1,5 +1,10 @@
 # minigpu_view CHANGELOG
 
+## 1.9.1
+
+- Version bump for the minigpu 1.9.1 family. No functional change in this
+  package.
+
 ## 1.9.0
 
 - YUV frames show the right colours. The conversion over-saturated chroma,

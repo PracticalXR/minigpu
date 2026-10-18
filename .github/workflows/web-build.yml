@@ -65,7 +65,10 @@ jobs:
           mkdir -p build_web
           cd build_web
           # Matches `make build_weblib`. emcmake injects the Emscripten
-          # toolchain; the explicit toolchain flag mirrors the Makefile.
+          # toolchain; the explicit toolchain flag mirrors the Makefile. The
+          # build type is explicit because a cached build_web keeps the type
+          # it was first configured with.
           emcmake cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$EMSDK/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake"
           cmake --build .

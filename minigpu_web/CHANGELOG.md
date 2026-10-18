@@ -1,5 +1,11 @@
 # minigpu_web CHANGELOG
 
+## 1.9.1
+
+- The bundled `minigpu_web.wasm` is now an optimized release build, about
+  0.56 MB instead of 13.1 MB. It no longer carries debug info, so browser
+  stack traces inside it show function numbers instead of names.
+
 ## 1.9.0
 
 - Reads put the data at the start of the output list; it used to land at the

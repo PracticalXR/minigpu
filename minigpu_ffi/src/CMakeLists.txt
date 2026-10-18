@@ -31,6 +31,12 @@ else()
 endif()
 set(WEB_OUTPUT_DIR "${TARGET_FILE_PATH}/minigpu_web/lib/web" CACHE PATH
     "Destination for generated web artifacts")
+# Dawn turns an empty build type into Debug, and a Debug wasm ships its DWARF
+# and function names, several times the size of the code itself. Web builds
+# are Release unless a type is given (-DCMAKE_BUILD_TYPE=Debug for debug info).
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 endif()
 
 # Include Additional CMake Modules

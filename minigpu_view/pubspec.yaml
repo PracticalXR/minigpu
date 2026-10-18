@@ -1,6 +1,6 @@
 name: minigpu_view
 description: Zero-copy Flutter rendering for minigpu SharedOutputTexture and miniav GPU buffers.
-version: 1.9.0
+version: 1.9.1
 repository: https://github.com/PracticalXR/minigpu/tree/master/minigpu_view
 environment:
   sdk: ^3.11.4
