@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>GPU Pipeline Encoder Demo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>canvas { image-rendering: pixelated; }</style>
+  </head>
+  <body>
+    <h3>Encoder demo (test pattern -> packet)</h3>
+    <canvas id="encCanvas" width="256" height="144"></canvas>
+    <pre id="encLog"></pre>
+
+    <script src="packages/minigpu_web/web/minigpu_web.loader.js"></script>
+    <script>
+      (function () {
+        function start() {
+          var s = document.createElement('script');
+          // Use your current build: encode_main.debug.js or encode_main.dart.js
+          s.src = 'encode_main.debug.js';
+          s.defer = true;
+          document.body.appendChild(s);
+        }
+        var loader = window._minigpu && _minigpu.loader && _minigpu.loader.load;
+        if (typeof loader === 'function') {
+          var p = loader();
+          if (p && typeof p.then === 'function') { p.then(start, start); }
+          else { start(); }
+        } else {
+          start();
+        }
+      }());
+    </script>
+  </body>
+</html>
